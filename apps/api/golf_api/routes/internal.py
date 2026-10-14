@@ -1,0 +1,122 @@
+"""Endpoints for workers (the Node exporter): claim jobs, report progress, read inputs,
+store results. Authenticated with INTERNAL_TOKEN, never exposed to browsers (the web
+proxy blocks /api/internal)."""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .. import jobs as q
+from ..db import get_db, utcnow
+from ..deps import internal_auth
+from ..errors import ApiError, not_found
+from ..models import Export, Job, Media
+from ..storage import storage, user_prefix
+
+router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(internal_auth)])
+
+
+class ClaimIn(BaseModel):
+    kinds: list[str]
+    worker: str = Field(max_length=80)
+
+
+class ProgressIn(BaseModel):
+    progress: float | None = None
+    message: str | None = Field(None, max_length=200)
+    log: str | None = None
+
+
+class CompleteIn(BaseModel):
+    result: dict = {}
+
+
+class FailIn(BaseModel):
+    error: str
+    retry: bool = True
+
+
+class ExportDoneIn(BaseModel):
+    width: int
+    height: int
+    duration: float
+
+
+@router.post("/jobs/claim")
+def claim(body: ClaimIn, db: Session = Depends(get_db)):
+    j = q.claim(db, body.kinds, body.worker)
+    if j is None:
+        return {"job": None}
+    return {"job": {**q.public(j), "payload": j.payload, "userId": j.user_id}}
+
+
+@router.post("/jobs/{job_id}/progress")
+def progress(job_id: str, body: ProgressIn):
+    if body.log:
+        q.append_log(job_id, body.log)
+    alive = q.heartbeat(job_id, body.progress, body.message)
+    return {"continue": alive}
+
+
+@router.post("/jobs/{job_id}/complete")
+def complete(job_id: str, body: CompleteIn, db: Session = Depends(get_db)):
+    j = db.get(Job, job_id)
+    if j is None:
+        raise not_found("Jobbet")
+    q.complete(db, j, body.result)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/jobs/{job_id}/fail")
+def fail(job_id: str, body: FailIn, db: Session = Depends(get_db)):
+    j = db.get(Job, job_id)
+    if j is None:
+        raise not_found("Jobbet")
+    q.fail(db, j, body.error, body.retry)
+    if j.kind == "export" and j.status in ("failed", "canceled"):
+        e = db.scalars(select(Export).where(Export.job_id == j.id)).first()
+        if e:
+            e.status = j.status
+            e.finished_at = utcnow()
+    db.commit()
+    return {"status": j.status}
+
+
+@router.get("/media/{media_id}")
+def media_path(media_id: str, db: Session = Depends(get_db)):
+    m = db.get(Media, media_id)
+    if m is None:
+        raise not_found("The file")
+    st = storage()
+    derived = {k: str(st.local_path(v)) for k, v in (m.derived or {}).items() if isinstance(v, str) and k != "thumbs_info"}
+    return {"id": m.id, "kind": m.kind, "path": str(st.local_path(m.storage_key)), "probe": m.probe, "derived": derived}
+
+
+@router.post("/exports/{export_id}/start")
+def export_start(export_id: str, db: Session = Depends(get_db)):
+    e = db.get(Export, export_id)
+    if e is None:
+        raise not_found("Eksporten")
+    e.status = "running"
+    e.storage_key = f"{user_prefix(e.user_id)}/exports/{e.id}.mp4"
+    path = storage().local_path(e.storage_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db.commit()
+    return {"path": str(path)}
+
+
+@router.post("/exports/{export_id}/done")
+def export_done(export_id: str, body: ExportDoneIn, db: Session = Depends(get_db)):
+    e = db.get(Export, export_id)
+    if e is None or not e.storage_key:
+        raise not_found("Eksporten")
+    if not storage().exists(e.storage_key):
+        raise ApiError(409, "missing_output", "The export file was not found.")
+    e.size = storage().size(e.storage_key)
+    e.width, e.height, e.duration = body.width, body.height, body.duration
+    e.status, e.finished_at = "succeeded", utcnow()
+    db.commit()
+    return {"ok": True, "size": e.size}

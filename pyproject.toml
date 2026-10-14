@@ -1,0 +1,34 @@
+[tool.ruff]
+line-length = 170
+target-version = "py311"
+extend-exclude = ["apps/api/alembic/versions", ".venv", "node_modules"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E701", "E702", "E731", "B008", "B905"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shottracer", "golf_api", "golf_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python", "apps/api/tests", "apps/worker/tests"]
+pythonpath = [".", "apps/api", "apps/worker"]
+markers = ["slow: needs real video decoding and the detector weights", "gpu: needs a CUDA GPU"]
+addopts = "-m 'not slow'"
+
+[tool.pyright]
+include = ["shottracer", "apps/api/golf_api", "apps/worker/golf_worker"]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportMissingModuleSource = false
+reportAttributeAccessIssue = "warning"
+reportOptionalMemberAccess = "warning"
+reportArgumentType = "warning"
+reportCallIssue = "warning"
+reportIndexIssue = "warning"
+reportOptionalSubscript = "warning"
+reportReturnType = "warning"
+reportPossiblyUnbound = "warning"

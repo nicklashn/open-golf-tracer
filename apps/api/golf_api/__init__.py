@@ -1,0 +1,1 @@
+"""Open Golf Tracer API."""

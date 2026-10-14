@@ -1,0 +1,3 @@
+# The worker reuses the engine (../../requirements.txt) and the API package (../api/requirements.txt).
+-r ../../requirements.txt
+-r ../api/requirements.txt

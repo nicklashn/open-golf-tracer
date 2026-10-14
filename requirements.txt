@@ -1,0 +1,10 @@
+# PyTorch with CUDA 12.8 (RTX 50-series needs cu128+):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch
+torchvision
+rfdetr>=1.11       # default ball/person detector (Apache-2.0)
+truststore         # OS certificate store for the RF-DETR weights download
+opencv-python
+numpy
+scipy
+numba

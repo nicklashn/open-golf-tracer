@@ -1,0 +1,17 @@
+node_modules
+.next
+dist
+.venv
+data
+models
+assets
+playwright-report
+test-results
+package-lock.json
+apps/web/public
+packages/schema/json
+tests/out
+*.md
+*.py
+*.yml
+*.yaml

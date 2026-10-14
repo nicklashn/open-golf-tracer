@@ -1,0 +1,169 @@
+# Open Golf Tracer
+
+A web editor for golf videos with an automatic, broadcast-style shot tracer. Upload a video and
+the app finds every shot, draws the ball flight in 3D and lets you adjust it with handles that
+refit the physics live. Add text, stat cards and templates, cut on the timeline, make slow-mo and
+one short per shot, and export to Shorts, Reels, TikTok and YouTube – with HDR and audio kept.
+
+Everything runs locally on your own machine. Your videos never leave it. Free and open source (MIT).
+
+![Before/after](docs/hero.jpg)
+
+## Requirements
+
+- **Python 3.11+**
+- **Node.js 20.11+**
+- **FFmpeg** on your `PATH` (Windows: `winget install Gyan.FFmpeg`, macOS: `brew install ffmpeg`,
+  Linux: `apt install ffmpeg`)
+- An NVIDIA graphics card makes analysis and export fast, but is not required.
+
+## Getting started
+
+### Windows
+
+1. Double-click **`setup.bat`**. It creates the Python environment (with CUDA PyTorch if there is an
+   NVIDIA card), installs packages, downloads the ball detector weights (RF-DETR), prepares the
+   database and copies `.env.example` to `.env`.
+2. Double-click **`start.bat`**. The first time (and after a `git pull`), the web app is built – about
+   a minute. The browser then opens at <http://localhost:3000>.
+3. Click **"Try a sample video"** or upload your own.
+
+Close the window to stop the app.
+
+### macOS / Linux
+
+```
+./setup.sh
+npm run build && node scripts/dev.mjs --prod --open
+```
+
+Stop it with Ctrl+C. Run `npm run build` again after pulling new code.
+
+Your data (database, videos, exports) lives in `data/`.
+
+## No login – it only listens on this PC
+
+Open Golf Tracer is for the person at the PC it runs on: there are no accounts, no sign-up and no
+login. Open it and start. Because anyone who can reach the app can see and change every project,
+it only listens on `127.0.0.1` by default, so other devices cannot reach it.
+
+### Use it from another device on your network / a GPU PC
+
+Want to edit from your laptop while a desktop with a big GPU does the work? Run the app on the
+GPU PC and open it to your network in its `.env`:
+
+```
+LISTEN_HOST=0.0.0.0
+```
+
+Then open `http://<ip-of-that-pc>:3000` on the other device. Opening it by a name instead of an IP
+(e.g. `http://mypc.local:3000`)? Add the name: `ALLOWED_HOSTS=mypc.local` (comma separated for
+several). Other names are refused.
+
+> **Warning:** there is still no login. Everyone on the network can see, change and delete all
+> projects. Only do this on a network you trust (your home network) – never on public Wi-Fi or
+> directly on the internet. The API itself always stays on `127.0.0.1`; the web app proxies to it.
+
+## Configuration
+
+Everything has sensible defaults, and nothing has to be set. To change something, edit `.env`
+(setup copies it from [`.env.example`](.env.example), which explains every option):
+
+| Variable | What it does |
+|---|---|
+| `DATA_DIR` | Where the database, videos and exports are stored (default `./data`) |
+| `MAX_UPLOAD_BYTES`, `MAX_VIDEO_SECONDS` | Largest upload (default 20 GB) and longest video (default 2 hours) |
+| `GOLF_DETECTOR` | Ball detector: `rfdetr` (default), `yolo` or `blob` |
+| `GOLF_HDR_TONEMAP` | `1` tone-maps HDR videos to SDR before analysis |
+| `PROXY_CODEC` | Editor preview codec: `h264` (default) or `vp9` |
+| `EXPORT_CPU` | `1` forces CPU encoding even when a GPU encoder exists |
+| `NEXT_PUBLIC_MAP_SATELLITE` | Satellite map in "Measure on map": empty = auto, `1` = always, `0` = never |
+| `LISTEN_HOST`, `ALLOWED_HOSTS` | Network access, see above |
+| `LOG_LEVEL` | `INFO` by default |
+
+Restart the app after changing `.env` (rebuild with `npm run build` after changing a
+`NEXT_PUBLIC_` variable).
+
+## Features
+
+- **Analysis:** every shot in a video is found from the strike sound + ball detection (also without
+  audio), the ball is tracked in flight and a physical trajectory is fitted. Progress is shown live.
+- **Tracer editing:** drag the start, apex and landing; set club, carry, curve, flight time and timing.
+  The physics refits in under 16 ms. Six styles + your own presets; the default looks like modern
+  shot tracer clips (soft start, red to gold).
+- **Hole and course from GPS:** the video's location is looked up in OpenStreetMap – course, hole, par
+  and distance to the green. The distance keeps the estimate realistic (an approach shot can't become 250 m).
+- **Measure on map:** the tee is taken from the video's GPS and the landing is suggested along the hole;
+  click or drag, and the distance becomes the shot's carry. The hole can be shown as a graphic (course map).
+- **Whole round:** pick several clips at once and they are merged into one project in the order they
+  were filmed.
+- **Make video:** one click gives a finished YouTube video (title, hole info, numbers, course map;
+  vertical clips on a blurred background), one highlight short of all shots, or one short per shot –
+  each as a new project.
+- **Graphics:** text, titles, stat cards, lower thirds, shapes, images/logos, with keyframes and
+  in/out animations. Templates (Range session, Minimal, TV broadcast, Hole in one, Swing, Neon).
+- **Timeline:** multiple tracks, trim, split, ripple, speed, freeze frame, audio and music.
+- **Formats:** 16:9, 9:16, 1:1, 4:5 with automatic reframing that follows the ball, or the whole video
+  on a blurred copy of itself.
+- **Export:** presets for Shorts/Reels/TikTok, YouTube 1080p/4K and original; 30/60 fps; HDR kept or
+  tone-mapped; queue with progress.
+- **Settings:** language, units, theme and a data export of all your projects. Every feature is free.
+- English and Danish, light and dark theme, keyboard shortcuts (`?` in the editor), WCAG AA.
+
+## Licence
+
+Open Golf Tracer is open source under the **MIT licence** – see [LICENSE](LICENSE). You may use,
+modify, share and build on the code, commercially too. Contributions are welcome: see
+[CONTRIBUTING.md](CONTRIBUTING.md). Third-party licences (including the ball detector – RF-DETR,
+YOLO – and how to switch it): [docs/licensing.md](docs/licensing.md).
+
+## Development
+
+```
+npm run dev          # API :8000, worker, exporter and web :3000 with hot reload
+npm run check        # eslint + prettier + tsc + vitest
+npm run test:py      # pytest (lint: .venv/bin/ruff check . && .venv/bin/pyright)
+npx playwright test  # parity + e2e (needs the app running on :3000)
+```
+
+| Command | Purpose |
+|---|---|
+| `npm run demo` | Draws the sample video and analyses it |
+| `npm run brand` | Favicon, app icons and manifest from the vector sources |
+| `npm run gen:schema` | JSON Schema from the zod schema (used by the API for validation) |
+| `python scripts/make_static_fonts.py` | Static font versions for the renderer |
+
+Python tests: `.venv/Scripts/python -m pytest` (slow tests with real video decoding: `-m slow`).
+Put your own test videos in `videos/` – they are not committed.
+
+How the parts fit together: [docs/architecture.md](docs/architecture.md) (in Danish for now).
+
+## The engine on its own (without the web app)
+
+The original command line still works. Drag one or more videos onto **`Tracer.bat`**, or:
+
+```
+.venv\Scripts\python -m shottracer VIDEO [VIDEO ...] [--carry M] [--club CLUB] [--stats] [--color #ffcc00] [--debug]
+.venv\Scripts\python -m shottracer.analyze_video VIDEO --out shots.json   # analysis only, as JSON
+```
+
+| Option | Meaning |
+|---|---|
+| `-o PATH` | output file (one video) or output folder |
+| `--carry M` | known carry in metres – scales the 3D flight so apex/ball speed fit |
+| `--club CLUB` | `driver`, `wood`, `longIron`, `midIron`, `shortIron` or `wedge` – keeps the estimate realistic |
+| `--stats` | shows carry / apex / ball speed / launch after landing |
+| `--open` | shows the finished video in Explorer |
+| `--color #ffcc00` | tracer colour |
+| `--ball X,Y` | the ball's position at address, if it isn't found automatically |
+| `--impact SEC` | time of impact, if it isn't found automatically |
+| `--slowmo F` | the video is F times slower than real time |
+| `--no-hold` | don't extend the video so the ball has time to land |
+| `--debug` | saves `_debug.png` and `_debug.json` |
+
+Filming tip: put the camera behind the ball (down-the-line) and keep it as still as possible.
+
+The ball detector is RF-DETR; setup downloads the weights to `%USERPROFILE%\.roboflow\models`
+(the Windows certificate store is used, so antivirus that intercepts HTTPS doesn't block the download).
+The YOLO detector can still be chosen with `GOLF_DETECTOR=yolo` or `--model yolo26x.pt` after
+`pip install -r requirements-yolo.txt` (AGPL-3.0, see [docs/licensing.md](docs/licensing.md)).
