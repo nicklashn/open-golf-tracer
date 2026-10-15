@@ -47,6 +47,12 @@ programmer** og linker ikke til dem, så appens egen kode bliver ikke GPL. Distr
 selv FFmpeg-binæren sammen med appen, skal GPL-vilkårene for den binær overholdes (kildekode-
 tilbud, licenstekst). Repoet indeholder ingen FFmpeg-binær; man installerer den selv.
 
+**Windows-installeren** (`installer/`) medbringer gyan.dev's "release essentials"-build (GPL-3.0)
+i `runtime\ffmpeg` sammen med dens `LICENSE` og `README.txt`, som peger på kildekoden og
+build-opskriften. Det er en separat binær ved siden af appen (aggregation), så MIT-koden påvirkes
+ikke. Node.js (MIT) og uv (MIT/Apache-2.0) følger også med; Python (PSF) og PyTorch (BSD) hentes
+under installationen.
+
 H.264/HEVC er desuden patentbelagte formater (MPEG LA/Access Advance). Hardware-encoderne
 (NVENC, Quick Sync, VideoToolbox) er licenseret via hardwaren/OS'et.
 

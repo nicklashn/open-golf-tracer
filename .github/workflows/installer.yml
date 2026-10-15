@@ -1,0 +1,38 @@
+name: Windows installer
+
+# Builds OpenGolfTracer-Setup-<version>.exe. A pushed tag (v0.2.0) attaches it to a GitHub release;
+# a manual run or a pull request that changes the installer keeps it as a workflow artifact.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths: ['installer/**', '.github/workflows/installer.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { '' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File installer\build.ps1 -Version "$version"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: installer/dist/*.exe
+      - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: installer/dist/*.exe
