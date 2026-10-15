@@ -69,6 +69,15 @@ function Expand-Single([string]$Zip, [string]$Dest) {
   if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
 }
 
+# Inno Setup only notices a missing [CustomMessages] entry at run time, on the user's PC.
+$iss = Get-Content (Join-Path $PSScriptRoot 'OpenGolfTracer.iss') -Raw -Encoding UTF8
+$used = [regex]::Matches($iss, "CustomMessage\('(\w+)'") | ForEach-Object { $_.Groups[1].Value }
+$used += 1..4 | ForEach-Object { "PrepareStep$_" } # built as 'PrepareStep' + Step
+$missing = $used | Sort-Object -Unique | Where-Object { $_ -ne 'PrepareStep' } | ForEach-Object {
+  foreach ($lang in 'en', 'da') { if ($iss -notmatch "(?m)^$lang\.$_=") { "$lang.$_" } }
+}
+if ($missing) { throw "OpenGolfTracer.iss uses custom messages that are not defined: $($missing -join ', ')" }
+
 $iscc = @(
   "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
   "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
