@@ -23,3 +23,7 @@ data/
 .pytest_cache/
 .mypy_cache/
 !assets/demo/demo.mp4
+
+# Windows installer build output
+installer/build/
+installer/dist/

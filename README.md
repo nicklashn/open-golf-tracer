@@ -9,6 +9,27 @@ Everything runs locally on your own machine. Your videos never leave it. Free an
 
 ![Before/after](docs/hero.jpg)
 
+## Install on Windows (easiest)
+
+1. Download **`OpenGolfTracer-Setup-<version>.exe`** from
+   [Releases](https://github.com/nicklashn/open-golf-tracer/releases).
+2. Double-click it. Windows may say *"Windows protected your PC"* because the installer is not
+   signed – click **More info → Run anyway**. No admin rights are needed.
+3. At the end, a window downloads the analysis engine (Python, PyTorch and the ball detector,
+   1–3 GB). Keep it open; it takes 5–15 minutes the first time.
+4. Start **Open Golf Tracer** from the Start menu or the desktop. The browser opens by itself;
+   close the black window to stop the app.
+
+Nothing else has to be installed – Node.js, Python and FFmpeg come with it. Your projects and
+videos are kept in `%LOCALAPPDATA%\Programs\Open Golf Tracer\data`, also when you update.
+Uninstall it under *Settings → Apps*; you are asked whether your projects should be deleted too.
+
+To build the installer yourself: `powershell -ExecutionPolicy Bypass -File installer\build.ps1`
+(needs Git and [Inno Setup 6](https://jrsoftware.org/isinfo.php): `winget install JRSoftware.InnoSetup`).
+Pushing a `v*` tag builds it on GitHub Actions and attaches it to the release.
+
+The steps below are for running from the source code.
+
 ## Requirements
 
 - **Python 3.11+**

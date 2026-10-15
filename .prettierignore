@@ -15,3 +15,5 @@ tests/out
 *.py
 *.yml
 *.yaml
+installer/build
+installer/dist
