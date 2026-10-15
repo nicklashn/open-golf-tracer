@@ -134,7 +134,7 @@ Remove-Item (Join-Path $stage 'runtime\python\Lib\EXTERNALLY-MANAGED') -ErrorAct
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 Invoke-Native $stagePy @('-m', 'pip', 'install', '--no-cache-dir', '--no-warn-script-location',
   '-r', (Join-Path $stage 'apps\worker\requirements.txt'))
-Invoke-Native $stagePy @('-c', 'import onnxruntime, cv2, numba, fastapi; print('  onnxruntime', onnxruntime.__version__, onnxruntime.get_available_providers())')
+Invoke-Native $stagePy @('-c', 'import onnxruntime as ort, cv2, numba, fastapi; print(ort.__version__, ort.get_available_providers())')
 
 Step 'Ball detector (RF-DETR as ONNX)'
 $detect = Get-Content (Join-Path $stage 'shottracer\detect.py') -Raw
