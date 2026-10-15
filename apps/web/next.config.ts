@@ -26,7 +26,7 @@ const config: NextConfig = {
   devIndicators: false,
   // Linting runs once for the whole monorepo (npm run lint), not again inside next build.
   eslint: { ignoreDuringBuilds: true },
-  transpilePackages: ['@golf/schema', '@golf/physics', '@golf/render'],
+  transpilePackages: ['@golf/schema', '@golf/physics', '@golf/render', '@golf/compose'],
   // proxyTimeout: the API proxy otherwise cuts requests at 30 s, and validating a big upload
   // (ffprobe on a just-written file, which antivirus may scan first) can take longer.
   experimental: { optimizePackageImports: ['lucide-react'], proxyTimeout: 600_000 },
