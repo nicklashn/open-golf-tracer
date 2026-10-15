@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/misc';
 import { api } from '@/lib/api';
 import { useI18n } from '@/lib/i18n/client';
 import { useMe, type Me } from '@/lib/me';
+import { AiSettingsForm } from './AiSettings';
 import { useTheme } from './AppRoot';
 
 function Section({ id, title, children, lead }: { id?: string; title: string; lead?: ReactNode; children: ReactNode }) {
@@ -80,6 +81,10 @@ export function SettingsPage() {
             />
           </div>
         </div>
+      </Section>
+
+      <Section id="ai" title={t.ai.title} lead={t.ai.lead}>
+        <AiSettingsForm />
       </Section>
 
       <Section id="data" title={t.settings.data} lead={t.settings.exportDataLead}>

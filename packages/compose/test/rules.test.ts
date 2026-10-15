@@ -1,7 +1,7 @@
 import { migrateProject, type Project } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
 import { compose, planFromRules, prepare, readPreference, resolveAnswers, summarize, summaryText, VideoPlan } from '../src';
-import { roundProject } from './fixtures';
+import { demoProject, roundProject } from './fixtures';
 
 const params = [59.38, 0.557, 0.2887, 0.002126, -0.0008, 0.2177, -0.4986, 7.6239, 0.0059];
 const shot = (id: string, mediaId: string, impactTime: number, extra: Record<string, unknown> = {}) => ({
@@ -71,6 +71,10 @@ describe('the round summary (all an AI sees)', () => {
     const text = summaryText(s);
     expect(text.split('\n')).toHaveLength(1 + 3 + 3);
     expect(text).not.toContain('params');
+    // No float noise (it only costs tokens): the demo's impact at 2.3985 s reads t=2.4.
+    const demo = summaryText(summarize(demoProject()));
+    expect(demo).toContain('t=2.4 ');
+    expect(demo).not.toMatch(/\d\.\d{4,}/);
   });
 });
 

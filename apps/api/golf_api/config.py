@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     allowed_hosts: str = Field("", alias="ALLOWED_HOSTS")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 
+    # Optional AI model for "Make a video for me" (none | ollama | openai-compatible | anthropic).
+    # They can be overridden under Settings → AI; the key never leaves the server.
+    ai_provider: str = Field("none", alias="AI_PROVIDER")
+    ai_model: str = Field("", alias="AI_MODEL")
+    ai_base_url: str = Field("", alias="AI_BASE_URL")
+    ai_api_key: str = Field("", alias="AI_API_KEY")
+    ai_max_tokens: int = Field(8000, alias="AI_MAX_TOKENS")
+
     @property
     def is_dev(self) -> bool:
         return self.env != "production"

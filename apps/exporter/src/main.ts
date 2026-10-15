@@ -6,7 +6,7 @@
 import { hostname } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { InternalApi } from './api';
-import { handleCompose } from './compose-job';
+import { AiError, handleAiTest, handleCompose } from './compose-job';
 import { Canceled, runExport } from './run';
 import type { MediaFile } from './plan';
 
@@ -98,7 +98,18 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
 
 log('exporter starter', { worker, api: api.base, lanes: ['export', 'compose'] });
 void lane(['export'], handle);
-void lane(['compose'], async (job) => {
-  const outcome = await handleCompose(api, job);
-  if (outcome !== 'waiting') log(`video ${outcome}`, { job: job.id });
+void lane(['compose', 'ai_test'], async (job) => {
+  try {
+    if (job.kind === 'ai_test') return await handleAiTest(api, job);
+    const outcome = await handleCompose(api, job, log);
+    if (outcome !== 'waiting') log(`video ${outcome}`, { job: job.id });
+  } catch (e) {
+    // The AI said no, or cannot be reached: the user has to change something, so no retry.
+    if (e instanceof AiError) {
+      log('ai failed', { job: job.id, code: e.code, error: e.message });
+      await api.fail(job.id, e.message, false);
+      return;
+    }
+    throw e;
+  }
 });

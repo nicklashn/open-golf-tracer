@@ -15,6 +15,7 @@ import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Field, Textarea } from '@/components/ui/input';
 import { ProgressBar } from '@/components/ui/misc';
 import { api, errorMessage } from '@/lib/api';
+import { aiPrivacy, type AiSettingsInfo } from '@/components/app/AiSettings';
 import { useJobEvents, type JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
@@ -25,6 +26,8 @@ interface Result {
   projects?: { id: string; name: string }[];
   description?: string;
   notes?: string[];
+  ai?: { provider: string; model: string } | null;
+  usage?: { calls: number; inputTokens: number; outputTokens: number } | null;
 }
 
 export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
@@ -46,6 +49,11 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [ai, setAi] = useState<AiSettingsInfo | null>(null);
+
+  useEffect(() => {
+    if (open) void api<AiSettingsInfo>('/ai/settings').then(setAi, () => setAi(null));
+  }, [open]);
 
   // A fresh dialog starts with every clip picked.
   useEffect(() => {
@@ -122,7 +130,9 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
                   <Textarea {...p} value={preference} onChange={(e) => setPreference(e.target.value)} placeholder={T.placeholder} maxLength={1000} rows={3} />
                 )}
               </Field>
-              <p className="text-[12px] text-fg-muted">{T.privacyNone}</p>
+              <p className="text-[12px] text-fg-muted" data-testid="auto-privacy">
+                {aiPrivacy(t, ai?.effective)}
+              </p>
               {error ? (
                 <p role="alert" className="text-sm text-accent-fg">
                   {error}
@@ -316,6 +326,11 @@ function Done({ result, onAgain }: { result: Result; onAgain: () => void }) {
             <li key={n}>{n}</li>
           ))}
         </ul>
+      ) : null}
+      {result.usage && result.ai ? (
+        <p className="tabular text-[12px] text-fg-muted" data-testid="auto-tokens">
+          {f(T.tokensUsed, { calls: result.usage.calls, input: result.usage.inputTokens, output: result.usage.outputTokens, model: result.ai.model })}
+        </p>
       ) : null}
       {result.description ? (
         <Field label={T.description}>

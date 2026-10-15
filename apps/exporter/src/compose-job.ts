@@ -3,7 +3,21 @@
  * round, makes a plan, stops to ask when the rules found doubts, and saves the finished
  * video(s) as new projects.
  */
-import { compose, planFromRules, summarize, VideoPlan, type LayerNames, type PlanAnswers, type RoundSummary } from '@golf/compose';
+import {
+  AiError,
+  compose,
+  noUsage,
+  planFromRules,
+  planWithAI,
+  testConnection,
+  summarize,
+  templatesFor,
+  VideoPlan,
+  type AiConfig,
+  type AiUsage,
+  type LayerNames,
+  type PlanAnswers,
+} from '@golf/compose';
 import { migrateProject, type Project } from '@golf/schema';
 import type { InternalApi } from './api';
 
@@ -19,12 +33,12 @@ export interface ComposePayload {
   answers?: PlanAnswers | null;
   /** The plan the questions came from, sent back with the answers. */
   plan?: unknown;
+  /** Tokens the AI used before the job stopped to ask (the ceiling is per video). */
+  usage?: AiUsage | null;
 }
 
-/** Makes the plan; the rules here, an AI model in a later version. */
-export type Planner = (summary: RoundSummary, preference: string, locale: Locale) => Promise<{ plan: VideoPlan }>;
-
-export const rulePlanner: Planner = async (summary, preference, locale) => ({ plan: planFromRules(summary, preference, locale) });
+/** The AI model for a job (from the API: the user's settings, else the .env defaults). */
+export type JobAiConfig = AiConfig & { source?: string };
 
 /** How long a video waits between looks at the analysis. */
 const WAIT_S = 5;
@@ -46,12 +60,27 @@ export function onlyClips(doc: Project, mediaIds: string[] | undefined): Project
   });
 }
 
-type Api = Pick<InternalApi, 'jobProject' | 'defer' | 'awaitAnswers' | 'derive' | 'progress' | 'complete'>;
+type Api = Pick<InternalApi, 'jobProject' | 'jobAi' | 'defer' | 'awaitAnswers' | 'derive' | 'progress' | 'complete'>;
+type Log = (msg: string, extra: Record<string, unknown>) => void;
+
+const T = {
+  da: {
+    byModel: (m: string) => `Planen er lavet af AI-modellen ${m}.`,
+    fellBack: 'AI-svaret kunne ikke bruges (to gange), så planen er lavet af faste regler.',
+    none: 'Ingen slag blev tilbage, så der blev ikke lavet en video.',
+  },
+  en: {
+    byModel: (m: string) => `The plan was made by the AI model ${m}.`,
+    fellBack: "The AI's answer could not be used (twice), so the plan was made by fixed rules.",
+    none: 'No shots were left, so no video was made.',
+  },
+};
 
 export async function handleCompose(
   api: Api,
   job: { id: string; payload: Record<string, unknown> },
-  planner: Planner = rulePlanner,
+  log: Log = () => {},
+  doFetch?: typeof fetch,
 ): Promise<'waiting' | 'asked' | 'done'> {
   const p = job.payload as unknown as ComposePayload;
   const locale: Locale = p.locale === 'da' ? 'da' : 'en';
@@ -64,12 +93,33 @@ export async function handleCompose(
   const doc = onlyClips(migrateProject(project.document), p.media_ids);
   const summary = summarize(doc);
   const stored = p.plan ? VideoPlan.safeParse(p.plan) : null;
-  const plan = stored?.success ? stored.data : (await planner(summary, p.preference ?? '', locale)).plan;
+  const rules = planFromRules(summary, p.preference ?? '', locale);
+  const ai = (await api.jobAi(job.id)) as JobAiConfig;
+  const useAi = ai.provider !== 'none';
+  let usage: AiUsage = p.usage ?? noUsage();
+  // The rules' first note says "no AI"; with a model it says which one, or that its answer was unusable.
+  const ruleNotes = rules.notes.slice(1);
+  const withAi = async (base: VideoPlan, answers: PlanAnswers | null): Promise<VideoPlan> => {
+    const out = await planWithAI(ai, summary, p.preference ?? '', base, answers, {
+      allowedTemplates: templatesFor(),
+      used: usage,
+      fetch: doFetch,
+      log,
+    });
+    usage = out.usage;
+    log('ai usage', { job: job.id, provider: ai.provider, model: ai.model, ...usage });
+    return out.fellBack ? { ...base, notes: [T[locale].fellBack, ...ruleNotes] } : { ...out.plan, notes: [T[locale].byModel(ai.model), ...out.plan.notes] };
+  };
+
+  // First pass: one call for the plan. After the answers: one more call, only if there were questions.
+  let plan: VideoPlan;
+  if (stored?.success) plan = useAi && p.answers && stored.data.questions.length ? await withAi(stored.data, p.answers) : stored.data;
+  else plan = useAi ? await withAi(rules, null) : rules;
 
   if (plan.questions.length && !p.answers && !p.yes) {
     await api.awaitAnswers(
       job.id,
-      { plan, questions: plan.questions, notes: plan.notes, title: plan.title, kind: plan.kind },
+      { plan, questions: plan.questions, notes: plan.notes, title: plan.title, kind: plan.kind, usage: useAi ? usage : null },
       locale === 'da' ? 'Venter på dine svar' : 'Waiting for your answers',
     );
     return 'asked';
@@ -88,9 +138,18 @@ export async function handleCompose(
     title: plan.title,
     description: plan.description ?? '',
     // Nothing left to show (every shot left out): say so instead of an empty project.
-    notes: videos.length
-      ? plan.notes
-      : [...plan.notes, locale === 'da' ? 'Ingen slag blev tilbage, så der blev ikke lavet en video.' : 'No shots were left, so no video was made.'],
+    notes: videos.length ? plan.notes : [...plan.notes, T[locale].none],
+    ai: useAi ? { provider: ai.provider, model: ai.model } : null,
+    usage: useAi ? usage : null,
   });
   return 'done';
 }
+
+/** "Test connection" from Settings → AI: one tiny call with the user's model. */
+export async function handleAiTest(api: Pick<InternalApi, 'jobAi' | 'complete'>, job: { id: string }, doFetch?: typeof fetch): Promise<void> {
+  const ai = (await api.jobAi(job.id)) as JobAiConfig;
+  const t = await testConnection(ai, doFetch);
+  await api.complete(job.id, { provider: ai.provider, model: t.model, usage: t.usage, ms: t.ms });
+}
+
+export { AiError };
