@@ -15,12 +15,11 @@ Everything runs locally on your own machine. Your videos never leave it. Free an
    [Releases](https://github.com/nicklashn/open-golf-tracer/releases).
 2. Double-click it. Windows may say *"Windows protected your PC"* because the installer is not
    signed – click **More info → Run anyway**. No admin rights are needed.
-3. At the end, the installer downloads the analysis engine (PyTorch and the ball detector,
-   1–3 GB) and shows its progress. It takes 5–15 minutes the first time.
-4. Start **Open Golf Tracer** from the Start menu or the desktop. The browser opens by itself;
+3. Start **Open Golf Tracer** from the Start menu or the desktop. The browser opens by itself;
    close the black window to stop the app.
 
-Nothing else has to be installed – Node.js, Python and FFmpeg come with it. Your projects and
+Nothing else has to be installed and nothing is downloaded: Node.js, Python, FFmpeg and the ball
+detector come with it. Your projects and
 videos are kept in `%LOCALAPPDATA%\Programs\Open Golf Tracer\data`, also when you update.
 Uninstall it under *Settings → Apps*; you are asked whether your projects should be deleted too.
 
@@ -36,15 +35,15 @@ The steps below are for running from the source code.
 - **Node.js 20.11+**
 - **FFmpeg** on your `PATH` (Windows: `winget install Gyan.FFmpeg`, macOS: `brew install ffmpeg`,
   Linux: `apt install ffmpeg`)
-- An NVIDIA graphics card makes analysis and export fast, but is not required.
+- A graphics card makes analysis and export faster, but is not required. On Windows the ball
+  detector uses any GPU through DirectML (NVIDIA, AMD, Intel); no PyTorch or CUDA needed.
 
 ## Getting started
 
 ### Windows
 
-1. Double-click **`setup.bat`**. It creates the Python environment (with CUDA PyTorch if there is an
-   NVIDIA card), installs packages, downloads the ball detector weights (RF-DETR), prepares the
-   database and copies `.env.example` to `.env`.
+1. Double-click **`setup.bat`**. It creates the Python environment, installs packages, downloads the
+   ball detector (RF-DETR as ONNX, 120 MB), prepares the database and copies `.env.example` to `.env`.
 2. Double-click **`start.bat`**. The first time (and after a `git pull`), the web app is built – about
    a minute. The browser then opens at <http://localhost:3000>.
 3. Click **"Try a sample video"** or upload your own.
@@ -94,7 +93,7 @@ Everything has sensible defaults, and nothing has to be set. To change something
 |---|---|
 | `DATA_DIR` | Where the database, videos and exports are stored (default `./data`) |
 | `MAX_UPLOAD_BYTES`, `MAX_VIDEO_SECONDS` | Largest upload (default 20 GB) and longest video (default 2 hours) |
-| `GOLF_DETECTOR` | Ball detector: `rfdetr` (default), `yolo` or `blob` |
+| `GOLF_DETECTOR` | Ball detector: `rfdetr` (default, ONNX), `rfdetr-torch`, `yolo` or `blob` |
 | `GOLF_HDR_TONEMAP` | `1` tone-maps HDR videos to SDR before analysis |
 | `PROXY_CODEC` | Editor preview codec: `h264` (default) or `vp9` |
 | `EXPORT_CPU` | `1` forces CPU encoding even when a GPU encoder exists |
@@ -184,7 +183,11 @@ The original command line still works. Drag one or more videos onto **`Tracer.ba
 
 Filming tip: put the camera behind the ball (down-the-line) and keep it as still as possible.
 
-The ball detector is RF-DETR; setup downloads the weights to `%USERPROFILE%\.roboflow\models`
-(the Windows certificate store is used, so antivirus that intercepts HTTPS doesn't block the download).
+The ball detector is RF-DETR Large, exported to ONNX and run with ONNX Runtime (DirectML on Windows,
+CPU elsewhere). Setup downloads it to `models/rf-detr-large.onnx` (`python scripts/fetch_model.py`;
+the Windows certificate store is used, so antivirus that intercepts HTTPS doesn't block the download).
+On the reference clip it gives the same shots and numbers as RF-DETR in PyTorch, which is still
+available as `GOLF_DETECTOR=rfdetr-torch` after `pip install -r requirements-torch.txt`
+(`scripts/export_onnx.py` makes the ONNX file from it).
 The YOLO detector can still be chosen with `GOLF_DETECTOR=yolo` or `--model yolo26x.pt` after
 `pip install -r requirements-yolo.txt` (AGPL-3.0, see [docs/licensing.md](docs/licensing.md)).

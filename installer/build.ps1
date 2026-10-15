@@ -7,6 +7,8 @@
   2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and Python 3.12 (python-build-standalone,
      fetched with uv), checking their SHA-256. Python is a plain folder: no junctions, which newer
      Windows 11 builds refuse to follow for unprivileged processes (error 448).
+     The Python packages go straight into that Python, and the ball detector (RF-DETR as ONNX) into
+     models\, so the installed app needs no downloads at all.
   3. Installs the npm packages and builds the web app with that Node, so the user's PC never has to.
   4. Compiles OpenGolfTracer.iss with Inno Setup 6 (winget install JRSoftware.InnoSetup).
   Downloads are cached in installer\build\downloads.
@@ -72,8 +74,7 @@ function Expand-Single([string]$Zip, [string]$Dest) {
 # Inno Setup only notices a missing [CustomMessages] entry at run time, on the user's PC.
 $iss = Get-Content (Join-Path $PSScriptRoot 'OpenGolfTracer.iss') -Raw -Encoding UTF8
 $used = [regex]::Matches($iss, "CustomMessage\('(\w+)'") | ForEach-Object { $_.Groups[1].Value }
-$used += 1..4 | ForEach-Object { "PrepareStep$_" } # built as 'PrepareStep' + Step
-$missing = $used | Sort-Object -Unique | Where-Object { $_ -ne 'PrepareStep' } | ForEach-Object {
+$missing = $used | Sort-Object -Unique | ForEach-Object {
   foreach ($lang in 'en', 'da') { if ($iss -notmatch "(?m)^$lang\.$_=") { "$lang.$_" } }
 }
 if ($missing) { throw "OpenGolfTracer.iss uses custom messages that are not defined: $($missing -join ', ')" }
@@ -125,6 +126,21 @@ $py = Get-ChildItem $pyDir -Directory | Where-Object {
 if (-not $py) { throw "uv did not install Python 3.12 into $pyDir" }
 Write-Host "  $($py.Name)"
 Copy-Item $py.FullName (Join-Path $stage 'runtime\python') -Recurse
+
+Step 'Python packages (into the bundled Python)'
+$stagePy = Join-Path $stage 'runtime\python\python.exe'
+$env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
+Invoke-Native $stagePy @('-m', 'pip', 'install', '--no-cache-dir', '--no-warn-script-location',
+  '-r', (Join-Path $stage 'apps\worker\requirements.txt'))
+Invoke-Native $stagePy @('-c', 'import onnxruntime, cv2, numba, fastapi; print("  onnxruntime", onnxruntime.__version__, onnxruntime.get_available_providers())')
+
+Step 'Ball detector (RF-DETR as ONNX)'
+$detect = Get-Content (Join-Path $stage 'shottracer\detect.py') -Raw
+$onnxUrl = [regex]::Match($detect, 'ONNX_URL = "([^"]+)"').Groups[1].Value
+$onnxSum = [regex]::Match($detect, 'ONNX_SHA256 = "([0-9a-f]{64})"').Groups[1].Value
+if (-not $onnxUrl -or -not $onnxSum) { throw 'ONNX_URL / ONNX_SHA256 not found in shottracer\detect.py' }
+New-Item -ItemType Directory -Force (Join-Path $stage 'models') | Out-Null
+Copy-Item (Get-Verified $onnxUrl $onnxSum) (Join-Path $stage 'models\rf-detr-large.onnx')
 
 Step 'npm packages and web build'
 $env:PATH = "$(Join-Path $stage 'runtime\node');$env:PATH"

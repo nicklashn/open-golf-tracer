@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "tests" / "out"
 WEIGHTS = ROOT / "models" / "yolo26x.pt"
 HAS_YOLO = WEIGHTS.exists() and importlib.util.find_spec("ultralytics") is not None  # requirements-yolo.txt
-RFDETR_WEIGHTS = Path.home() / ".roboflow" / "models" / "rf-detr-large-2026.pth"
+RFDETR_ONNX = ROOT / "models" / "rf-detr-large.onnx"  # scripts/fetch_model.py
 
-pytestmark = pytest.mark.skipif(not (RFDETR_WEIGHTS.exists() or WEIGHTS.exists() or os.environ.get("GOLF_DETECTOR")),
+pytestmark = pytest.mark.skipif(not (RFDETR_ONNX.exists() or WEIGHTS.exists() or os.environ.get("GOLF_DETECTOR")),
                                 reason="detector weights not downloaded")
 
 

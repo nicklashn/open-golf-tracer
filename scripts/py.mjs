@@ -7,5 +7,6 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const venv = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
-const py = existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3';
+const bundled = resolve(root, 'runtime/python/python.exe'); // the Windows installer's Python
+const py = [venv, bundled].find(existsSync) ?? (process.platform === 'win32' ? 'python' : 'python3');
 process.exit(spawnSync(py, process.argv.slice(2), { stdio: 'inherit', cwd: root }).status ?? 1);

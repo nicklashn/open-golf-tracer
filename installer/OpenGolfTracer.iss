@@ -1,10 +1,9 @@
-﻿; Open Golf Tracer - Windows installer (Inno Setup 6). Build it with installer\build.ps1, which
-; prepares installer\build\stage (code, built web app, node_modules, portable Node, Python and FFmpeg)
-; and passes the version: ISCC /DAppVersion=0.1.0 OpenGolfTracer.iss
+﻿﻿; Open Golf Tracer - Windows installer (Inno Setup 6). Build it with installer\build.ps1, which
+; prepares installer\build\stage (code, built web app, node_modules, portable Node, Python with all
+; packages, FFmpeg and the ball detector) and passes the version: ISCC /DAppVersion=0.2.0 OpenGolfTracer.iss
 ;
-; Installs per user in %LOCALAPPDATA%\Programs (no admin rights). Python itself is bundled, but the
-; Python packages (PyTorch with CUDA on NVIDIA cards, the ball detector weights) are several GB, so
-; prepare.cmd downloads them at the end of the installation, behind a progress page (see [Code]).
+; Installs per user in %LOCALAPPDATA%\Programs (no admin rights). Everything is in the installer:
+; the ball detector runs as ONNX with ONNX Runtime (DirectML on any GPU), so nothing is downloaded.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -36,8 +35,6 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
-; The Python environment downloaded after the installation (CUDA PyTorch) takes about 6 GB.
-ExtraDiskSpaceRequired=6442450944
 CloseApplications=yes
 ShowLanguageDialog=auto
 
@@ -46,22 +43,6 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "da"; MessagesFile: "compiler:Languages\Danish.isl"
 
 [CustomMessages]
-en.PrepareTitle=Downloading the analysis engine
-da.PrepareTitle=Henter analysemotoren
-en.PrepareDesc=Open Golf Tracer is almost ready. The first time this takes 5-15 minutes, depending on your internet connection.
-da.PrepareDesc=Open Golf Tracer er næsten klar. Første gang tager det 5-15 minutter, afhængigt af din internetforbindelse.
-en.PrepareStep1=Step 1 of 4: Preparing...
-da.PrepareStep1=Trin 1 af 4: Gør klar...
-en.PrepareStep2=Step 2 of 4: Downloading the AI that finds the ball (the biggest part)...
-da.PrepareStep2=Trin 2 af 4: Henter den AI, der finder bolden (den største del)...
-en.PrepareStep3=Step 3 of 4: Installing the last parts...
-da.PrepareStep3=Trin 3 af 4: Installerer de sidste dele...
-en.PrepareStep4=Step 4 of 4: Fetching the ball detector...
-da.PrepareStep4=Trin 4 af 4: Henter bolddetektoren...
-en.PrepareHint=You can use your PC as usual in the meantime.
-da.PrepareHint=Du kan bruge din pc som normalt imens.
-en.PrepareFailed=Open Golf Tracer is installed, but the analysis engine could not be downloaded right now.%n%nCheck your internet connection. The download continues automatically the next time you open Open Golf Tracer.%n%nDetails: %1
-da.PrepareFailed=Open Golf Tracer er installeret, men analysemotoren kunne ikke hentes lige nu.%n%nTjek din internetforbindelse. Hentningen fortsætter automatisk, næste gang du åbner Open Golf Tracer.%n%nDetaljer: %1
 en.LaunchApp=Start Open Golf Tracer now
 da.LaunchApp=Start Open Golf Tracer nu
 en.DeleteData=Also delete your projects, videos and exports?%n%nChoose No to keep them for a later installation.
@@ -71,26 +52,23 @@ da.DeleteData=Skal dine projekter, videoer og eksporter også slettes?%n%nVælg 
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [InstallDelete]
-; An update replaces the code completely so no stale files survive. data\ (projects, videos) and
-; .venv (the Python environment, reused to make updates quick) are kept.
+; An update replaces the code and runtimes completely so no stale files survive; data\ (projects,
+; videos) is kept. .venv and prepare.cmd are left over from 0.1.x, which downloaded PyTorch (~5 GB).
 Type: filesandordirs; Name: "{app}\apps"
 Type: filesandordirs; Name: "{app}\packages"
 Type: filesandordirs; Name: "{app}\shottracer"
 Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\assets"
+Type: filesandordirs; Name: "{app}\models"
 Type: filesandordirs; Name: "{app}\node_modules"
-Type: filesandordirs; Name: "{app}\runtime\node"
-Type: filesandordirs; Name: "{app}\runtime\ffmpeg"
-Type: filesandordirs; Name: "{app}\runtime\uv"
-Type: filesandordirs; Name: "{app}\runtime\uv-cache"
-Type: filesandordirs; Name: "{app}\runtime\python"
-Type: files; Name: "{app}\.venv\.ready"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\.venv"
+Type: files; Name: "{app}\prepare.cmd"
 
 [Files]
 Source: "{#Stage}\*"; DestDir: "{app}"; Excludes: "\installer,\data,\.github,\videos,\setup.bat,\setup.sh,\start.bat,\.env"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Stage}\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist
 Source: "files\OpenGolfTracer.cmd"; DestDir: "{app}"; Flags: ignoreversion
-Source: "files\prepare.cmd"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\OpenGolfTracer.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\apps\web\public\favicon.ico"
@@ -100,74 +78,16 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\OpenGolfTracer.cmd"; WorkingD
 Filename: "{app}\OpenGolfTracer.cmd"; WorkingDir: "{app}"; Description: "{cm:LaunchApp}"; Flags: postinstall nowait skipifsilent shellexec
 
 [UninstallDelete]
-; Created after the installation (Python environment, caches, generated files).
-Type: filesandordirs; Name: "{app}\.venv"
+; Created while the app runs (Python caches, numba caches) or left over from 0.1.x.
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\apps"
 Type: filesandordirs; Name: "{app}\packages"
 Type: filesandordirs; Name: "{app}\shottracer"
 Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\node_modules"
+Type: filesandordirs; Name: "{app}\.venv"
 
 [Code]
-var
-  PreparePage: TOutputMarqueeProgressWizardPage;
-
-procedure InitializeWizard;
-begin
-  PreparePage := CreateOutputMarqueeProgressPage(CustomMessage('PrepareTitle'), CustomMessage('PrepareDesc'));
-end;
-
-function ReadFirstLine(const FileName: String): String;
-var
-  S: AnsiString;
-begin
-  Result := '';
-  if LoadStringFromFile(FileName, S) then
-    Result := Trim(String(S));
-end;
-
-{ Runs prepare.cmd hidden and shows its current step (runtime\setup-status.txt) until it writes
-  runtime\setup-result.txt. The details go to runtime\setup.log instead of a console window. }
-procedure RunPrepare;
-var
-  Dir, Step, Res: String;
-  Code, Waited: Integer;
-begin
-  Dir := ExpandConstant('{app}');
-  DeleteFile(Dir + '\runtime\setup-status.txt');
-  DeleteFile(Dir + '\runtime\setup-result.txt');
-  if not Exec(ExpandConstant('{cmd}'), '/c ""' + Dir + '\prepare.cmd" /hidden"', Dir, SW_HIDE, ewNoWait, Code) then
-    Exit;
-  PreparePage.SetText(CustomMessage('PrepareStep1'), CustomMessage('PrepareHint'));
-  PreparePage.Show;
-  try
-    Res := '';
-    Waited := 0;
-    { Give up waiting after 3 hours; the app shortcut finishes the job then. }
-    while (Res = '') and (Waited < 3 * 60 * 60 * 1000) do
-    begin
-      Step := ReadFirstLine(Dir + '\runtime\setup-status.txt');
-      if (Step = '2') or (Step = '3') or (Step = '4') then
-        PreparePage.SetText(CustomMessage('PrepareStep' + Step), CustomMessage('PrepareHint'));
-      PreparePage.Animate;
-      Sleep(100);
-      Waited := Waited + 100;
-      Res := ReadFirstLine(Dir + '\runtime\setup-result.txt');
-    end;
-  finally
-    PreparePage.Hide;
-  end;
-  if (Res <> 'ok') and not WizardSilent then
-    MsgBox(FmtMessage(CustomMessage('PrepareFailed'), [Dir + '\runtime\setup.log']), mbInformation, MB_OK);
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
-    RunPrepare;
-end;
-
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usUninstall) and DirExists(ExpandConstant('{app}\data')) and not UninstallSilent then

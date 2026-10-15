@@ -19,22 +19,12 @@ if not exist ".venv\Scripts\python.exe" (
 set "PY=.venv\Scripts\python.exe"
 "%PY%" -m pip install --upgrade pip >nul
 
-"%PY%" -c "import torch" >nul 2>nul
-if errorlevel 1 (
-  where nvidia-smi >nul 2>nul
-  if errorlevel 1 (
-    echo == Installing PyTorch (CPU) ==
-    "%PY%" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu || goto :fail
-  ) else (
-    echo == Installing PyTorch (CUDA 12.8) ==
-    "%PY%" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 || goto :fail
-  )
-)
 echo == Installing Python packages ==
 "%PY%" -m pip install -r apps\worker\requirements.txt -r requirements-dev.txt || goto :fail
+rem Optional, only for GOLF_DETECTOR=rfdetr-torch and scripts\export_onnx.py: pip install -r requirements-torch.txt
 
-echo == Fetching RF-DETR weights (ball detector) ==
-"%PY%" -c "from shottracer.detect import RfDetrBallDetector; RfDetrBallDetector()" >nul 2>nul || echo [!] Could not fetch the weights - they are tried again at the first analysis.
+echo == Fetching the ball detector (RF-DETR, ONNX) ==
+"%PY%" scripts\fetch_model.py >nul 2>nul || echo [!] Could not fetch the model - it is tried again at the first analysis.
 
 echo == Installing Node packages ==
 call npm install || goto :fail

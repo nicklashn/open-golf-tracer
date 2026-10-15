@@ -17,9 +17,10 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = new Set(process.argv.slice(2));
 const win = process.platform === 'win32';
-const py = [resolve(root, '.venv', win ? 'Scripts/python.exe' : 'bin/python'), win ? 'python' : 'python3'].find((p) =>
-  p.includes('.venv') ? existsSync(p) : true,
-);
+// .venv (setup.bat/setup.sh), else the Windows installer's bundled Python, else the system one.
+const py =
+  [resolve(root, '.venv', win ? 'Scripts/python.exe' : 'bin/python'), resolve(root, 'runtime/python/python.exe')].find(existsSync) ??
+  (win ? 'python' : 'python3');
 const npm = win ? 'npm.cmd' : 'npm';
 const prod = args.has('--prod');
 

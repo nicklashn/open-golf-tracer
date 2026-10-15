@@ -27,3 +27,5 @@ data/
 # Windows installer build output
 installer/build/
 installer/dist/
+models/*.onnx
+models/*.part
