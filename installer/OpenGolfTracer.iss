@@ -95,7 +95,7 @@ Type: filesandordirs; Name: "{app}\node_modules"
 
 [Code]
 var
-  PreparePage: TOutputMarqueeProgressPage;
+  PreparePage: TOutputMarqueeProgressWizardPage;
 
 procedure InitializeWizard;
 begin
