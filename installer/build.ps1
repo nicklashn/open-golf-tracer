@@ -129,6 +129,8 @@ Copy-Item $py.FullName (Join-Path $stage 'runtime\python') -Recurse
 
 Step 'Python packages (into the bundled Python)'
 $stagePy = Join-Path $stage 'runtime\python\python.exe'
+# uv marks its Pythons as externally managed (PEP 668); this copy is the app's own.
+Remove-Item (Join-Path $stage 'runtime\python\Lib\EXTERNALLY-MANAGED') -ErrorAction SilentlyContinue
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 Invoke-Native $stagePy @('-m', 'pip', 'install', '--no-cache-dir', '--no-warn-script-location',
   '-r', (Join-Path $stage 'apps\worker\requirements.txt'))
