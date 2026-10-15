@@ -4,7 +4,9 @@
 
 .DESCRIPTION
   1. Exports the committed code (git HEAD - uncommitted changes are not included) to installer\build\stage.
-  2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and uv, checking their SHA-256.
+  2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and Python 3.12 (python-build-standalone,
+     fetched with uv), checking their SHA-256. Python is a plain folder: no junctions, which newer
+     Windows 11 builds refuse to follow for unprivileged processes (error 448).
   3. Installs the npm packages and builds the web app with that Node, so the user's PC never has to.
   4. Compiles OpenGolfTracer.iss with Inno Setup 6 (winget install JRSoftware.InnoSetup).
   Downloads are cached in installer\build\downloads.
@@ -97,12 +99,23 @@ $ffUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
 Expand-Single (Get-Verified $ffUrl (Get-Text "$ffUrl.sha256")) (Join-Path $stage 'runtime\ffmpeg')
 Remove-Item (Join-Path $stage 'runtime\ffmpeg\doc') -Recurse -Force -ErrorAction SilentlyContinue
 
-Step 'uv (Python installer)'
+Step 'Python 3.12 (portable)'
 $uvUrl = 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
 $uvSum = (Get-Text "$uvUrl.sha256").Trim() -split '\s+' | Select-Object -First 1
-$uvDir = Join-Path $stage 'runtime\uv'
+$uvDir = Join-Path $build 'uv'
+if (Test-Path $uvDir) { Remove-Item $uvDir -Recurse -Force }
 New-Item -ItemType Directory -Force $uvDir | Out-Null
 Invoke-Native tar @('-xf', (Get-Verified $uvUrl $uvSum), '-C', $uvDir)
+$env:UV_SYSTEM_CERTS = '1' # the OS certificate store, for PCs where antivirus intercepts HTTPS
+$pyDir = Join-Path $build 'python'
+Invoke-Native (Join-Path $uvDir 'uv.exe') @('python', 'install', '3.12', '--install-dir', $pyDir, '--no-bin', '--no-registry')
+# The real folder (cpython-3.12.N-windows-...), not uv's minor-version junction next to it.
+$py = Get-ChildItem $pyDir -Directory | Where-Object {
+  $_.Name -like 'cpython-3.12.*' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path (Join-Path $_.FullName 'python.exe'))
+} | Sort-Object { [version]($_.Name -replace '^cpython-([\d.]+)-.*$', '$1') } -Descending | Select-Object -First 1
+if (-not $py) { throw "uv did not install Python 3.12 into $pyDir" }
+Write-Host "  $($py.Name)"
+Copy-Item $py.FullName (Join-Path $stage 'runtime\python') -Recurse
 
 Step 'npm packages and web build'
 $env:PATH = "$(Join-Path $stage 'runtime\node');$env:PATH"
@@ -113,6 +126,9 @@ try {
   Invoke-Native npm.cmd @('run', 'build')
 } finally { Pop-Location }
 Remove-Item (Join-Path $stage 'apps\web\.next\cache') -Recurse -Force -ErrorAction SilentlyContinue
+# npm links the workspaces into node_modules\@golf with junctions, which Inno Setup packs as copies.
+# web and exporter are started from their own folders, so their copies would only take up space.
+foreach ($ws in 'web', 'exporter') { [IO.Directory]::Delete((Join-Path $stage "node_modules\@golf\$ws")) }
 
 if ($StageOnly) { Write-Host "`nStage ready: $stage" -ForegroundColor Green; return }
 

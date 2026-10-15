@@ -1,10 +1,10 @@
 ﻿; Open Golf Tracer - Windows installer (Inno Setup 6). Build it with installer\build.ps1, which
-; prepares installer\build\stage (code, built web app, node_modules, portable Node, FFmpeg and uv)
+; prepares installer\build\stage (code, built web app, node_modules, portable Node, Python and FFmpeg)
 ; and passes the version: ISCC /DAppVersion=0.1.0 OpenGolfTracer.iss
 ;
-; Installs per user in %LOCALAPPDATA%\Programs (no admin rights). The Python part (a private
-; Python, PyTorch with CUDA on NVIDIA cards, the ball detector weights) is several GB, so it is
-; downloaded at the end of the installation by prepare.cmd instead of being packed in here.
+; Installs per user in %LOCALAPPDATA%\Programs (no admin rights). Python itself is bundled, but the
+; Python packages (PyTorch with CUDA on NVIDIA cards, the ball detector weights) are several GB, so
+; prepare.cmd downloads them at the end of the installation, behind a progress page (see [Code]).
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -46,8 +46,6 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "da"; MessagesFile: "compiler:Languages\Danish.isl"
 
 [CustomMessages]
-en.Preparing=Downloading the analysis engine (Python, PyTorch and the ball detector). This takes 5-15 minutes the first time...
-da.Preparing=Henter analysemotoren (Python, PyTorch og bolddetektoren). Det tager 5-15 minutter første gang...
 en.LaunchApp=Start Open Golf Tracer now
 da.LaunchApp=Start Open Golf Tracer nu
 en.DeleteData=Also delete your projects, videos and exports?%n%nChoose No to keep them for a later installation.
@@ -68,6 +66,8 @@ Type: filesandordirs; Name: "{app}\node_modules"
 Type: filesandordirs; Name: "{app}\runtime\node"
 Type: filesandordirs; Name: "{app}\runtime\ffmpeg"
 Type: filesandordirs; Name: "{app}\runtime\uv"
+Type: filesandordirs; Name: "{app}\runtime\uv-cache"
+Type: filesandordirs; Name: "{app}\runtime\python"
 Type: files; Name: "{app}\.venv\.ready"
 
 [Files]
@@ -81,9 +81,6 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\OpenGolfTracer.cmd"; Working
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\OpenGolfTracer.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\apps\web\public\favicon.ico"; Tasks: desktopicon
 
 [Run]
-; Visible console window so the download progress can be followed. If it fails, the app
-; shortcut runs it again before starting.
-Filename: "{cmd}"; Parameters: "/c ""{app}\prepare.cmd"""; WorkingDir: "{app}"; StatusMsg: "{cm:Preparing}"; Flags: waituntilterminated
 Filename: "{app}\OpenGolfTracer.cmd"; WorkingDir: "{app}"; Description: "{cm:LaunchApp}"; Flags: postinstall nowait skipifsilent shellexec
 
 [UninstallDelete]
@@ -97,6 +94,64 @@ Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\node_modules"
 
 [Code]
+var
+  PreparePage: TOutputMarqueeProgressPage;
+
+procedure InitializeWizard;
+begin
+  PreparePage := CreateOutputMarqueeProgressPage(CustomMessage('PrepareTitle'), CustomMessage('PrepareDesc'));
+end;
+
+function ReadFirstLine(const FileName: String): String;
+var
+  S: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(FileName, S) then
+    Result := Trim(String(S));
+end;
+
+{ Runs prepare.cmd hidden and shows its current step (runtime\setup-status.txt) until it writes
+  runtime\setup-result.txt. The details go to runtime\setup.log instead of a console window. }
+procedure RunPrepare;
+var
+  Dir, Step, Res: String;
+  Code, Waited: Integer;
+begin
+  Dir := ExpandConstant('{app}');
+  DeleteFile(Dir + '\runtime\setup-status.txt');
+  DeleteFile(Dir + '\runtime\setup-result.txt');
+  if not Exec(ExpandConstant('{cmd}'), '/c ""' + Dir + '\prepare.cmd" /hidden"', Dir, SW_HIDE, ewNoWait, Code) then
+    Exit;
+  PreparePage.SetText(CustomMessage('PrepareStep1'), CustomMessage('PrepareHint'));
+  PreparePage.Show;
+  try
+    Res := '';
+    Waited := 0;
+    { Give up waiting after 3 hours; the app shortcut finishes the job then. }
+    while (Res = '') and (Waited < 3 * 60 * 60 * 1000) do
+    begin
+      Step := ReadFirstLine(Dir + '\runtime\setup-status.txt');
+      if (Step = '2') or (Step = '3') or (Step = '4') then
+        PreparePage.SetText(CustomMessage('PrepareStep' + Step), CustomMessage('PrepareHint'));
+      PreparePage.Animate;
+      Sleep(100);
+      Waited := Waited + 100;
+      Res := ReadFirstLine(Dir + '\runtime\setup-result.txt');
+    end;
+  finally
+    PreparePage.Hide;
+  end;
+  if (Res <> 'ok') and not WizardSilent then
+    MsgBox(FmtMessage(CustomMessage('PrepareFailed'), [Dir + '\runtime\setup.log']), mbInformation, MB_OK);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RunPrepare;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usUninstall) and DirExists(ExpandConstant('{app}\data')) and not UninstallSilent then

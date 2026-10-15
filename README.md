@@ -15,8 +15,8 @@ Everything runs locally on your own machine. Your videos never leave it. Free an
    [Releases](https://github.com/nicklashn/open-golf-tracer/releases).
 2. Double-click it. Windows may say *"Windows protected your PC"* because the installer is not
    signed – click **More info → Run anyway**. No admin rights are needed.
-3. At the end, a window downloads the analysis engine (Python, PyTorch and the ball detector,
-   1–3 GB). Keep it open; it takes 5–15 minutes the first time.
+3. At the end, the installer downloads the analysis engine (PyTorch and the ball detector,
+   1–3 GB) and shows its progress. It takes 5–15 minutes the first time.
 4. Start **Open Golf Tracer** from the Start menu or the desktop. The browser opens by itself;
    close the black window to stop the app.
 

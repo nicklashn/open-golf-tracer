@@ -1,59 +1,73 @@
 @echo off
-rem Open Golf Tracer (installed version) - sets up the Python part: a private Python, PyTorch
-rem (CUDA when there is an NVIDIA card) and the ball detector weights. Runs at the end of the
-rem installation and again from OpenGolfTracer.cmd if it did not finish. Safe to run again to repair.
+rem Open Golf Tracer (installed version) - sets up the Python part with the bundled Python:
+rem PyTorch (CUDA when there is an NVIDIA card), the Python packages and the ball detector weights.
+rem The installer runs it hidden ("prepare.cmd /hidden") and shows the step from runtime\setup-status.txt;
+rem OpenGolfTracer.cmd runs it again if it did not finish. Details go to runtime\setup.log.
+rem Plain venv + pip on purpose: no junctions, which newer Windows 11 builds refuse to follow (error 448).
 setlocal
 cd /d "%~dp0"
-title Open Golf Tracer - setup
 
-set "UV=%~dp0runtime\uv\uv.exe"
-set "UV_PYTHON_INSTALL_DIR=%~dp0runtime\python"
-set "UV_CACHE_DIR=%~dp0runtime\uv-cache"
-set "UV_PYTHON_PREFERENCE=only-managed"
-set "UV_NO_CONFIG=1"
-rem The OS certificate store, for PCs where antivirus intercepts HTTPS.
-set "UV_NATIVE_TLS=1"
-set "PATH=%~dp0runtime\node;%~dp0runtime\ffmpeg\bin;%PATH%"
+set "STATUS=%~dp0runtime\setup-status.txt"
+set "RESULT=%~dp0runtime\setup-result.txt"
+set "LOG=%~dp0runtime\setup.log"
 set "PY=.venv\Scripts\python.exe"
-del ".venv\.ready" >nul 2>nul
+set "PIP_DISABLE_PIP_VERSION_CHECK=1"
+set "PIP_NO_CACHE_DIR=1"
+set "PATH=%~dp0runtime\node;%~dp0runtime\ffmpeg\bin;%PATH%"
+del ".venv\.ready" "%RESULT%" >nul 2>nul
+> "%LOG%" echo Open Golf Tracer setup %DATE% %TIME%
 
-echo.
-echo   Open Golf Tracer is being set up.
-echo   The first time this downloads 1-3 GB and takes 5-15 minutes. Keep this window open.
-echo.
-
-if not exist "%PY%" (
-  echo == Python ==
-  "%UV%" venv .venv --python 3.12 || goto :fail
+set "HIDDEN="
+if /i "%~1"=="/hidden" set "HIDDEN=1"
+if not defined HIDDEN (
+  title Open Golf Tracer - setup
+  echo.
+  echo   Open Golf Tracer is finishing its setup. The first time this downloads 1-3 GB
+  echo   and takes 5-15 minutes. Keep this window open.
+  echo.
 )
 
+call :step 1 "Preparing Python"
+rem A .venv from an older installation may point to a Python that is no longer there.
+"%PY%" -c "import sys" >nul 2>nul || rmdir /s /q .venv >nul 2>nul
+if not exist "%PY%" (
+  "%~dp0runtime\python\python.exe" -m venv .venv >> "%LOG%" 2>&1 || goto :fail
+)
+"%PY%" -m pip install --upgrade pip >> "%LOG%" 2>&1
+
+call :step 2 "Downloading the analysis engine (PyTorch, the biggest part)"
 "%PY%" -c "import torch" >nul 2>nul
 if errorlevel 1 (
   where nvidia-smi >nul 2>nul
   if errorlevel 1 (
-    echo == PyTorch ^(CPU^) ==
-    "%UV%" pip install --python "%PY%" torch torchvision --index-url https://download.pytorch.org/whl/cpu || goto :fail
+    "%PY%" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >> "%LOG%" 2>&1 || goto :fail
   ) else (
-    echo == PyTorch ^(NVIDIA CUDA 12.8^) ==
-    "%UV%" pip install --python "%PY%" torch torchvision --index-url https://download.pytorch.org/whl/cu128 || goto :fail
+    "%PY%" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 >> "%LOG%" 2>&1 || goto :fail
   )
 )
 
-echo == Python packages ==
-"%UV%" pip install --python "%PY%" -r apps\worker\requirements.txt || goto :fail
+call :step 3 "Installing the rest"
+"%PY%" -m pip install -r apps\worker\requirements.txt >> "%LOG%" 2>&1 || goto :fail
 
-echo == Ball detector (RF-DETR) ==
-"%PY%" -c "from shottracer.detect import RfDetrBallDetector; RfDetrBallDetector()" >nul 2>nul || echo [!] Could not fetch the weights now - they are tried again at the first analysis.
+call :step 4 "Fetching the ball detector"
+"%PY%" -c "from shottracer.detect import RfDetrBallDetector; RfDetrBallDetector()" >> "%LOG%" 2>&1 || >> "%LOG%" echo [!] Weights not fetched now - tried again at the first analysis.
 
-"%UV%" cache prune >nul 2>nul
-echo ok> ".venv\.ready"
-echo.
-echo   Done.
+> ".venv\.ready" echo ok
+> "%RESULT%" echo ok
+if not defined HIDDEN echo   Done.
+exit /b 0
+
+:step
+> "%STATUS%" echo %~1
+>> "%LOG%" echo == %~1/4 %~2 ==
+if not defined HIDDEN echo   [%~1/4] %~2
 exit /b 0
 
 :fail
+> "%RESULT%" echo fail
+if defined HIDDEN exit /b 1
 echo.
-echo [!] The setup stopped at an error (see above). Check the internet connection and start
-echo     Open Golf Tracer again - it continues where it stopped.
+echo [!] The setup stopped (details in runtime\setup.log). Check the internet connection
+echo     and start Open Golf Tracer again - it continues where it stopped.
 pause
 exit /b 1

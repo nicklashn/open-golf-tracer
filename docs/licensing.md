@@ -50,7 +50,7 @@ tilbud, licenstekst). Repoet indeholder ingen FFmpeg-binær; man installerer den
 **Windows-installeren** (`installer/`) medbringer gyan.dev's "release essentials"-build (GPL-3.0)
 i `runtime\ffmpeg` sammen med dens `LICENSE` og `README.txt`, som peger på kildekoden og
 build-opskriften. Det er en separat binær ved siden af appen (aggregation), så MIT-koden påvirkes
-ikke. Node.js (MIT) og uv (MIT/Apache-2.0) følger også med; Python (PSF) og PyTorch (BSD) hentes
+ikke. Node.js (MIT) og Python (PSF, python-build-standalone) følger også med; PyTorch (BSD) hentes
 under installationen.
 
 H.264/HEVC er desuden patentbelagte formater (MPEG LA/Access Advance). Hardware-encoderne
