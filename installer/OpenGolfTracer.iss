@@ -1,4 +1,4 @@
-﻿﻿; Open Golf Tracer - Windows installer (Inno Setup 6). Build it with installer\build.ps1, which
+﻿; Open Golf Tracer - Windows installer (Inno Setup 6). Build it with installer\build.ps1, which
 ; prepares installer\build\stage (code, built web app, node_modules, portable Node, Python with all
 ; packages, FFmpeg and the ball detector) and passes the version: ISCC /DAppVersion=0.2.0 OpenGolfTracer.iss
 ;

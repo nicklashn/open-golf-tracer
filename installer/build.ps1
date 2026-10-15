@@ -71,6 +71,9 @@ function Expand-Single([string]$Zip, [string]$Dest) {
   if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
 }
 
+# The script must be UTF-8 with exactly one BOM (for the Danish texts); a second one breaks line 1.
+$issBytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'OpenGolfTracer.iss'))
+if ($issBytes[0] -ne 0xEF -or ($issBytes[3] -eq 0xEF -and $issBytes[4] -eq 0xBB)) { throw 'OpenGolfTracer.iss must start with exactly one UTF-8 BOM' }
 # Inno Setup only notices a missing [CustomMessages] entry at run time, on the user's PC.
 $iss = Get-Content (Join-Path $PSScriptRoot 'OpenGolfTracer.iss') -Raw -Encoding UTF8
 $used = [regex]::Matches($iss, "CustomMessage\('(\w+)'") | ForEach-Object { $_.Groups[1].Value }
