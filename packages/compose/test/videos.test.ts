@@ -1,6 +1,6 @@
 import { migrateProject, timelineDuration } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
-import { highlightShort, playedShots, youtubeVideo } from '../src/editor/generate';
+import { highlightShort, playedShots, youtubeVideo } from '../src';
 
 // A real flight (6.7 s) from the physics parity fixtures, in a 1080x1920 portrait clip.
 const params = [59.38, 0.557, 0.2887, 0.002126, -0.0008, 0.2177, -0.4986, 7.6239, 0.0059];

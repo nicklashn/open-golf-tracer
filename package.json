@@ -8,6 +8,7 @@
     "packages/schema",
     "packages/physics",
     "packages/render",
+    "packages/compose",
     "apps/web",
     "apps/exporter"
   ],

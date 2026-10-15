@@ -4,6 +4,8 @@
  */
 import type { CourseFeatureKind, CourseMapProps, GeoPoint, Place } from '@golf/schema';
 
+export { placeTitle } from '@golf/compose';
+
 export interface CourseData {
   course: string;
   features: { k: CourseFeatureKind; ring: [number, number][] }[];
@@ -148,14 +150,6 @@ export function suggestLanding(place: Place | null | undefined, carryM: number |
   if (!place?.line?.length || place.fromTee == null || !carryM) return null;
   const p = pointAlong(place.line, place.fromTee + carryM);
   return p ? { lat: Math.round(p.lat * 1e6) / 1e6, lon: Math.round(p.lon * 1e6) / 1e6 } : null;
-}
-
-/** "Hul 6 · Par 4" from a media's place, or the course name, or ''. */
-export function placeTitle(place: Place | null | undefined, locale: 'da' | 'en'): string {
-  if (!place) return '';
-  if (!place.hole) return place.course;
-  const hole = locale === 'da' ? 'Hul' : 'Hole';
-  return place.par ? `${hole} ${place.hole} · Par ${place.par}` : `${hole} ${place.hole}`;
 }
 
 /** "16. jun." – the day the earliest clip was filmed (from the file), or '' if unknown. */

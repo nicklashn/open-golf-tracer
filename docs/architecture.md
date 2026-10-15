@@ -16,6 +16,8 @@ packages/
   schema/     zod-skema for projektdokumentet + tidslinje-hjælpere; genererer JSON Schema til API'et.
   physics/    Ballistisk model og constrained fit i TypeScript (port af shottracer/physics.py).
   render/     Deterministisk software-renderer: tracer, vektorgrafik, tekst (opentype), lag, skabeloner.
+  compose/    Videogeneratorer uden UI: YouTube-video, highlight-short, short pr. slag, lag-standarder.
+              Rene funktioner (projekt ind, nyt projekt ud), så både editoren og jobs/CLI kan bruge dem.
 shottracer/   Den oprindelige motor (Python): slag-, bold- og flugtsporing + fysik. CLI og Tracer.bat virker stadig.
 assets/       Skrifttyper (OFL) og demo-videoen med færdig analyse.
 scripts/      dev/start, demo-/brand-/font-generatorer.
