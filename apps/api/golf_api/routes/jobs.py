@@ -26,7 +26,7 @@ def list_jobs(project_id: str | None = None, active: bool = False, db: Session =
     if project_id:
         stmt = stmt.where(Job.project_id == project_id)
     if active:
-        stmt = stmt.where(Job.status.in_(("queued", "running")))
+        stmt = stmt.where(Job.status.in_(("queued", "running", q.AWAITING)))
     rows = db.scalars(stmt.order_by(Job.created_at.desc()).limit(100)).all()
     return {"jobs": [q.public(j) for j in rows]}
 
@@ -89,7 +89,7 @@ async def events(request: Request, project_id: str | None = None, user: User = D
         since: dt.datetime | None = None
         # Start with the current state of active jobs, then follow changes.
         with SessionLocal() as db:
-            stmt = select(Job).where(Job.user_id == user_id, Job.status.in_(("queued", "running")))
+            stmt = select(Job).where(Job.user_id == user_id, Job.status.in_(("queued", "running", q.AWAITING)))
             if project_id:
                 stmt = stmt.where(Job.project_id == project_id)
             for j in db.scalars(stmt).all():

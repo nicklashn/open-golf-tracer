@@ -1,10 +1,12 @@
 /**
- * Export worker: claims "export" jobs from the API's queue and renders them.
+ * Export worker: claims "export" jobs from the API's queue and renders them, and "compose"
+ * jobs ("Make a video for me", see compose-job.ts).
  * npm run start -w @golf/exporter   (API_URL, INTERNAL_TOKEN or DATA_DIR/.internal-token)
  */
 import { hostname } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { InternalApi } from './api';
+import { handleCompose } from './compose-job';
 import { Canceled, runExport } from './run';
 import type { MediaFile } from './plan';
 
@@ -54,13 +56,14 @@ async function handle(job: { id: string; payload: Record<string, unknown> }): Pr
   log('export done', { job: job.id, seconds: +((performance.now() - t0) / 1000).toFixed(1), frames: res.frames, overlay: res.overlay });
 }
 
-async function loop(): Promise<void> {
-  log('exporter starter', { worker, api: api.base });
+/** One lane claims one kind of job at a time. Exports and video plans run in separate lanes,
+ *  so a long 4K export never holds up "Make a video for me". */
+async function lane(kinds: string[], run: (job: { id: string; kind: string; payload: Record<string, unknown> }) => Promise<void>): Promise<void> {
   let idle = 500;
   while (!stopping) {
     let job: Awaited<ReturnType<InternalApi['claim']>>['job'] = null;
     try {
-      job = (await api.claim(['export'], worker)).job;
+      job = (await api.claim(kinds, worker)).job;
     } catch (e) {
       log('cannot reach the API – retrying', { error: String(e) });
       await sleep(3000);
@@ -73,10 +76,10 @@ async function loop(): Promise<void> {
     }
     idle = 500;
     try {
-      await handle(job);
+      await run(job);
     } catch (e) {
       const canceled = e instanceof Canceled;
-      log(canceled ? 'eksport annulleret' : 'eksport fejlede', { job: job.id, error: String(e) });
+      log(canceled ? `${job.kind} canceled` : `${job.kind} failed`, { job: job.id, error: String(e) });
       try {
         await api.fail(job.id, canceled ? 'Annulleret af brugeren' : String(e instanceof Error ? e.message : e), !canceled);
       } catch (e2) {
@@ -93,4 +96,9 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 
-void loop();
+log('exporter starter', { worker, api: api.base, lanes: ['export', 'compose'] });
+void lane(['export'], handle);
+void lane(['compose'], async (job) => {
+  const outcome = await handleCompose(api, job);
+  if (outcome !== 'waiting') log(`video ${outcome}`, { job: job.id });
+});

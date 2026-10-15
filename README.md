@@ -120,6 +120,11 @@ Restart the app after changing `.env` (rebuild with `npm run build` after changi
 - **Make video:** one click gives a finished YouTube video (title, hole info, numbers, course map;
   vertical clips on a blurred background), one highlight short of all shots, or one short per shot –
   each as a new project.
+- **Make video for me:** pick clips and write freely what you want ("YouTube video of the round, only
+  good shots, calm style"). The app plans and cuts the video itself. When in doubt (uncertain flights,
+  clips without shots or recording time, clips without GPS, possible retakes, the same shot from two
+  angles) it asks once, with a default answer for every question. Works entirely without AI; also from
+  the command line (see below).
 - **Graphics:** text, titles, stat cards, lower thirds, shapes, images/logos, with keyframes and
   in/out animations. Templates (Range session, Minimal, TV broadcast, Hole in one, Swing, Neon).
 - **Timeline:** multiple tracks, trim, split, ripple, speed, freeze frame, audio and music.
@@ -148,6 +153,7 @@ npx playwright test  # parity + e2e (needs the app running on :3000)
 
 | Command | Purpose |
 |---|---|
+| `npm run autovideo -- <folder\|files> [--preference "…"] [--kind youtube\|highlight\|shorts] [--answers answers.json] [--yes] [--export youtube1080]` | "Make video for me" from the command line: uploads, waits for analysis, asks the questions (or `--yes` = default answers), makes the video and can export and download it. Needs the app running. |
 | `npm run demo` | Draws the sample video and analyses it |
 | `npm run brand` | Favicon, app icons and manifest from the vector sources |
 | `npm run gen:schema` | JSON Schema from the zod schema (used by the API for validation) |

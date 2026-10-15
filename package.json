@@ -27,7 +27,8 @@
     "brand": "node scripts/make-brand.mjs",
     "demo": "node scripts/py.mjs scripts/make_demo.py --analyze",
     "check": "npm run lint && npm run typecheck && npm test",
-    "test:py": "node scripts/py.mjs -m pytest"
+    "test:py": "node scripts/py.mjs -m pytest",
+    "autovideo": "tsx apps/exporter/src/autovideo.ts"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

@@ -45,6 +45,20 @@ export class InternalApi {
   fail(id: string, error: string, retry = true) {
     return this.call<{ status: string }>('POST', `/jobs/${id}/fail`, { error, retry });
   }
+  /** The job's project (merged document) and how many of its media jobs are still running. */
+  jobProject(id: string) {
+    return this.call<{ id: string; name: string; document: unknown; pending: number }>('GET', `/jobs/${id}/project`);
+  }
+  defer(id: string, seconds: number, message: string) {
+    return this.call<{ status: string }>('POST', `/jobs/${id}/defer`, { seconds, message });
+  }
+  awaitAnswers(id: string, result: Record<string, unknown>, message?: string) {
+    return this.call<{ status: string }>('POST', `/jobs/${id}/await`, { result, message });
+  }
+  /** Saves a generated document as a new project next to the job's project. */
+  derive(id: string, name: string, document: unknown) {
+    return this.call<{ id: string; name: string }>('POST', `/jobs/${id}/derive`, { name, document });
+  }
   media(id: string) {
     return this.call<{ id: string; kind: string; path: string; probe: Record<string, unknown>; derived: Record<string, string> }>('GET', `/media/${id}`);
   }

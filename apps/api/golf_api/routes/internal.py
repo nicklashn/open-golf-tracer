@@ -5,14 +5,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import jobs as q
 from ..db import get_db, utcnow
 from ..deps import internal_auth
+from ..documents import merged_document, validate_document
 from ..errors import ApiError, not_found
-from ..models import Export, Job, Media
+from ..models import Export, Job, Media, Project, User
 from ..storage import storage, user_prefix
 
 router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(internal_auth)])
@@ -36,6 +37,21 @@ class CompleteIn(BaseModel):
 class FailIn(BaseModel):
     error: str
     retry: bool = True
+
+
+class DeferIn(BaseModel):
+    seconds: float = 5
+    message: str = Field("Waiting", max_length=200)
+
+
+class AwaitIn(BaseModel):
+    result: dict = {}
+    message: str = Field("Waiting for answers", max_length=200)
+
+
+class DeriveIn(BaseModel):
+    name: str = Field(max_length=120)
+    document: dict
 
 
 class ExportDoneIn(BaseModel):
@@ -83,6 +99,58 @@ def fail(job_id: str, body: FailIn, db: Session = Depends(get_db)):
             e.finished_at = utcnow()
     db.commit()
     return {"status": j.status}
+
+
+def _job(db: Session, job_id: str) -> Job:
+    j = db.get(Job, job_id)
+    if j is None:
+        raise not_found("The job")
+    return j
+
+
+@router.post("/jobs/{job_id}/defer")
+def defer(job_id: str, body: DeferIn, db: Session = Depends(get_db)):
+    j = _job(db, job_id)
+    q.defer(db, j, body.seconds, body.message)
+    db.commit()
+    return {"status": j.status}
+
+
+@router.post("/jobs/{job_id}/await")
+def await_answers(job_id: str, body: AwaitIn, db: Session = Depends(get_db)):
+    j = _job(db, job_id)
+    q.await_answers(db, j, body.result, body.message)
+    db.commit()
+    return {"status": j.status}
+
+
+@router.get("/jobs/{job_id}/project")
+def job_project(job_id: str, db: Session = Depends(get_db)):
+    """The job's project as the editor would load it, and how many of its media jobs
+    (ingest, analysis) are still running – a video waits for those."""
+    j = _job(db, job_id)
+    p = db.get(Project, j.project_id) if j.project_id else None
+    if p is None or p.user_id != j.user_id or p.deleted_at is not None:
+        raise not_found("The project")
+    pending = db.scalar(select(func.count()).select_from(Job).where(
+        Job.project_id == p.id, Job.kind.in_(("ingest", "analyze", "retrack")), Job.status.in_(("queued", "running")))) or 0
+    return {"id": p.id, "name": p.name, "document": merged_document(p), "pending": int(pending)}
+
+
+@router.post("/jobs/{job_id}/derive")
+def derive(job_id: str, body: DeriveIn, db: Session = Depends(get_db)):
+    """Saves a generated video as a new project of the job's user, next to the job's project."""
+    from .projects import copy_project
+
+    j = _job(db, job_id)
+    p = db.get(Project, j.project_id) if j.project_id else None
+    user = db.get(User, j.user_id) if j.user_id else None
+    if p is None or user is None or p.user_id != user.id:
+        raise not_found("The project")
+    doc = validate_document(body.document)
+    new = copy_project(db, user, p, doc, body.name)
+    db.commit()
+    return {"id": new.id, "name": new.name}
 
 
 @router.get("/media/{media_id}")

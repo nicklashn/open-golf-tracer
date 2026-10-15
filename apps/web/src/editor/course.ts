@@ -2,25 +2,18 @@
  * Geography for "measure on the map": distances, local metres and the course-map layer data
  * (tee at the origin, landing straight up, polygons simplified to keep the project small).
  */
+import { haversine } from '@golf/compose';
 import type { CourseFeatureKind, CourseMapProps, GeoPoint, Place } from '@golf/schema';
 
-export { placeTitle } from '@golf/compose';
+export { haversine, placeTitle } from '@golf/compose';
+
+const R = 6371008.8;
+const rad = (d: number) => (d * Math.PI) / 180;
 
 export interface CourseData {
   course: string;
   features: { k: CourseFeatureKind; ring: [number, number][] }[];
   holes: { ref: string; par: string; name: string; line: [number, number][] }[];
-}
-
-const R = 6371008.8;
-const rad = (d: number) => (d * Math.PI) / 180;
-
-/** Great-circle distance in metres. */
-export function haversine(a: Pick<GeoPoint, 'lat' | 'lon'>, b: Pick<GeoPoint, 'lat' | 'lon'>): number {
-  const dLat = rad(b.lat - a.lat);
-  const dLon = rad(b.lon - a.lon);
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
 /** East/north metres of p relative to origin (equirectangular; exact enough within a few km). */

@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowLeft, Check, CircleAlert, CloudUpload, History, Keyboard, Loader2, Redo2, Undo2, Wand2 } from 'lucide-react';
+import { ArrowLeft, Check, CircleAlert, CloudUpload, History, Keyboard, Loader2, Redo2, Sparkles, Undo2, Wand2 } from 'lucide-react';
 import { byTimeline, migrateProject, timelineDuration, type Shot } from '@golf/schema';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -20,6 +20,7 @@ import { cn } from '@/lib/cn';
 import { saveNow, startAutosave } from './autosave';
 import { ExportDialog, ExportStatus, Onboarding, ShortcutsDialog, VersionsDialog, type ExportRow } from './Dialogs';
 import { filmedDay } from './course';
+import { AutoVideoDialog } from './AutoVideo';
 import { MakeVideoDialog } from './MakeVideo';
 import { Inspector } from './Inspector';
 import { LayersPanel, MediaPanel, ShotsPanel, TemplatesPanel } from './LeftPanels';
@@ -50,6 +51,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const setMakeOpen = useCallback((o: boolean) => useEditor.setState({ makeOpen: o }), []);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [autoOpen, setAutoOpen] = useState(false);
   const [exports, setExports] = useState<ExportRow[]>([]);
   const [leftTab, setLeftTab] = useState('shots');
   const [onboarding, setOnboarding] = useState(false);
@@ -338,6 +340,10 @@ export function Editor({ projectId }: { projectId: string }) {
               <Keyboard />
             </Button>
           </Tooltip>
+          <Button variant="secondary" size="sm" className="ml-2" onClick={() => setAutoOpen(true)} data-testid="open-auto">
+            <Sparkles />
+            <span className="hidden sm:inline">{t.auto.open}</span>
+          </Button>
           <Button variant="secondary" size="sm" className="ml-2" onClick={() => setMakeOpen(true)} data-testid="open-make">
             <Wand2 />
             <span className="hidden sm:inline">{t.make.open}</span>
@@ -426,6 +432,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
       <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onStarted={(e) => setExports((x) => [...x, e])} />
       <MakeVideoDialog open={makeOpen} onOpenChange={setMakeOpen} />
+      <AutoVideoDialog open={autoOpen} onOpenChange={setAutoOpen} />
       <ExportStatus items={exports} onClear={(id) => setExports((x) => x.filter((e) => e.id !== id))} />
       <VersionsDialog open={versionsOpen} onOpenChange={setVersionsOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />

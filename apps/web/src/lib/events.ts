@@ -4,8 +4,8 @@ import { useEffect, useRef } from 'react';
 
 export interface JobInfo {
   id: string;
-  kind: 'ingest' | 'analyze' | 'retrack' | 'export';
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+  kind: 'ingest' | 'analyze' | 'retrack' | 'export' | 'compose';
+  status: 'queued' | 'running' | 'awaiting_answers' | 'succeeded' | 'failed' | 'canceled';
   progress: number;
   message: string;
   projectId: string | null;
