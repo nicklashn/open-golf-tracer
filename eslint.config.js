@@ -12,6 +12,7 @@ export default tseslint.config(
       '**/node_modules/**',
       '**/.next/**',
       '**/dist/**',
+      'installer/build/**',
       '**/next-env.d.ts',
       'playwright-report/**',
       'test-results/**',

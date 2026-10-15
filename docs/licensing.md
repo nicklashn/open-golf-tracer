@@ -18,8 +18,10 @@ forenelige med det. Gennemgået 2026-10-14 (alle Python- og npm-pakker, se afsni
 
 `shottracer/detect.py` bruger som standard **RF-DETR Large** fra Roboflow (`rfdetr`-pakken),
 fortrænet på COCO. Kode og vægte for størrelserne Nano–Large er Apache 2.0 og må bruges
-kommercielt. (XL/2XL ligger i `rfdetr[plus]` under PML 1.0 og bruges ikke.) Vægtene hentes
-til `~/.roboflow/models` ved setup eller første analyse.
+kommercielt. (XL/2XL ligger i `rfdetr[plus]` under PML 1.0 og bruges ikke.) Appen kører den som
+ONNX (`scripts/export_onnx.py`, uændrede vægte), udgivet som release `models-v1` i repoet og hentet
+til `models/rf-detr-large.onnx` ved setup eller første analyse; Windows-installeren har den med.
+Apache 2.0 tillader at videredistribuere vægtene, med licensteksten.
 
 På referenceklippene (2026-10-14) gav RF-DETR præcis samme slag og tal som YOLO. D-FINE og
 RT-DETRv2 (også Apache 2.0) blev testet og fravalgt: de meldte falske slag, når golferen samlede
@@ -50,8 +52,9 @@ tilbud, licenstekst). Repoet indeholder ingen FFmpeg-binær; man installerer den
 **Windows-installeren** (`installer/`) medbringer gyan.dev's "release essentials"-build (GPL-3.0)
 i `runtime\ffmpeg` sammen med dens `LICENSE` og `README.txt`, som peger på kildekoden og
 build-opskriften. Det er en separat binær ved siden af appen (aggregation), så MIT-koden påvirkes
-ikke. Node.js (MIT) og uv (MIT/Apache-2.0) følger også med; Python (PSF) og PyTorch (BSD) hentes
-under installationen.
+ikke. Node.js (MIT), Python (PSF, python-build-standalone), ONNX Runtime (MIT) og RF-DETR-modellen
+(Apache 2.0) følger også med. `onnxruntime-directml` indeholder Microsofts `DirectML.dll`, som
+Microsoft selv distribuerer i hjulet til brug i apps; den videregives uændret.
 
 H.264/HEVC er desuden patentbelagte formater (MPEG LA/Access Advance). Hardware-encoderne
 (NVENC, Quick Sync, VideoToolbox) er licenseret via hardwaren/OS'et.
@@ -91,7 +94,9 @@ navne. Licensteksterne ligger ved siden af filerne (`assets/fonts/*-OFL.txt` og 
 | Leaflet (kort i editoren) | BSD-2-Clause |
 | opentype.js, @napi-rs/canvas, esbuild, tsx | MIT |
 | FastAPI, Starlette, Pydantic, SQLAlchemy, Alembic, uvicorn, httpx, jsonschema | MIT / BSD |
-| NumPy, SciPy, numba, PyTorch | BSD |
+| NumPy, SciPy, numba | BSD |
+| ONNX Runtime (onnxruntime / onnxruntime-directml) | MIT |
+| PyTorch (kun valgfri `requirements-torch.txt`) | BSD |
 | OpenCV (opencv-python-headless) | Apache 2.0 |
 | Playwright | Apache 2.0 (kun test) |
 | axe-core, lightningcss | MPL-2.0 (kun test/build, ikke med i produktet) |

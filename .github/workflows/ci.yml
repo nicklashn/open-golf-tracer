@@ -45,10 +45,9 @@ jobs:
             apps/api/requirements.txt
       - name: FFmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Install (CPU PyTorch; GPU tests are skipped in CI)
+      - name: Install
         run: |
           python -m venv .venv
-          .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/pip install -r apps/worker/requirements.txt -r requirements-dev.txt
           .venv/bin/pip install --force-reinstall --no-deps opencv-python-headless
       - run: .venv/bin/ruff check .
@@ -81,15 +80,14 @@ jobs:
       - name: Python environment
         run: |
           python -m venv .venv
-          .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/pip install -r apps/worker/requirements.txt
           .venv/bin/pip install --force-reinstall --no-deps opencv-python-headless
-      - name: RF-DETR weights (cached)
+      - name: Ball detector model (cached)
         uses: actions/cache@v4
         with:
-          path: ~/.roboflow/models
-          key: rf-detr-large-2026
-      - run: .venv/bin/python -c "from shottracer.detect import RfDetrBallDetector; RfDetrBallDetector()"
+          path: models/rf-detr-large.onnx
+          key: rf-detr-large-onnx-${{ hashFiles('shottracer/detect.py') }}
+      - run: .venv/bin/python scripts/fetch_model.py
       - run: npm install -g npm@11 && npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run build

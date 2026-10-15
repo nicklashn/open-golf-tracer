@@ -236,6 +236,109 @@ class RfDetrBallDetector(BallDetector):
                            frame, golfer, allow_blob, "rf-detr")
 
 
+ONNX_MODEL = MODELS_DIR / "rf-detr-large.onnx"
+# RF-DETR Large (COCO, Apache-2.0) exported with scripts/export_onnx.py (rfdetr 1.11.2, opset 17).
+ONNX_URL = "https://github.com/nicklashn/open-golf-tracer/releases/download/models-v1/rf-detr-large.onnx"
+ONNX_SHA256 = "7079f2aa7c8dcbd7b7e0a1368dd6a574e62a225516b62d9c3a1503282ddd1682"
+
+
+def onnx_model_path() -> Path:
+    import os
+
+    return Path(os.environ.get("GOLF_ONNX_MODEL", "") or ONNX_MODEL)
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ensure_onnx_model() -> Path:
+    """The ONNX model, downloaded (and checked against ONNX_SHA256) the first time it is needed.
+    A GOLF_ONNX_MODEL of your own is used as it is."""
+    import os
+    import urllib.request
+
+    path = onnx_model_path()
+    if path.exists() or os.environ.get("GOLF_ONNX_MODEL"):
+        return path
+    try:  # use the OS certificate store: some PCs intercept HTTPS (antivirus)
+        import truststore
+
+        truststore.inject_into_ssl()
+    except ImportError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    with urllib.request.urlopen(ONNX_URL, timeout=60) as r, tmp.open("wb") as f:
+        while chunk := r.read(1 << 20):
+            f.write(chunk)
+    if _sha256(tmp) != ONNX_SHA256:
+        tmp.unlink()
+        raise RuntimeError(f"Checksum mismatch for {ONNX_URL}")
+    tmp.replace(path)
+    return path
+
+
+class OnnxRfDetrBallDetector(RfDetrBallDetector):
+    """The same RF-DETR Large, exported to ONNX (scripts/export_onnx.py) and run with ONNX Runtime:
+    no PyTorch needed (~40 MB instead of ~4 GB). On Windows the DirectML provider uses any GPU
+    (NVIDIA, AMD, Intel); otherwise the CPU. Pre- and post-processing mirror rfdetr's predict()."""
+
+    name = "rf-detr-onnx"
+    RESOLUTION = 704
+    MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+    STD = np.array([0.229, 0.224, 0.225], np.float32)
+    NUM_SELECT = 300
+
+    def __init__(self, model: Path | None = None):
+        import onnxruntime as ort
+
+        path = model or ensure_onnx_model()
+        available = ort.get_available_providers()
+        providers = [p for p in ("DmlExecutionProvider", "CUDAExecutionProvider") if p in available]
+        opts = ort.SessionOptions()
+        if "DmlExecutionProvider" in providers:  # DirectML needs these (ORT docs)
+            opts.enable_mem_pattern = False
+            opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        try:
+            self.session = ort.InferenceSession(str(path), opts, providers=[*providers, "CPUExecutionProvider"])
+        except Exception:  # a broken GPU driver must not stop the analysis
+            self.session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        self.provider = self.session.get_providers()[0]
+        self.input = self.session.get_inputs()[0].name
+        self._run_lock = threading.Lock()  # DirectML sessions do not support concurrent Run calls
+        # COCO category ids, as RF-DETR reports them (see _COCO91); only these two are used.
+        self.names = {1: "person", 37: "sports ball"}
+
+    def _predict(self, img: np.ndarray, conf: float) -> list[tuple[str, Box]]:
+        h, w = img.shape[:2]
+        # rfdetr: RGB in [0, 1], bilinear resize without antialiasing, ImageNet normalisation.
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+        x = cv2.resize(rgb, (self.RESOLUTION, self.RESOLUTION), interpolation=cv2.INTER_LINEAR)
+        x = ((x - self.MEAN) / self.STD).transpose(2, 0, 1)[None]
+        with self._run_lock:
+            boxes, logits = self.session.run(None, {self.input: np.ascontiguousarray(x, np.float32)})
+        prob = 1 / (1 + np.exp(-logits[0].astype(np.float64)))  # (queries, classes)
+        flat = prob.ravel()
+        top = np.argsort(-flat, kind="stable")[: self.NUM_SELECT]
+        scores, query, label = flat[top], top // prob.shape[1], top % prob.shape[1]
+        keep = scores > conf
+        cx, cy, bw, bh = boxes[0][query[keep]].T.astype(np.float64)
+        bw, bh = np.clip(bw, 0, None), np.clip(bh, 0, None)
+        x1 = np.clip((cx - bw / 2) * w, 0, w)
+        y1 = np.clip((cy - bh / 2) * h, 0, h)
+        x2 = np.clip((cx + bw / 2) * w, 0, w)
+        y2 = np.clip((cy + bh / 2) * h, 0, h)
+        return [(self.names.get(int(k), ""), Box(float(a), float(b), float(c), float(d), float(s)))
+                for a, b, c, d, s, k in zip(x1, y1, x2, y2, scores[keep], label[keep])]
+
+
 class BlobBallDetector(BallDetector):
     """Licence-free fallback without a neural network: no people, white-blob ball search.
     Much less reliable; meant for tests and as a template for a custom detector."""
@@ -266,6 +369,7 @@ get_detector.cache_clear = lambda: _make_detector.cache_clear()  # type: ignore[
 @functools.cache
 def _make_detector(weights: str | None = None) -> BallDetector:
     import importlib
+    import importlib.util
     import os
 
     spec = os.environ.get("GOLF_DETECTOR", "").strip().lower()
@@ -273,7 +377,14 @@ def _make_detector(weights: str | None = None) -> BallDetector:
         return BlobBallDetector()
     if spec == "yolo" or (weights and not spec):  # explicit YOLO weights (--model) mean YOLO
         return YoloBallDetector(weights)
+    if spec in ("rfdetr-onnx", "onnx"):
+        return OnnxRfDetrBallDetector()
+    if spec in ("rfdetr-torch", "torch"):
+        return RfDetrBallDetector()
     if spec and spec not in ("rfdetr", "rf-detr"):
         mod, _, cls = os.environ["GOLF_DETECTOR"].strip().partition(":")
         return getattr(importlib.import_module(mod), cls)()
+    # RF-DETR as ONNX (no PyTorch needed); the PyTorch version only when ONNX Runtime is missing.
+    if importlib.util.find_spec("onnxruntime") or not importlib.util.find_spec("rfdetr"):
+        return OnnxRfDetrBallDetector()
     return RfDetrBallDetector()

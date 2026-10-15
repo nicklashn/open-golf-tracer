@@ -1,0 +1,7 @@
+# Optional: RF-DETR in PyTorch (GOLF_DETECTOR=rfdetr-torch) and scripts/export_onnx.py, which
+# makes models/rf-detr-large.onnx. Not needed to run the app. Install PyTorch first, e.g. with CUDA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch
+torchvision
+rfdetr>=1.11       # Apache-2.0
+onnx>=1.16

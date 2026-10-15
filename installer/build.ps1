@@ -4,7 +4,11 @@
 
 .DESCRIPTION
   1. Exports the committed code (git HEAD - uncommitted changes are not included) to installer\build\stage.
-  2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and uv, checking their SHA-256.
+  2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and Python 3.12 (python-build-standalone,
+     fetched with uv), checking their SHA-256. Python is a plain folder: no junctions, which newer
+     Windows 11 builds refuse to follow for unprivileged processes (error 448).
+     The Python packages go straight into that Python, and the ball detector (RF-DETR as ONNX) into
+     models\, so the installed app needs no downloads at all.
   3. Installs the npm packages and builds the web app with that Node, so the user's PC never has to.
   4. Compiles OpenGolfTracer.iss with Inno Setup 6 (winget install JRSoftware.InnoSetup).
   Downloads are cached in installer\build\downloads.
@@ -67,6 +71,17 @@ function Expand-Single([string]$Zip, [string]$Dest) {
   if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
 }
 
+# The script must be UTF-8 with exactly one BOM (for the Danish texts); a second one breaks line 1.
+$issBytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'OpenGolfTracer.iss'))
+if ($issBytes[0] -ne 0xEF -or ($issBytes[3] -eq 0xEF -and $issBytes[4] -eq 0xBB)) { throw 'OpenGolfTracer.iss must start with exactly one UTF-8 BOM' }
+# Inno Setup only notices a missing [CustomMessages] entry at run time, on the user's PC.
+$iss = Get-Content (Join-Path $PSScriptRoot 'OpenGolfTracer.iss') -Raw -Encoding UTF8
+$used = [regex]::Matches($iss, "CustomMessage\('(\w+)'") | ForEach-Object { $_.Groups[1].Value }
+$missing = $used | Sort-Object -Unique | ForEach-Object {
+  foreach ($lang in 'en', 'da') { if ($iss -notmatch "(?m)^$lang\.$_=") { "$lang.$_" } }
+}
+if ($missing) { throw "OpenGolfTracer.iss uses custom messages that are not defined: $($missing -join ', ')" }
+
 $iscc = @(
   "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
   "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
@@ -97,12 +112,40 @@ $ffUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
 Expand-Single (Get-Verified $ffUrl (Get-Text "$ffUrl.sha256")) (Join-Path $stage 'runtime\ffmpeg')
 Remove-Item (Join-Path $stage 'runtime\ffmpeg\doc') -Recurse -Force -ErrorAction SilentlyContinue
 
-Step 'uv (Python installer)'
+Step 'Python 3.12 (portable)'
 $uvUrl = 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
 $uvSum = (Get-Text "$uvUrl.sha256").Trim() -split '\s+' | Select-Object -First 1
-$uvDir = Join-Path $stage 'runtime\uv'
+$uvDir = Join-Path $build 'uv'
+if (Test-Path $uvDir) { Remove-Item $uvDir -Recurse -Force }
 New-Item -ItemType Directory -Force $uvDir | Out-Null
 Invoke-Native tar @('-xf', (Get-Verified $uvUrl $uvSum), '-C', $uvDir)
+$env:UV_SYSTEM_CERTS = '1' # the OS certificate store, for PCs where antivirus intercepts HTTPS
+$pyDir = Join-Path $build 'python'
+Invoke-Native (Join-Path $uvDir 'uv.exe') @('python', 'install', '3.12', '--install-dir', $pyDir, '--no-bin', '--no-registry')
+# The real folder (cpython-3.12.N-windows-...), not uv's minor-version junction next to it.
+$py = Get-ChildItem $pyDir -Directory | Where-Object {
+  $_.Name -like 'cpython-3.12.*' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path (Join-Path $_.FullName 'python.exe'))
+} | Sort-Object { [version]($_.Name -replace '^cpython-([\d.]+)-.*$', '$1') } -Descending | Select-Object -First 1
+if (-not $py) { throw "uv did not install Python 3.12 into $pyDir" }
+Write-Host "  $($py.Name)"
+Copy-Item $py.FullName (Join-Path $stage 'runtime\python') -Recurse
+
+Step 'Python packages (into the bundled Python)'
+$stagePy = Join-Path $stage 'runtime\python\python.exe'
+# uv marks its Pythons as externally managed (PEP 668); this copy is the app's own.
+Remove-Item (Join-Path $stage 'runtime\python\Lib\EXTERNALLY-MANAGED') -ErrorAction SilentlyContinue
+$env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
+Invoke-Native $stagePy @('-m', 'pip', 'install', '--no-cache-dir', '--no-warn-script-location',
+  '-r', (Join-Path $stage 'apps\worker\requirements.txt'))
+Invoke-Native $stagePy @('-c', 'import onnxruntime as ort, cv2, numba, fastapi; print(ort.__version__, ort.get_available_providers())')
+
+Step 'Ball detector (RF-DETR as ONNX)'
+$detect = Get-Content (Join-Path $stage 'shottracer\detect.py') -Raw
+$onnxUrl = [regex]::Match($detect, 'ONNX_URL = "([^"]+)"').Groups[1].Value
+$onnxSum = [regex]::Match($detect, 'ONNX_SHA256 = "([0-9a-f]{64})"').Groups[1].Value
+if (-not $onnxUrl -or -not $onnxSum) { throw 'ONNX_URL / ONNX_SHA256 not found in shottracer\detect.py' }
+New-Item -ItemType Directory -Force (Join-Path $stage 'models') | Out-Null
+Copy-Item (Get-Verified $onnxUrl $onnxSum) (Join-Path $stage 'models\rf-detr-large.onnx')
 
 Step 'npm packages and web build'
 $env:PATH = "$(Join-Path $stage 'runtime\node');$env:PATH"
@@ -113,6 +156,9 @@ try {
   Invoke-Native npm.cmd @('run', 'build')
 } finally { Pop-Location }
 Remove-Item (Join-Path $stage 'apps\web\.next\cache') -Recurse -Force -ErrorAction SilentlyContinue
+# npm links the workspaces into node_modules\@golf with junctions, which Inno Setup packs as copies.
+# web and exporter are started from their own folders, so their copies would only take up space.
+foreach ($ws in 'web', 'exporter') { [IO.Directory]::Delete((Join-Path $stage "node_modules\@golf\$ws")) }
 
 if ($StageOnly) { Write-Host "`nStage ready: $stage" -ForegroundColor Green; return }
 

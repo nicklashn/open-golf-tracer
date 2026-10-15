@@ -1,9 +1,8 @@
-# PyTorch with CUDA 12.8 (RTX 50-series needs cu128+):
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-torch
-torchvision
-rfdetr>=1.11       # default ball/person detector (Apache-2.0)
-truststore         # OS certificate store for the RF-DETR weights download
+# The engine. The ball detector (RF-DETR) runs as ONNX with ONNX Runtime; no PyTorch needed.
+# On Windows the DirectML build uses any GPU (NVIDIA, AMD, Intel); elsewhere the CPU build.
+onnxruntime-directml>=1.20; sys_platform == "win32"
+onnxruntime>=1.20; sys_platform != "win32"
+truststore         # OS certificate store for the model download
 opencv-python
 numpy
 scipy
