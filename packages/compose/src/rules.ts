@@ -2,6 +2,7 @@
  * The plan without AI: the preference read by keywords (Danish and English) and the doubts
  * found by fixed rules. Always gives a valid plan; an AI model may only adjust this one.
  */
+import { TEMPLATES } from '@golf/render';
 import type { WarningCode } from '@golf/schema';
 import { VideoPlan, type PlanKind, type PlanQuestion } from './plan';
 import type { RoundSummary, ShotSummary } from './summary';
@@ -174,6 +175,11 @@ export function defaultTitle(s: RoundSummary, locale: Locale): string {
   return [s.course, day].filter(Boolean).join(' · ') || s.name || 'Golf';
 }
 
+/** Template ids a plan may use (all of them; nothing here is behind a plan). */
+export function templatesFor(): string[] {
+  return TEMPLATES.map((t) => t.id);
+}
+
 export function planFromRules(s: RoundSummary, preference: string, locale: Locale = 'en'): VideoPlan {
   const T = L[locale];
   const pref = readPreference(preference);
@@ -284,7 +290,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     });
   }
 
-  const template = pref.template ?? null;
+  const template = pref.template && templatesFor().includes(pref.template) ? pref.template : null;
   return VideoPlan.parse({
     kind,
     template,

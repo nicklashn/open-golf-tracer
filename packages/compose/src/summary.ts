@@ -60,7 +60,8 @@ export const isoDate = (s: string | null | undefined): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
-const round = (v: number, step: number) => Math.round(v / step) * step;
+/** Rounded to `decimals` places without float noise (2.4, not 2.4000000000000004): fewer tokens. */
+const round = (v: number, decimals: number) => Number(v.toFixed(decimals));
 
 /**
  * The clips of the round in the order they were played: by the time they were filmed; clips
@@ -94,7 +95,7 @@ export function summarize(doc: Project): RoundSummary {
       n: i + 1,
       name: m.name,
       recordedAt: m.recordedAt,
-      seconds: round(m.duration, 0.1),
+      seconds: round(m.duration, 1),
       portrait: m.height > m.width,
       gps: !!m.geo,
       course: m.place?.course ?? '',
@@ -111,17 +112,17 @@ export function summarize(doc: Project): RoundSummary {
         n: i + 1,
         clipId: s.mediaId,
         clip: nOf.get(s.mediaId) ?? 0,
-        t: round(s.impactTime, 0.1),
+        t: round(s.impactTime, 1),
         at: at === null ? null : new Date(at).toISOString(),
         hole: m.place?.hole ?? '',
         par: m.place?.par ?? null,
         club: s.club,
         carryM: st ? Math.round(st.carryM) : null,
         apexM: st ? Math.round(st.apexM) : null,
-        confidence: round(s.confidence, 0.01),
+        confidence: round(s.confidence, 2),
         flags: [...new Set(s.warnings.map((w) => w.code))],
-        x: round(s.anchor.x / Math.max(1, m.width), 0.01),
-        y: round(s.anchor.y / Math.max(1, m.height), 0.01),
+        x: round(s.anchor.x / Math.max(1, m.width), 2),
+        y: round(s.anchor.y / Math.max(1, m.height), 2),
       };
     }),
   };

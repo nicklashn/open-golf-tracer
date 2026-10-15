@@ -136,3 +136,16 @@ class CustomStyle(Base):
     name: Mapped[str] = mapped_column(String(60))
     style: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class AiSettings(Base):
+    """The AI model for "Make a video for me" (provider "server" = use the .env defaults).
+    Kept apart from users so the key can never end up in public_user() or the data export."""
+    __tablename__ = "ai_settings"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), default="server")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    base_url: Mapped[str] = mapped_column(String(300), default="")
+    api_key: Mapped[str] = mapped_column(Text, default="")
+    max_tokens: Mapped[int] = mapped_column(Integer, default=8000)
+    updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)

@@ -49,6 +49,17 @@ export class InternalApi {
   jobProject(id: string) {
     return this.call<{ id: string; name: string; document: unknown; pending: number }>('GET', `/jobs/${id}/project`);
   }
+  /** The AI model the job's user has chosen, key included. Never log it. */
+  jobAi(id: string) {
+    return this.call<{
+      provider: 'none' | 'ollama' | 'openai-compatible' | 'anthropic';
+      model: string;
+      baseUrl: string;
+      apiKey: string;
+      maxTokens: number;
+      source: string;
+    }>('GET', `/jobs/${id}/ai`);
+  }
   defer(id: string, seconds: number, message: string) {
     return this.call<{ status: string }>('POST', `/jobs/${id}/defer`, { seconds, message });
   }

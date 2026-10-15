@@ -6,3 +6,4 @@ export * from './rules';
 export * from './shorts';
 export * from './summary';
 export * from './videos';
+export * from './ai';

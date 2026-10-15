@@ -137,6 +137,14 @@ def job_project(job_id: str, db: Session = Depends(get_db)):
     return {"id": p.id, "name": p.name, "document": merged_document(p), "pending": int(pending)}
 
 
+@router.get("/jobs/{job_id}/ai")
+def job_ai(job_id: str, db: Session = Depends(get_db)):
+    """The AI model the job's user has chosen, key included (workers only)."""
+    from .. import ai
+
+    return ai.effective(db, _job(db, job_id).user_id)
+
+
 @router.post("/jobs/{job_id}/derive")
 def derive(job_id: str, body: DeriveIn, db: Session = Depends(get_db)):
     """Saves a generated video as a new project of the job's user, next to the job's project."""

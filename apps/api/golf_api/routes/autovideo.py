@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from .. import ai
 from .. import jobs as q
-from ..db import get_db
+from ..db import get_db, utcnow
 from ..deps import current_user
 from ..errors import ApiError, not_found
-from ..models import Job, User
+from ..models import AiSettings, Job, User
 from .projects import _project_media, get_project
 
 router = APIRouter(tags=["autovideo"])
@@ -86,7 +87,49 @@ def answer(job_id: str, body: AnswersIn, db: Session = Depends(get_db), user: Us
         raise not_found("The job")
     if j.status != q.AWAITING:
         raise ApiError(409, "not_waiting", "This video is not waiting for answers.")
-    # The plan the questions came from goes along, so it is not made (or paid for) twice.
-    q.answer(db, j, {"answers": body.answers, "plan": (j.result or {}).get("plan")})
+    # The plan the questions came from goes along, so it is not made (or paid for) twice, and so
+    # do the tokens the first AI call used (the ceiling is per video).
+    q.answer(db, j, {"answers": body.answers, "plan": (j.result or {}).get("plan"), "usage": (j.result or {}).get("usage")})
     db.commit()
     return q.public(j)
+
+
+# --- AI settings ------------------------------------------------------------------------------
+
+
+class AiSettingsIn(BaseModel):
+    provider: str = Field(pattern="^(server|none|ollama|openai-compatible|anthropic)$")
+    model: str = Field("", max_length=120)
+    baseUrl: str = Field("", max_length=300, pattern=r"^(|https?://\S+)$")
+    # None keeps the stored key, "" removes it.
+    apiKey: str | None = Field(None, max_length=400)
+    maxTokens: int = Field(8000, ge=500, le=200_000)
+
+
+@router.get("/ai/settings")
+def get_ai_settings(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return ai.public(db, user)
+
+
+@router.put("/ai/settings")
+def put_ai_settings(body: AiSettingsIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    row = db.get(AiSettings, user.id)
+    if row is None:
+        row = AiSettings(user_id=user.id, api_key="")
+        db.add(row)
+    row.provider, row.model, row.base_url, row.max_tokens = body.provider, body.model.strip(), body.baseUrl.strip(), body.maxTokens
+    if body.apiKey is not None:
+        row.api_key = body.apiKey.strip()
+    row.updated_at = utcnow()
+    db.commit()
+    return ai.public(db, user)
+
+
+@router.post("/ai/test")
+def test_ai(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """A minimal call with the user's AI settings, run by the exporter (which has the adapters)."""
+    if ai.effective(db, user.id)["provider"] == "none":
+        raise ApiError(422, "ai_off", "No AI provider is chosen.")
+    job = q.enqueue(db, "ai_test", {}, user_id=user.id, max_attempts=1)
+    db.commit()
+    return q.public(job)

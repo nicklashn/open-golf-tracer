@@ -101,6 +101,27 @@ Brugeren vælger klip og skriver en præference. Jobbet `compose` kører i expor
 Webappen viser det i vinduet "Lav video for mig" (fremskridt via SSE); `npm run autovideo` gør det
 samme fra kommandolinjen via det offentlige API (upload, jobs, eksport).
 
+### Valgfri AI-model
+
+`packages/compose/src/ai.ts`: AI'en tænker, koden arbejder.
+
+- Modellen får kun `summaryText(summary)`, brugerens tekst, regel-planen og (andet kald) svarene.
+  Aldrig video, billeder eller projektdokumentet.
+- Fast systemprompt først i hvert kald (prompt caching; Anthropic får `cache_control`), uden dynamisk indhold.
+- Svaret er en lille JSON-plan (structured output, hvor udbyderen kan), som `mergeAiPlan` lægger oven på
+  regel-planen inden for rammerne: kun slag fra regel-planen, samme spørgsmål og valgmuligheder (kun
+  ny ordlyd/standard), kun tilladte skabeloner. Valideres med zod.
+- Højst 2 kald pr. video: planen, og ét mere efter svarene, hvis der var spørgsmål. Ugyldigt svar → ét
+  nyt forsøg med valideringsfejlen; fejler det igen, bruges regel-planen med en note.
+- Tokens tælles pr. job (også hen over ventetiden på svar) og logges; over `AI_MAX_TOKENS` stopper jobbet
+  med en tydelig fejl, før kaldet sendes.
+- Adaptere på ren `fetch`: OpenAI-kompatibel (`/chat/completions`, JSON-schema med fald tilbage til
+  JSON-mode) og Anthropic Messages API (`/v1/messages`, effort `low`). Timeout, ét retry ved netværksfejl,
+  tydelige fejl (afvist nøgle, ukendt model, Ollama kører ikke).
+- Konfigurationen (`.env` eller brugerens egne indstillinger i tabellen `ai_settings`) hentes af exporteren
+  via `/internal/jobs/{id}/ai`. Nøglen vises kun maskeret og er ikke med i `public_user` eller dataeksporten.
+- "Test forbindelse" er et lille `ai_test`-job i compose-banen.
+
 ## Upload
 
 Chunked og genoptagelig: klienten sender bidder (8 MB) med indeks; serveren fører en bitmap
