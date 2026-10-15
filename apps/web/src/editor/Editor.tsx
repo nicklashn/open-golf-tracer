@@ -433,7 +433,6 @@ export function Editor({ projectId }: { projectId: string }) {
       <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onStarted={(e) => setExports((x) => [...x, e])} />
       <MakeVideoDialog open={makeOpen} onOpenChange={setMakeOpen} />
       <AutoVideoDialog open={autoOpen} onOpenChange={setAutoOpen} />
-      <AutoVideoDialog open={autoOpen} onOpenChange={setAutoOpen} />
       <ExportStatus items={exports} onClear={(id) => setExports((x) => x.filter((e) => e.id !== id))} />
       <VersionsDialog open={versionsOpen} onOpenChange={setVersionsOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
