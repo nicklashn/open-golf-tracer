@@ -87,8 +87,8 @@ class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (Index("ix_jobs_claim", "status", "kind", "run_after"),)
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("job"))
-    kind: Mapped[str] = mapped_column(String(16))                          # ingest | analyze | retrack | export
-    status: Mapped[str] = mapped_column(String(16), default="queued")      # queued | running | succeeded | failed | canceled
+    kind: Mapped[str] = mapped_column(String(16))                          # ingest | analyze | retrack | export | compose
+    status: Mapped[str] = mapped_column(String(16), default="queued")      # queued | running | awaiting_answers | succeeded | failed | canceled
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     message: Mapped[str] = mapped_column(String(200), default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)

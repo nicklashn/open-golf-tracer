@@ -15,6 +15,8 @@ from .models import Job
 log = logging.getLogger("golf.jobs")
 
 STALE_AFTER = dt.timedelta(seconds=90)
+# A job parked until the user answers questions (the "compose" job of "Make a video for me").
+AWAITING = "awaiting_answers"
 LOG_LIMIT = 60_000
 
 
@@ -84,8 +86,37 @@ def fail(db: Session, job: Job, error: str, retry: bool = True) -> None:
         job.status, job.message, job.finished_at = "failed", "Fejlede", utcnow()
 
 
+def await_answers(db: Session, job: Job, result: dict[str, Any], message: str = "Waiting for answers") -> None:
+    """Parks a job until the user answers its questions (see `answer`); no worker holds it meanwhile."""
+    job.status = AWAITING
+    job.result = result
+    job.message = message[:200]
+    job.locked_by = None
+    job.updated_at = utcnow()
+
+
+def answer(db: Session, job: Job, payload: dict[str, Any]) -> None:
+    """Back in the queue with the answers merged into its payload."""
+    job.payload = {**(job.payload or {}), **payload}
+    job.status = "queued"
+    job.result = {}
+    job.message = "Queued"
+    job.attempts = max(0, job.attempts - 1)  # waiting for the user is not a failed attempt
+    job.run_after = job.updated_at = utcnow()
+
+
+def defer(db: Session, job: Job, seconds: float, message: str) -> None:
+    """Back in the queue to run again later (e.g. a video waits for analysis); not counted as an attempt."""
+    job.status = "queued"
+    job.message = message[:200]
+    job.locked_by = None
+    job.attempts = max(0, job.attempts - 1)
+    job.run_after = utcnow() + dt.timedelta(seconds=max(1.0, min(600.0, seconds)))
+    job.updated_at = utcnow()
+
+
 def cancel(db: Session, job: Job) -> None:
-    if job.status == "queued":
+    if job.status in ("queued", AWAITING):
         job.status, job.message, job.finished_at = "canceled", "Annulleret", utcnow()
     elif job.status == "running":
         job.cancel_requested = True
@@ -106,5 +137,5 @@ def requeue_stale(db: Session) -> int:
 def public(job: Job) -> dict[str, Any]:
     return {"id": job.id, "kind": job.kind, "status": job.status, "progress": round(job.progress, 4), "message": job.message,
             "projectId": job.project_id, "mediaId": job.media_id, "error": job.error[-500:] if job.status == "failed" else "",
-            "result": job.result if job.status == "succeeded" else {}, "attempts": job.attempts,
+            "result": job.result if job.status in ("succeeded", AWAITING) else {}, "attempts": job.attempts,
             "createdAt": job.created_at.isoformat(), "updatedAt": job.updated_at.isoformat()}

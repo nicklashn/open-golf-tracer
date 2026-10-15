@@ -70,7 +70,7 @@ def _project_media(db: Session, p: Project) -> list[Media]:
 
 
 def _active_jobs(db: Session, p: Project) -> list[Job]:
-    return list(db.scalars(select(Job).where(Job.project_id == p.id, Job.kind != "export",
+    return list(db.scalars(select(Job).where(Job.project_id == p.id, Job.kind.notin_(("export", "compose")),
                                              Job.status.in_(("queued", "running")))).all())
 
 
@@ -157,8 +157,16 @@ def delete_project(project_id: str, db: Session = Depends(get_db), user: User = 
 @router.post("/{project_id}/duplicate")
 def duplicate_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
-    doc = merged_document(p)
-    doc["name"] = f"{p.name} (copy)"[:120]
+    q = copy_project(db, user, p, merged_document(p), f"{p.name} (copy)")
+    db.commit()
+    return summary(db, q)
+
+
+def copy_project(db: Session, user: User, p: Project, doc: dict, name: str) -> Project:
+    """A new project with `doc` (written against p's media ids) and its own media rows.
+    Used by duplicate and by generated videos; the caller commits."""
+    doc = copy.deepcopy(doc)
+    doc["name"] = name[:120]
     q = Project(user_id=user.id, name=doc["name"], document=doc, analysis={})
     db.add(q)
     db.flush()
@@ -173,8 +181,7 @@ def duplicate_project(project_id: str, db: Session = Depends(get_db), user: User
     # (otherwise the copy keeps the original's media ids and cannot be saved).
     q.document = doc
     flag_modified(q, "document")
-    db.commit()
-    return summary(db, q)
+    return q
 
 
 def _rename_media(doc: dict, old: str, new: str) -> None:

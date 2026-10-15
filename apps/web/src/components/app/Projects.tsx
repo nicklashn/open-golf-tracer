@@ -63,13 +63,13 @@ export function ProjectsPage() {
     setProjects(
       (ps) =>
         ps?.map((p) => {
-          if (p.id !== ev.job.projectId || ev.job.kind === 'export') return p;
+          if (p.id !== ev.job.projectId || ev.job.kind === 'export' || ev.job.kind === 'compose') return p;
           const others = p.processing.filter((j) => j.id !== ev.job.id);
           const active = ev.job.status === 'queued' || ev.job.status === 'running';
           return { ...p, processing: active ? [...others, ev.job] : others, shots: ev.shots ? Math.max(p.shots, ev.shots.length) : p.shots };
         }) ?? ps,
     );
-    if (ev.job.status === 'succeeded' && (ev.job.kind === 'ingest' || ev.job.kind === 'analyze')) void load();
+    if (ev.job.status === 'succeeded' && (ev.job.kind === 'ingest' || ev.job.kind === 'analyze' || ev.job.kind === 'compose')) void load();
   });
 
   async function onFiles(files: FileList | File[]) {

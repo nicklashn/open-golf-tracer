@@ -76,6 +76,30 @@ sættes i kø igen (`maintenance.py`). Fremskridt sendes til browseren med Serve
 | `media` | Python-worker | `ingest`: probe, poster, proxy (kort GOP), thumbnail-sprite, waveform |
 | `analysis` | Python-worker | `analyze`, `retrack` (shottracer.analyze) |
 | `export` | Node-exporter | `export` via `/api/internal` (beskyttet af `INTERNAL_TOKEN`) |
+| `compose` | Node-exporter (egen bane, så en lang eksport ikke blokerer) | `compose`: "Lav video for mig" (se nedenfor) |
+
+Et job kan også parkeres med status `awaiting_answers` (ingen worker holder det imens) og
+sendes tilbage i køen med `POST /api/jobs/{id}/answers`; `defer` sætter et job i kø igen
+senere uden at tælle det som et forsøg (bruges, mens en video venter på analysen).
+
+## Lav video for mig
+
+Brugeren vælger klip og skriver en præference. Jobbet `compose` kører i exporteren
+(`apps/exporter/src/compose-job.ts`) og bruger `packages/compose`:
+
+1. Venter, til projektets `ingest`/`analyze`-jobs er færdige (`defer`).
+2. `summarize(doc)` → `RoundSummary`: én linje pr. klip og pr. slag (id, klip, optagetid, hul/par,
+   kølle, carry, confidence, advarsler). Det er det eneste, en AI-model nogensinde ser.
+3. `planFromRules(summary, preference)` → `VideoPlan` (zod): format, skabelon-look, hvilke slag,
+   rækkefølge, titel, tekster, beskrivelse og spørgsmål med standardsvar. Tvivl findes af faste regler.
+4. Er der spørgsmål, parkeres jobbet med dem (`awaiting_answers`). Svarene sendes tilbage sammen
+   med samme plan, så den ikke laves igen.
+5. `compose(doc, plan, answers)` skjuler fravalgte slag, sætter rækkefølge og huller og kalder de
+   samme generatorer som "Lav video". Hver video gemmes som et nyt projekt (`/internal/jobs/{id}/derive`);
+   originalen røres ikke.
+
+Webappen viser det i vinduet "Lav video for mig" (fremskridt via SSE); `npm run autovideo` gør det
+samme fra kommandolinjen via det offentlige API (upload, jobs, eksport).
 
 ## Upload
 
