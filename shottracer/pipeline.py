@@ -240,6 +240,9 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
             continue
         used.append(impact.time)
         doc = _shot_doc(info, sh, len(shots), opt)
+        sound = audio_mod.signature(*aud, impact.time) if aud else None
+        if sound:
+            doc["sound"] = sound
         shots.append(doc)
         if on_shot:
             on_shot(doc)

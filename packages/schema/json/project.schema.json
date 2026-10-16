@@ -957,6 +957,38 @@
             "default": "",
             "type": "string",
             "maxLength": 80
+          },
+          "sound": {
+            "type": "object",
+            "properties": {
+              "rate": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1000
+              },
+              "start": {
+                "type": "number",
+                "minimum": -10,
+                "maximum": 0
+              },
+              "bands": {
+                "minItems": 1,
+                "maxItems": 8,
+                "type": "array",
+                "items": {
+                  "maxItems": 400,
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            "required": [
+              "rate",
+              "start",
+              "bands"
+            ]
           }
         },
         "required": [

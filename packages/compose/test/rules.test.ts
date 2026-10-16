@@ -1,7 +1,7 @@
 import { migrateProject, type Project } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
 import { compose, itemPlace, planFromRules, prepare, readPreference, reasonText, resolveAnswers, shotChoices, summarize, summaryText, VideoPlan } from '../src';
-import { demoProject, roundProject } from './fixtures';
+import { demoProject, roundProject, sound } from './fixtures';
 
 const params = [59.38, 0.557, 0.2887, 0.002126, -0.0008, 0.2177, -0.4986, 7.6239, 0.0059];
 const shot = (id: string, mediaId: string, impactTime: number, extra: Record<string, unknown> = {}) => ({
@@ -228,6 +228,60 @@ describe('planFromRules', () => {
     expect(q.default).toBe('keep:sb');
     expect(shown(prepare(doc, plan, {}).doc)).toEqual(['sb']);
     expect(shown(prepare(doc, plan, { [q.id]: 'both' }).doc).sort()).toEqual(['sa', 'sb']);
+  });
+
+  it('keeps the better angle of a shot two phones heard alike, without asking', () => {
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:01+0200', '1', { width: 1920, height: 1080 })],
+      [shot('sa', 'a', 7, { sound: sound(1) }), shot('sb', 'b', 6.02, { sound: sound(1, 0.3, 1) })],
+    );
+    const yt = planFromRules(summarize(doc), 'youtube', 'en');
+    expect(ids(yt)).toEqual([]);
+    expect(yt.includeShotIds).toEqual(['sb']); // landscape for YouTube
+    expect(yt.notes.join(' ')).toContain('Shot 2 (hole 1) was filmed from more than one angle: clip 1 (a.mov), clip 2 (b.mov). Using clip 2 (b.mov).');
+    expect(shown(prepare(doc, yt, {}).doc)).toEqual(['sb']);
+    expect(planFromRules(summarize(doc), 'tiktok', 'da').includeShotIds).toEqual(['sa']); // portrait for a short
+  });
+
+  it('does not merge a partner teeing off right after from the same spot', () => {
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:45+0200', '1')],
+      [shot('me', 'a', 7, { sound: sound(1) }), shot('partner', 'b', 7, { sound: sound(2), anchor: { x: 700, y: 1500 } })],
+    );
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(ids(plan)).toEqual([]);
+    expect(plan.includeShotIds).toEqual(['me', 'partner']);
+  });
+
+  it('asks when two clips sound alike but their clocks disagree', () => {
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:40+0200', '1')],
+      [shot('sa', 'a', 7, { sound: sound(1) }), shot('sb', 'b', 7, { sound: sound(1, 0.3) })],
+    );
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(ids(plan)).toEqual(['same:sa:sb']);
+    expect(plan.includeShotIds).toEqual(['sa', 'sb']);
+  });
+
+  it('asks about a retake filmed by two phones once, between the angles kept', () => {
+    const doc = project(
+      [
+        media('a1', '2026-06-16T10:00:00+0200', '1'),
+        media('b1', '2026-06-16T10:00:01+0200', '1', { width: 1920, height: 1080 }),
+        media('a2', '2026-06-16T10:01:00+0200', '1'),
+        media('b2', '2026-06-16T10:01:01+0200', '1', { width: 1920, height: 1080 }),
+      ],
+      [
+        shot('x1', 'a1', 7, { sound: sound(1) }),
+        shot('y1', 'b1', 6, { sound: sound(1, 0.3) }),
+        shot('x2', 'a2', 7, { sound: sound(3) }),
+        shot('y2', 'b2', 6, { sound: sound(3, 0.3) }),
+      ],
+    );
+    const plan = planFromRules(summarize(doc), 'youtube', 'en');
+    expect(ids(plan)).toEqual(['retake:y1:y2']);
+    expect(plan.includeShotIds).toEqual(['y1', 'y2']);
+    expect(shown(prepare(doc, plan, { 'retake:y1:y2': 'last' }).doc)).toEqual(['y2']);
   });
 
   it('picks the template the preference asks for', () => {

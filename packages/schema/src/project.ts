@@ -162,6 +162,15 @@ export const Shot = z.object({
   style: TracerStyle.default(TracerStyle.parse({ color: '#ff4520', color2: '#ffd23f', glow: 0.3, width: 4.5 })),
   visible: z.boolean().default(true),
   label: z.string().max(80).default(''),
+  /** What the microphone heard around the strike (shottracer/audio.py `signature`): log band
+   *  energies at `rate` frames/s, the first at `start` s from the impact. Compares two clips. */
+  sound: z
+    .object({
+      rate: z.number().positive().max(1000),
+      start: z.number().min(-10).max(0),
+      bands: z.array(z.array(finite).max(400)).min(1).max(8),
+    })
+    .optional(),
 });
 export type Shot = z.infer<typeof Shot>;
 

@@ -3,7 +3,7 @@
  * a project – no video, no images, no project document – and it is what the rules read too.
  */
 import { shotStats } from '@golf/render';
-import type { MediaRef, Project, Shot, WarningCode } from '@golf/schema';
+import type { GeoPoint, MediaRef, Project, Shot, WarningCode } from '@golf/schema';
 import { isoDate, isSure, roundMedia, roundOrder } from './chronology';
 import { playedShots } from './videos';
 
@@ -18,6 +18,9 @@ export interface ClipSummary {
   portrait: boolean;
   /** The phone's position was in the file. */
   gps: boolean;
+  geo: GeoPoint | null;
+  width: number;
+  height: number;
   course: string;
   hole: string;
   par: number | null;
@@ -38,12 +41,17 @@ export interface ShotSummary {
   club: string;
   carryM: number | null;
   apexM: number | null;
+  flightS: number | null;
+  /** Ball positions tracked in flight. */
+  trackPts: number;
   /** 0–1, as the analysis rated it. */
   confidence: number;
   flags: WarningCode[];
   /** Where the ball was teed up, as a fraction of the frame (for spotting retakes in one clip). */
   x: number;
   y: number;
+  /** The strike's sound signature, when the clip had audio (see `match.ts`). */
+  sound: Shot['sound'] | null;
 }
 
 export interface RoundSummary {
@@ -90,6 +98,9 @@ export function summarize(doc: Project): RoundSummary {
       seconds: round(m.duration, 1),
       portrait: m.height > m.width,
       gps: !!m.geo,
+      geo: m.geo,
+      width: m.width,
+      height: m.height,
       course: m.place?.course ?? '',
       hole: m.place?.hole ?? '',
       par: m.place?.par ?? null,
@@ -111,10 +122,13 @@ export function summarize(doc: Project): RoundSummary {
         club: s.club,
         carryM: st ? Math.round(st.carryM) : null,
         apexM: st ? Math.round(st.apexM) : null,
+        flightS: st ? round(st.flightTimeS, 1) : null,
+        trackPts: s.track.t.length,
         confidence: round(s.confidence, 2),
         flags: [...new Set(s.warnings.map((w) => w.code))],
         x: round(s.anchor.x / Math.max(1, m.width), 2),
         y: round(s.anchor.y / Math.max(1, m.height), 2),
+        sound: s.sound ?? null,
       };
     }),
     order: { by: ordered.by, unsure: ordered.unsure, conflict: ordered.conflict && [ordered.conflict[0].id, ordered.conflict[1].id] },
