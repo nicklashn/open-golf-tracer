@@ -2,7 +2,7 @@
 
 /** Editor commands. Each one is a single undoable step (see store.edit). */
 import { CLUBS, shotHandles, type Vec2 } from '@golf/physics';
-import { layerDefaults } from '@golf/compose';
+import { clipSlot, layerDefaults } from '@golf/compose';
 import { applyTemplate, currentShot, relayoutTemplate, shotStats } from '@golf/render';
 import {
   TRACER_PRESETS,
@@ -205,7 +205,8 @@ export function setFill(fill: 'crop' | 'blur') {
 
 /**
  * Adds another video of the project (a round) to the timeline: a clip of the whole video,
- * placed among the other clips by when it was filmed. Mirrors attach_video on the server.
+ * placed among the other clips in the planner's round order (clipSlot, like attach_video on
+ * the server).
  */
 export function attachVideo(m: MediaInfo) {
   E().silently((d) => {
@@ -223,19 +224,10 @@ export function attachVideo(m: MediaInfo) {
       geo: m.geo ?? null,
       place: null,
       recordedAt: m.recordedAt ?? null,
+      recordedAtSource: m.recordedAtSource ?? null,
     };
     const clip = { id: newId('c_'), kind: 'video' as const, mediaId: m.id, in: 0, out: m.duration, speed: 1, volume: 1, muted: false };
-    const when = m.recordedAt ?? '';
-    let at = d.clips.length;
-    if (when)
-      for (let i = 0; i < d.clips.length; i++) {
-        const other = d.media[d.clips[i].mediaId]?.recordedAt ?? '';
-        if (other && other > when) {
-          at = i;
-          break;
-        }
-      }
-    d.clips.splice(at, 0, clip as Draft<Clip>);
+    d.clips.splice(clipSlot(d, m.id), 0, clip as Draft<Clip>);
   });
 }
 

@@ -51,9 +51,10 @@ def tiny_video(tmp_path_factory) -> Path:
     return p
 
 
-def upload(c: TestClient, path: Path, kind="video", project_id=None, chunk_order=None) -> dict:
+def upload(c: TestClient, path: Path, kind="video", project_id=None, chunk_order=None, filename=None, last_modified=None) -> dict:
     data = path.read_bytes()
-    r = c.post("/api/uploads", json={"filename": path.name, "size": len(data), "kind": kind, "projectId": project_id})
+    r = c.post("/api/uploads", json={"filename": filename or path.name, "size": len(data), "kind": kind, "projectId": project_id,
+                                     "lastModified": last_modified})
     assert r.status_code == 200, r.text
     up = r.json()
     cs = up["chunkSize"]

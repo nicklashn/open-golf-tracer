@@ -1,3 +1,4 @@
+export * from './chronology';
 export * from './compose';
 export * from './layers';
 export * from './place';

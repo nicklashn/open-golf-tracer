@@ -54,6 +54,8 @@ export const MediaRef = z.object({
   place: Place.nullable().default(null),
   /** When it was filmed (ISO 8601, from the file); orders the clips of a round. */
   recordedAt: z.string().max(40).nullable().default(null),
+  /** Where `recordedAt` came from: the file's metadata, its name, or its modified time ('file', weak). */
+  recordedAtSource: z.enum(['metadata', 'filename', 'file']).nullable().optional(),
 });
 export type MediaRef = z.infer<typeof MediaRef>;
 
