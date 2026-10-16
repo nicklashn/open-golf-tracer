@@ -210,6 +210,8 @@ const en: Dict = {
       low_confidence: 'The analysis is unsure about this shot.',
       retake: 'Hit from almost the same spot shortly after another shot.',
       same_shot: 'Looks like the same shot filmed from another angle.',
+      next_shot_distance: 'The next stroke was filmed {next} m from here, but the flight shows {carry} m.',
+      putt_count_unsure: 'The analysis is unsure how many putts there were.',
     },
   },
   ai: {

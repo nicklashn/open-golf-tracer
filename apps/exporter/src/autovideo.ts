@@ -145,7 +145,7 @@ async function ask(questions: PlanQuestion[], locale: 'da' | 'en'): Promise<Reco
       process.stderr.write(`\n${n + 1}. ${q.text}\n`);
       for (const item of q.items ?? [])
         process.stderr.write(
-          `   - ${itemPlace(item, locale)} (${item.clipName})${item.reasons.length ? `: ${item.reasons.map((r) => reasonText(r, locale)).join('; ')}` : ''}\n`,
+          `   - ${itemPlace(item, locale)} (${item.clipName})${item.reasons.length ? `: ${item.reasons.map((r) => reasonText(r, locale, item)).join('; ')}` : ''}\n`,
         );
       q.options.forEach((o, i) => process.stderr.write(`   ${i + 1}) ${o.label}${o.id === q.default ? '  (default)' : ''}\n`));
       const a = closed ? '' : (await Promise.race([rl.question('   > '), ended])).trim();

@@ -332,6 +332,9 @@ function keptByAnswer(q: PlanQuestion, answer: string, shotId: string): ShotChoi
   if (answer === 'both') return 'keep';
   if (q.id.startsWith('retake:') && answer === 'last') return shotId === q.shotIds[0] ? 'drop' : 'keep';
   if (q.id.startsWith('same:') && answer.startsWith('keep:')) return answer.slice(5) === shotId ? 'keep' : 'drop';
+  // N putts: the last N found are kept (see prepare in @golf/compose).
+  if (q.id.startsWith('putts:'))
+    return answer === 'notHoled' || answer === '4' || q.shotIds.indexOf(shotId) >= q.shotIds.length - Number(answer) ? 'keep' : 'drop';
   return null;
 }
 
@@ -404,7 +407,7 @@ function ShotCard({
         {item.reasons.length ? (
           <ul className="list-disc pl-4 text-[12px] text-fg-muted">
             {item.reasons.map((r) => (
-              <li key={r}>{T.reasons[r]}</li>
+              <li key={r}>{f(T.reasons[r], { next: item.nextM ?? '?', carry: item.carryM ?? '?' })}</li>
             ))}
           </ul>
         ) : null}
@@ -480,7 +483,7 @@ function ShotLoop({ item, shot, label }: { item: PlanItem; shot: Shot | undefine
   }, [play, from, to, item.t, src]);
 
   const path = useMemo(() => {
-    const sp = shot ? sourcePath(shot) : null;
+    const sp = shot && shot.kind === 'full' ? sourcePath(shot) : null;
     if (!sp) return '';
     const step = Math.max(1, Math.floor(sp.n / 60));
     const pts: string[] = [];

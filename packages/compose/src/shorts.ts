@@ -83,3 +83,39 @@ export function shortFor(doc: Project, shot: Shot, name: string, locale: 'da' | 
   // Template graphics are rebuilt for the short's own timing and the 9:16 frame.
   return relayoutTemplate(doc, short, locale, true);
 }
+
+/** Seconds a putt rolls when the analysis gave no end. */
+const PUTT_ROLL_S = 4;
+/** Seconds kept before a putt and after its ball stops. */
+export const PUTT_PAD_S = 1;
+
+/** Source seconds when a putt's ball stopped or dropped. */
+export function puttEnd(putt: Shot): number {
+  return Math.max(putt.impactTime, putt.putt?.end ?? putt.impactTime + PUTT_ROLL_S * putt.slowmo);
+}
+
+/** A short of one putt: vertical, from a second before the stroke to a second after the ball stops, no tracer. */
+export function puttShort(doc: Project, putt: Shot, name: string): Project {
+  const media = doc.media[putt.mediaId];
+  const pad = PUTT_PAD_S * putt.slowmo;
+  const a = Math.max(0, putt.impactTime - pad);
+  const b = Math.min(media?.duration ?? Infinity, puttEnd(putt) + pad);
+  const clips: Clip[] = [{ id: newId('c_'), kind: 'video', mediaId: putt.mediaId, in: a, out: Math.max(b, a + 0.5), speed: 1, volume: 1, muted: false }];
+  // Framed on the ball at address, then where it was last seen.
+  const keys: ReframeKey[] = [];
+  if (media) {
+    const clamp = (v: number) => Math.min(1, Math.max(0, v));
+    const n = putt.track.u.length;
+    const end = n ? { x: putt.track.u[n - 1], y: putt.track.v[n - 1] } : putt.anchor;
+    keys.push({ t: 0, cx: clamp(putt.anchor.x / media.width), cy: clamp(putt.anchor.y / media.height), zoom: 1 });
+    keys.push({ t: Math.max(0.1, b - a), cx: clamp(end.x / media.width), cy: clamp(end.y / media.height), zoom: 1 });
+  }
+  return migrateProject({
+    ...doc,
+    name,
+    clips,
+    shots: [putt],
+    format: { aspect: '9:16', reframe: { mode: 'auto', keyframes: keys } },
+    layers: [],
+  });
+}

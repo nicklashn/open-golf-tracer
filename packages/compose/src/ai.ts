@@ -12,7 +12,7 @@
  * the Anthropic Messages API.
  */
 import { z } from 'zod';
-import { PLAN_KINDS, VideoPlan, type PlanAnswers } from './plan';
+import { PLAN_KINDS, PUTT_MODES, VideoPlan, type PlanAnswers } from './plan';
 import { summaryText, type RoundSummary } from './summary';
 
 export const AI_PROVIDERS = ['none', 'ollama', 'openai-compatible', 'anthropic'] as const;
@@ -69,12 +69,13 @@ export class AiError extends Error {
 
 export const SYSTEM_PROMPT = `You plan golf videos for an editing app. The app has already analysed the clips and made a plan with fixed rules ("rule plan"). Your job is to adjust that plan to the user's wish. You never see video – only a summary with one line per clip and per shot.
 
-Summary fields: clip n, filmed time, hole/par from GPS, shots in the clip; shot n, clip, t (seconds into the clip), hole, par, club, carry/apex in metres ('?' = unknown), conf (0–1 confidence of the analysis), flags (analysis warnings: no_track, implausible, carry_mismatch, default_path = doubtful flight; short_shot, low_confidence, few_points, start_extrapolated, manual).
+Summary fields: clip n, filmed time, hole/par from GPS, shots in the clip; shot n, clip, t (seconds into the clip), hole, par, club, carry/apex in metres ('?' = unknown), conf (0–1 confidence of the analysis), flags (analysis warnings: no_track, implausible, carry_mismatch, default_path, next_shot_distance = doubtful flight; short_shot, low_confidence, few_points, start_extrapolated, manual), next (metres by GPS to the next stroke; carry=~N is a guess from it). A last "score" line gives strokes/par and putts per hole ('?' = not every stroke was filmed: never guess a score).
 
 You may change:
 - kind: "youtube" (16:9 video of the round), "highlight" (one vertical short of all shots) or "shorts" (one vertical short per shot). Follow the user's wish; keep the rule plan's choice when the wish says nothing about format.
 - template: null or one of "range", "minimal", "tv", "holeInOne", "swing", "neon" (only the tracer look). Keep null unless the wish asks for a style.
 - includeShotIds: a subset of the rule plan's shot ids, e.g. when the user wants only certain holes or the best shots. Never add ids that are not in the rule plan.
+- putts: null (the app's default: each hole's putting in "youtube", only holed putts otherwise), "none", "holed" or "all". Putts are shown as plain video, never traced. Keep null unless the wish mentions putts.
 - order: shot ids in playing order, only when the user asks for another order; otherwise an empty list.
 - title: a short video title in the user's language.
 - shotTexts: at most one short line (≤ 60 characters) for a few notable shots, e.g. "Longest drive of the day". Use only facts from the summary. Empty when not useful.
@@ -90,10 +91,11 @@ Write in the language of the user's wish (Danish or English). Answer with the JS
 export const AI_PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['kind', 'template', 'includeShotIds', 'order', 'title', 'shotTexts', 'description', 'questions', 'notes'],
+  required: ['kind', 'template', 'putts', 'includeShotIds', 'order', 'title', 'shotTexts', 'description', 'questions', 'notes'],
   properties: {
     kind: { type: 'string', enum: [...PLAN_KINDS] },
     template: { anyOf: [{ type: 'string', enum: ['range', 'minimal', 'tv', 'holeInOne', 'swing', 'neon'] }, { type: 'null' }] },
+    putts: { anyOf: [{ type: 'string', enum: [...PUTT_MODES] }, { type: 'null' }] },
     includeShotIds: { type: 'array', items: { type: 'string' } },
     order: { type: 'array', items: { type: 'string' } },
     title: { type: 'string' },
@@ -137,6 +139,7 @@ export const AI_PLAN_SCHEMA = {
 const AiAnswer = z.object({
   kind: z.enum(PLAN_KINDS).optional(),
   template: z.string().nullable().optional(),
+  putts: z.enum(PUTT_MODES).nullable().optional(),
   includeShotIds: z.array(z.string()).optional(),
   order: z.array(z.string()).optional(),
   title: z.string().optional(),
@@ -160,6 +163,7 @@ export function userMessage(summary: RoundSummary, preference: string, rulePlan:
   const plan = {
     kind: rulePlan.kind,
     template: rulePlan.template,
+    putts: rulePlan.putts ?? null,
     includeShotIds: rulePlan.includeShotIds,
     title: rulePlan.title,
     questions: rulePlan.questions.map((q) => ({ id: q.id, text: q.text, options: q.options, default: q.default })),
@@ -201,6 +205,7 @@ export function mergeAiPlan(rulePlan: VideoPlan, raw: unknown, allowedTemplates:
     ...rulePlan,
     kind: a.kind ?? rulePlan.kind,
     template,
+    putts: a.putts === undefined ? rulePlan.putts : (a.putts ?? undefined),
     includeShotIds: include,
     order: a.order?.filter((id) => allowed.has(id)).length ? a.order.filter((id) => allowed.has(id)) : undefined,
     title: a.title?.trim().slice(0, 120) || rulePlan.title,

@@ -5,6 +5,7 @@ export * from './match';
 export * from './place';
 export * from './plan';
 export * from './rules';
+export * from './score';
 export * from './shorts';
 export * from './summary';
 export * from './videos';
