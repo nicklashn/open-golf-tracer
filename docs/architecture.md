@@ -133,6 +133,9 @@ samme fra kommandolinjen via det offentlige API (upload, jobs, eksport).
 - Konfigurationen (`.env` eller brugerens egne indstillinger i tabellen `ai_settings`) hentes af exporteren
   via `/internal/jobs/{id}/ai`. Nøglen vises kun maskeret og er ikke med i `public_user` eller dataeksporten.
 - "Test forbindelse" er et lille `ai_test`-job i compose-banen.
+- `chatgpt` (Log ind med ChatGPT, brugerens ChatGPT-plan): OAuth med PKCE mod auth.openai.com, hvor API'et selv
+  er loopback-callback (`http://127.0.0.1:8000/api/ai/chatgpt/callback`); tokens i `chatgpt_accounts` (`chatgpt.py`),
+  fornyes af `/internal/jobs/{id}/ai`; adapteren streamer Responses API (`store: false`, `stream: true`).
 
 ## Upload
 

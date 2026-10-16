@@ -16,7 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import logging_setup, maintenance
 from .config import settings
 from .logging_setup import request_id
-from .routes import account, autovideo, exports, geo, internal, jobs, media, misc, projects, uploads
+from .routes import account, autovideo, chatgpt, exports, geo, internal, jobs, media, misc, projects, uploads
 
 log = logging.getLogger("golf.api")
 
@@ -134,7 +134,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"error": {"code": "server_error", "message": "Something went wrong on our side. Try again in a moment.", "ref": ref}},
                             status_code=500)
 
-    for r in (account, projects, uploads, media, jobs, autovideo, exports, geo, internal, misc):
+    for r in (account, projects, uploads, media, jobs, autovideo, chatgpt, exports, geo, internal, misc):
         app.include_router(r.router, prefix="/api")
     return app
 

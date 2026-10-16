@@ -102,7 +102,7 @@ def answer(job_id: str, body: AnswersIn, db: Session = Depends(get_db), user: Us
 
 
 class AiSettingsIn(BaseModel):
-    provider: str = Field(pattern="^(server|none|ollama|openai-compatible|anthropic)$")
+    provider: str = Field(pattern="^(server|none|ollama|openai-compatible|anthropic|chatgpt)$")
     model: str = Field("", max_length=120)
     baseUrl: str = Field("", max_length=300, pattern=r"^(|https?://\S+)$")
     # None keeps the stored key, "" removes it.

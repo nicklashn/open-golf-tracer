@@ -142,7 +142,7 @@ def job_ai(job_id: str, db: Session = Depends(get_db)):
     """The AI model the job's user has chosen, key included (workers only)."""
     from .. import ai
 
-    return ai.effective(db, _job(db, job_id).user_id)
+    return ai.for_job(db, _job(db, job_id).user_id)
 
 
 @router.post("/jobs/{job_id}/derive")

@@ -2,19 +2,22 @@
 
 /**
  * Settings → AI: which model "Make a video for me" may use. The key is sent to the server once
- * and never comes back – the page only ever sees it masked.
+ * and never comes back – the page only ever sees it masked. "ChatGPT (your plan)" signs in with
+ * ChatGPT instead (OpenAI's flow for local apps); the tokens stay on the server.
  */
-import { PlugZap } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { CHATGPT_USAGE_URL } from '@golf/compose';
+import { ExternalLink, LogOut, PlugZap } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Select, Switch } from '@/components/ui/controls';
+import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
 import { Field, Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/toast';
 import { api, errorMessage } from '@/lib/api';
 import type { JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 
-type Provider = 'server' | 'none' | 'ollama' | 'openai-compatible' | 'anthropic';
+type Provider = 'server' | 'none' | 'ollama' | 'openai-compatible' | 'anthropic' | 'chatgpt';
 
 export interface AiSettingsInfo {
   provider: Provider;
@@ -36,12 +39,15 @@ export interface AiSettingsInfo {
   };
   server: { provider: Exclude<Provider, 'server'>; model: string; keyMasked: string };
   defaults: Record<string, { baseUrl: string; model: string }>;
+  /** Sign in with ChatGPT: never a token, only whether it can be used. */
+  chatgpt: { signedIn: boolean; registered: boolean; email: string; expiresAt: string | null; problem: '' | 'sign_in_again' | 'no_plan' };
 }
 
 /** One line on what leaves the machine with the current choice. */
 export function aiPrivacy(t: ReturnType<typeof useI18n>['t'], eff: AiSettingsInfo['effective'] | undefined): string {
   if (!eff || eff.provider === 'none') return t.ai.privacyNone;
   if (eff.provider === 'ollama') return t.ai.privacyLocal;
+  if (eff.provider === 'chatgpt') return eff.vision ? t.ai.privacyChatgptVision : t.ai.privacyChatgpt;
   const who =
     eff.provider === 'anthropic'
       ? 'Anthropic'
@@ -55,12 +61,165 @@ export function aiPrivacy(t: ReturnType<typeof useI18n>['t'], eff: AiSettingsInf
   return (eff.vision ? t.ai.privacyCloudVision : t.ai.privacyCloud).replace('{provider}', who);
 }
 
+/** "Using ChatGPT plan" with the link to ChatGPT's usage settings (OpenAI's UI guidelines). */
+export function ChatGptPlanNote({ className }: { className?: string }) {
+  const { t } = useI18n();
+  return (
+    <p className={`flex flex-wrap items-center gap-x-2 text-[13px] ${className ?? ''}`} data-testid="chatgpt-plan">
+      <span className="font-medium">{t.ai.chatgpt.using}</span>
+      <ManageUsage />
+    </p>
+  );
+}
+
+export function ManageUsage() {
+  const { t } = useI18n();
+  return (
+    <a
+      href={CHATGPT_USAGE_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-1 text-accent-fg underline-offset-4 hover:underline"
+    >
+      {t.ai.chatgpt.manageUsage}
+      <ExternalLink className="size-3.5" aria-hidden />
+    </a>
+  );
+}
+
+const isLocalHost = (h: string) => ['localhost', '127.0.0.1', '[::1]', '::1'].includes(h) || h.endsWith('.localhost');
+
+/** Signs in, shows the account, picks the model, signs out. */
+function ChatGptPanel({ info, model, onModel, reload }: { info: AiSettingsInfo; model: string; onModel: (m: string) => void; reload: () => Promise<void> }) {
+  const { t, f } = useI18n();
+  const T = t.ai.chatgpt;
+  const c = info.chatgpt;
+  const [models, setModels] = useState<{ slug: string; name: string }[] | null>(null);
+  const [modelsError, setModelsError] = useState('');
+  const [busy, setBusy] = useState<'in' | 'out' | null>(null);
+  const [local, setLocal] = useState(true);
+  useEffect(() => setLocal(isLocalHost(window.location.hostname)), []);
+
+  useEffect(() => {
+    if (!c.signedIn) return;
+    setModelsError('');
+    void api<{ models: { slug: string; name: string }[] }>('/ai/chatgpt/models').then(
+      (r) => {
+        setModels(r.models);
+        if (!model && r.models[0]) onModel(r.models[0].slug);
+      },
+      (e) => setModelsError(errorMessage(e, t)),
+    );
+    // Once per sign-in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c.signedIn, c.email]);
+
+  async function signIn(newAccount = false) {
+    setBusy('in');
+    // Opened right away (still inside the click), pointed at OpenAI once the server has the URL.
+    const w = window.open('', '_blank');
+    try {
+      const { url } = await api<{ url: string }>('/ai/chatgpt/start', { body: { returnTo: window.location.origin, newAccount } });
+      if (w) {
+        w.opener = null;
+        w.location.href = url;
+      } else window.location.assign(url);
+    } catch (e) {
+      w?.close();
+      toast.error(errorMessage(e, t));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function signOut() {
+    setBusy('out');
+    try {
+      const r = await api<{ revoked: boolean }>('/ai/chatgpt/signout', { method: 'POST' });
+      toast.success(r.revoked ? T.signedOut : T.signedOutUnconfirmed);
+      setModels(null);
+      await reload();
+    } catch (e) {
+      toast.error(errorMessage(e, t));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!c.signedIn)
+    return (
+      <div className="grid gap-3 rounded-md border border-border p-4" data-testid="chatgpt-signin">
+        <div>
+          <h3 className="text-sm font-semibold">{T.title}</h3>
+          <p className="text-[13px] text-fg-muted">{T.lead}</p>
+        </div>
+        {c.problem ? (
+          <p role="status" className="text-[13px] text-accent-fg">
+            {c.problem === 'no_plan' ? T.noPlan : T.signInAgain}
+          </p>
+        ) : null}
+        {!local ? <p className="text-[13px] text-accent-fg">{T.samePc}</p> : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            onClick={() => void signIn()}
+            loading={busy === 'in'}
+            className="border-0 bg-black text-white hover:bg-black/85 active:bg-black dark:bg-white dark:text-black dark:hover:bg-white/85"
+          >
+            {T.continue}
+          </Button>
+          {c.registered ? (
+            <Button type="button" variant="ghost" size="sm" onClick={() => void signIn(true)}>
+              {T.otherAccount}
+            </Button>
+          ) : null}
+        </div>
+        <p className="text-[12px] text-fg-muted">{T.samePcHint}</p>
+      </div>
+    );
+
+  return (
+    <div className="grid gap-3 rounded-md border border-border p-4" data-testid="chatgpt-account">
+      <p className="text-sm">{f(T.signedInAs, { email: c.email || 'ChatGPT' })}</p>
+      <ChatGptPlanNote />
+      <Field label={T.model} hint={modelsError ? `${T.modelsFailed}: ${modelsError}` : T.modelHint}>
+        {() =>
+          models?.length ? (
+            <Select<string>
+              label={T.model}
+              value={model}
+              onChange={onModel}
+              options={[
+                ...(model && !models.some((m) => m.slug === model) ? [{ value: model, label: model }] : []),
+                ...models.map((m) => ({ value: m.slug, label: m.name })),
+              ]}
+            />
+          ) : (
+            <p className="text-[13px] text-fg-muted">{model || '…'}</p>
+          )
+        }
+      </Field>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="ghost" size="sm" onClick={() => void signOut()} loading={busy === 'out'}>
+          <LogOut />
+          {T.signOut}
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={() => void signIn(true)}>
+          {T.otherAccount}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function AiSettingsForm() {
   const { t, f } = useI18n();
   const [info, setInfo] = useState<AiSettingsInfo | null>(null);
   const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: 8000, vision: false });
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const [welcome, setWelcome] = useState(false);
 
   useEffect(() => {
     void api<AiSettingsInfo>('/ai/settings').then((s) => {
@@ -69,7 +228,33 @@ export function AiSettingsForm() {
     });
   }, []);
 
-  const own = form.provider !== 'server' && form.provider !== 'none';
+  // Back from "Continue with ChatGPT" (the API's callback sends the browser here).
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const r = q.get('chatgpt');
+    if (!r) return;
+    if (r === 'ok') {
+      toast.success(t.ai.chatgpt.signedIn);
+      if (q.get('first') === '1') setWelcome(true);
+    } else toast.error((t.ai.chatgpt.errors as Record<string, string>)[r] ?? t.ai.chatgpt.errors.error);
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
+    // Once, on arrival.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The sign-in finishes in another tab: pick it up when this one is used again.
+  const reload = useCallback(async () => {
+    const s = await api<AiSettingsInfo>('/ai/settings');
+    setInfo(s);
+    if (s.provider === 'chatgpt') setForm((x) => (x.provider === 'chatgpt' && !x.model ? { ...x, model: s.model } : x));
+  }, []);
+  useEffect(() => {
+    const onFocus = () => void reload().catch(() => {});
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [reload]);
+
+  const own = form.provider !== 'server' && form.provider !== 'none' && form.provider !== 'chatgpt';
   const defaults = own ? info?.defaults[form.provider] : undefined;
 
   async function save(apiKey?: string) {
@@ -123,7 +308,7 @@ export function AiSettingsForm() {
   }
 
   if (!info) return null;
-  const providers: Provider[] = ['server', 'none', 'ollama', 'openai-compatible', 'anthropic'];
+  const providers: Provider[] = ['server', 'none', 'ollama', 'openai-compatible', 'anthropic', 'chatgpt'];
   return (
     <form
       className="grid max-w-md gap-4"
@@ -143,6 +328,24 @@ export function AiSettingsForm() {
           />
         )}
       </Field>
+      {form.provider === 'chatgpt' ? (
+        <>
+          <ChatGptPanel info={info} model={form.model} onModel={(m) => setForm((x) => ({ ...x, model: m }))} reload={reload} />
+          <Field label={t.ai.maxTokens} hint={t.ai.maxTokensHint}>
+            {(p) => (
+              <Input
+                {...p}
+                type="number"
+                min={500}
+                max={200000}
+                step={500}
+                value={form.maxTokens}
+                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 8000 })}
+              />
+            )}
+          </Field>
+        </>
+      ) : null}
       {own ? (
         <>
           <Field label={t.ai.model} hint={f(t.ai.modelHint, { model: defaults?.model ?? '' })}>
@@ -220,8 +423,23 @@ export function AiSettingsForm() {
       {test ? (
         <p role="status" className={test.ok ? 'text-sm text-fg' : 'text-sm text-accent-fg'}>
           {test.text}
+          {!test.ok && test.text.includes(CHATGPT_USAGE_URL) ? (
+            <>
+              {' '}
+              <ManageUsage />
+            </>
+          ) : null}
         </p>
       ) : null}
+      <Dialog open={welcome} onOpenChange={setWelcome}>
+        <DialogContent title={t.ai.chatgpt.welcomeTitle} description={t.ai.chatgpt.welcomeLead} closeLabel={t.common.close}>
+          <DialogFooter>
+            <Button type="button" variant="primary" onClick={() => setWelcome(false)}>
+              {t.ai.chatgpt.gotIt}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </form>
   );
 }

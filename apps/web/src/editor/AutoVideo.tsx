@@ -7,7 +7,7 @@
  * particular shots show each one as a card (a short loop around the strike) that can be kept or
  * removed on its own, or opened in the editor.
  */
-import { clock, shotAnswerKey, type PlanItem, type PlanQuestion, type ShotChoice } from '@golf/compose';
+import { CHATGPT_USAGE_URL, clock, shotAnswerKey, type PlanItem, type PlanQuestion, type ShotChoice } from '@golf/compose';
 import { sourcePath } from '@golf/render';
 import type { Shot } from '@golf/schema';
 import { Check, Copy, ExternalLink, Loader2, Pause, Play, Sparkles, SquarePen } from 'lucide-react';
@@ -19,7 +19,7 @@ import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Field, Textarea } from '@/components/ui/input';
 import { ProgressBar } from '@/components/ui/misc';
 import { api, errorMessage } from '@/lib/api';
-import { aiPrivacy, type AiSettingsInfo } from '@/components/app/AiSettings';
+import { aiPrivacy, ChatGptPlanNote, ManageUsage, type AiSettingsInfo } from '@/components/app/AiSettings';
 import { useJobEvents, type JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
@@ -138,6 +138,7 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
               <p className="text-[12px] text-fg-muted" data-testid="auto-privacy">
                 {aiPrivacy(t, ai?.effective)}
               </p>
+              {ai?.effective.provider === 'chatgpt' ? <ChatGptPlanNote className="-mt-3" /> : null}
               {error ? (
                 <p role="alert" className="text-sm text-accent-fg">
                   {error}
@@ -222,6 +223,7 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
               <p role="alert" className="text-sm">
                 <span className="font-semibold">{T.failed}.</span> {job.error}
               </p>
+              {job.error?.includes(CHATGPT_USAGE_URL) ? <ManageUsage /> : null}
               <div className="flex justify-end">
                 <Button variant="secondary" onClick={reset}>
                   {T.again}
