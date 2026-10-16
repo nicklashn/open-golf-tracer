@@ -1,5 +1,6 @@
 export * from './compose';
 export * from './layers';
+export * from './match';
 export * from './place';
 export * from './plan';
 export * from './rules';
