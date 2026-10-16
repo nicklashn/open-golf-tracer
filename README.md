@@ -23,6 +23,10 @@ detector come with it. Your projects and
 videos are kept in `%LOCALAPPDATA%\Programs\Open Golf Tracer\data`, also when you update.
 Uninstall it under *Settings → Apps*; you are asked whether your projects should be deleted too.
 
+**Make video for me** works out of the box without AI. To let an AI model help (optional), open
+**Settings → AI** in the app, pick Ollama (runs on your own PC), an OpenAI-compatible service or
+Anthropic, paste a key if the service needs one, and click **Test connection**.
+
 To build the installer yourself: `powershell -ExecutionPolicy Bypass -File installer\build.ps1`
 (needs Git and [Inno Setup 6](https://jrsoftware.org/isinfo.php): `winget install JRSoftware.InnoSetup`).
 Pushing a `v*` tag builds it on GitHub Actions and attaches it to the release.
