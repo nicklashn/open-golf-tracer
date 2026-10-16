@@ -2,6 +2,7 @@
 into a preallocated temp file; completion validates with ffprobe and creates the media row."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -12,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .. import jobs
+from .. import chronology, jobs
 from ..config import settings
 from ..db import get_db, utcnow
 from ..deps import current_user
@@ -39,6 +40,8 @@ class CreateIn(BaseModel):
     size: int = Field(gt=0)
     kind: str = Field("video", pattern="^(video|audio|image)$")
     projectId: str | None = None
+    # The browser's File.lastModified (ms): the last fallback for when a clip was filmed.
+    lastModified: float | None = Field(None, ge=0)
 
 
 def _clean_name(name: str) -> str:
@@ -49,6 +52,24 @@ def _clean_name(name: str) -> str:
 
 def _tmp_path(up: Upload) -> Path:
     return tmp_dir() / "uploads" / f"{up.id}.part"
+
+
+def _meta_path(up: Upload) -> Path:
+    """What the browser told about the file beyond its name and size (kept until completion, no column)."""
+    return tmp_dir() / "uploads" / f"{up.id}.json"
+
+
+def _last_modified(up: Upload) -> float | None:
+    try:
+        value = json.loads(_meta_path(up).read_text(encoding="utf-8")).get("lastModified")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return float(value) if isinstance(value, int | float) else None
+
+
+def _discard(up: Upload) -> None:
+    _tmp_path(up).unlink(missing_ok=True)
+    _meta_path(up).unlink(missing_ok=True)
 
 
 def _get(db: Session, user: User, upload_id: str) -> Upload:
@@ -83,6 +104,8 @@ def create_upload(body: CreateIn, db: Session = Depends(get_db), user: User = De
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
         f.truncate(body.size)   # sparse preallocation: chunks can arrive in any order
+    if body.lastModified:
+        _meta_path(up).write_text(json.dumps({"lastModified": body.lastModified}), encoding="utf-8")
     return _status(up)
 
 
@@ -138,18 +161,20 @@ def complete_upload(upload_id: str, db: Session = Depends(get_db), user: User = 
     except ProbeError as exc:
         up.status = "failed"
         db.commit()
-        path.unlink(missing_ok=True)
+        _discard(up)
         raise ApiError(415, "invalid_media", str(exc)) from exc
     if info["kind"] != up.kind and not (up.kind == "audio" and info["kind"] == "video"):
         up.status = "failed"
         db.commit()
-        path.unlink(missing_ok=True)
+        _discard(up)
         raise ApiError(415, "wrong_kind", {"video": "The file is not a video.", "audio": "The file is not an audio file.",
                                           "image": "The file is not an image."}[up.kind])
     if up.kind == "video":
         check_duration(info["duration"])
         if not info.get("fps") or info["fps"] > 1000:
             raise ApiError(415, "invalid_media", "The video has an invalid frame rate.")
+    if info["kind"] == "video":
+        chronology.settle(info, up.filename, _last_modified(up))
 
     project: Project | None = None
     if up.project_id:
@@ -166,6 +191,7 @@ def complete_upload(upload_id: str, db: Session = Depends(get_db), user: User = 
     m.storage_key = f"{media_prefix(user.id, m.id)}/original{ext}"
     t_probe = time.perf_counter()
     storage().put_file(m.storage_key, path, move=True)
+    _meta_path(up).unlink(missing_ok=True)
     t_move = time.perf_counter()
     up.status, up.media_id = "complete", m.id
     if project is not None and up.kind == "video" and not up.project_id:
@@ -197,6 +223,6 @@ def abort_upload(upload_id: str, db: Session = Depends(get_db), user: User = Dep
     up = _get(db, user, upload_id)
     if up.status == "open":
         up.status = "failed"
-        _tmp_path(up).unlink(missing_ok=True)
+        _discard(up)
         db.commit()
     return {"ok": True}

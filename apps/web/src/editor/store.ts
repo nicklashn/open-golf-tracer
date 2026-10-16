@@ -32,6 +32,7 @@ export interface MediaInfo {
   hasAudio: boolean;
   geo?: { lat: number; lon: number; acc?: number } | null;
   recordedAt?: string | null;
+  recordedAtSource?: 'metadata' | 'filename' | 'file' | null;
   status: string;
   urls: Partial<Record<'original' | 'proxy' | 'poster' | 'thumbs' | 'thumbs_meta' | 'waveform', string>>;
   thumbs?: ThumbsInfo | null;

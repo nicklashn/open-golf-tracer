@@ -10,6 +10,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from .chronology import metadata_time
+
 HDR_TRC = {"arib-std-b67", "smpte2084"}
 IMAGE_CODECS = {"png", "mjpeg", "webp", "bmp", "gif", "tiff"}
 
@@ -106,10 +108,10 @@ def probe_file(path: Path) -> dict[str, Any]:
     geo = _geo(tags)
     if geo:
         info["geo"] = geo
-    # When it was filmed (orders the clips of a round); the phone's local time when it has one.
-    recorded = tags.get("com.apple.quicktime.creationdate") or tags.get("creation_time")
+    # When it was filmed (orders the clips of a round); the upload falls back to the file name.
+    recorded = metadata_time(tags) or (metadata_time({k: str(x) for k, x in (v.get("tags") or {}).items()}) if v is not None else None)
     if recorded:
-        info["recordedAt"] = recorded[:40]
+        info["recordedAt"], info["recordedAtSource"] = recorded, "metadata"
     if a is not None:
         info["audio"] = {"codec": a.get("codec_name", ""), "channels": a.get("channels", 0), "sample_rate": int(a.get("sample_rate") or 0)}
     return info

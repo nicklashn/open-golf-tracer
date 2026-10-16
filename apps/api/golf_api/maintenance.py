@@ -25,7 +25,8 @@ def run_once() -> dict:
         old = db.scalars(select(Upload).where(Upload.status == "open", Upload.updated_at < cutoff)).all()
         for up in old:
             up.status = "failed"
-            (tmp_dir() / "uploads" / f"{up.id}.part").unlink(missing_ok=True)
+            for ext in (".part", ".json"):
+                (tmp_dir() / "uploads" / f"{up.id}{ext}").unlink(missing_ok=True)
     removed = 0
     now = time.time()
     for f in tmp_dir().rglob("*"):

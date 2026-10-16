@@ -4,8 +4,9 @@
  */
 import { TEMPLATES } from '@golf/render';
 import type { WarningCode } from '@golf/schema';
-import { VideoPlan, type PlanKind, type PlanQuestion } from './plan';
-import type { RoundSummary, ShotSummary } from './summary';
+import { compareShots, sameShotPairs, strikeGroups, type ShotMatch } from './match';
+import { REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type ReasonCode } from './plan';
+import type { ClipSummary, RoundSummary, ShotSummary } from './summary';
 
 type Locale = 'da' | 'en';
 
@@ -13,11 +14,6 @@ type Locale = 'da' | 'en';
 export const DOUBT_FLAGS: readonly WarningCode[] = ['no_track', 'implausible', 'carry_mismatch', 'default_path'];
 /** Below this confidence a shot is doubtful too. */
 export const LOW_CONFIDENCE = 0.6;
-/** Retakes: the next shot on the same hole within this many seconds and close to the same spot. */
-const RETAKE_S = 180;
-const RETAKE_SPOT = 0.08;
-/** The same strike filmed by two cameras lands this close in time. */
-const SAME_SHOT_S = 1.5;
 /** Seconds of a clip without shots used as a mood shot in the YouTube video. */
 export const BROLL_S = 6;
 
@@ -69,9 +65,14 @@ const L = {
       `Der blev ikke fundet slag i ${n === 1 ? 'et klip' : `${n} klip`}: ${list}. Hvad skal der ske med ${n === 1 ? 'det' : 'dem'}?`,
     skip: 'Spring over',
     broll: `Brug som stemningsklip (op til ${BROLL_S} s)`,
-    order: (list: string) => `${list} har ingen optagetid, så rækkefølgen bygger på filnavnet. Er det rigtigt?`,
-    byName: 'Ja, brug filnavnene',
+    order: (list: string, n: number) =>
+      `${list} har ingen sikker optagetid, så ${n === 1 ? 'dets' : 'deres'} plads er gættet ud fra filnavn og fildato. Er rækkefølgen rigtig?`,
+    holeIn: (hole: string, clip: string) => `${hole} i ${clip}`,
+    conflict: (a: string, b: string) => `Optagetiderne siger, at ${a} blev filmet før ${b}. Passer det?`,
+    byName: 'Ja, behold rækkefølgen',
+    asFilmed: 'Ja, som de blev filmet',
     asAdded: 'Nej, brug rækkefølgen klippene blev tilføjet i',
+    byHoles: 'Nej, sorter efter hulnummer',
     gps: (clip: string, prev: string, next: string) => `${clip} har ingen GPS. Hvilket hul er det (klippet før er ${prev}, klippet efter er ${next})?`,
     samePrev: (h: string) => `Samme som klippet før (${h})`,
     sameNext: (h: string) => `Samme som klippet efter (${h})`,
@@ -83,11 +84,27 @@ const L = {
     same: (a: string, b: string) => `${a} og ${b} ser ud til at være det samme slag filmet fra to vinkler. Hvilket skal bruges?`,
     use: (s: string) => `Brug ${s}`,
     bothAngles: 'Begge (som gentagelse)',
+    sameKept: (shot: string, clips: string, kept: string) => `${shot} er filmet fra flere vinkler: ${clips}. Vi bruger ${kept}.`,
     clip: (n: number, name: string) => `klip ${n} (${name})`,
     noAi: 'Planen er lavet med faste regler (ingen AI).',
     defaultKind: 'Formatet er ikke nævnt, så det bliver en YouTube-video.',
     noShotsAtAll: 'Der er ingen slag at lave video af endnu.',
     skipped: (list: string) => `Klip uden slag springes over: ${list}.`,
+    reasons: {
+      practice_swing: 'Der lød et slag, men bolden blev ikke fundet – måske et prøvesving',
+      no_track: 'Bolden blev ikke fundet i luften, så banen er gættet',
+      implausible: 'Banen ligner ikke et rigtigt slag (for langsom, for kort eller passer dårligt)',
+      default_path: 'Banen er en standardbane, ikke målt',
+      carry_mismatch: 'Længden passer ikke med den carry, der er skrevet ind',
+      hole_limit: 'Landede længere væk end hullet tillader, så banen er forkortet',
+      few_points: 'Bolden blev kun set kortvarigt',
+      start_extrapolated: 'Bolden ved opstilling blev ikke fundet',
+      short_shot: 'Ligner en chip eller et putt',
+      low_confidence: 'Analysen er usikker på slaget',
+      retake: 'Slået fra næsten samme sted kort efter et andet slag',
+      same_shot: 'Ser ud til at være samme slag filmet fra en anden vinkel',
+    } satisfies Record<ReasonCode, string>,
+    at: (n: number, time: string) => `Klip ${n} · ${time}`,
   },
   en: {
     hole: (h: string) => `hole ${h}`,
@@ -99,9 +116,14 @@ const L = {
       `No shots were found in ${n === 1 ? 'one clip' : `${n} clips`}: ${list}. What should happen to ${n === 1 ? 'it' : 'them'}?`,
     skip: 'Skip',
     broll: `Use as a mood shot (up to ${BROLL_S} s)`,
-    order: (list: string) => `${list} have no recording time, so the order is based on the file names. Is that right?`,
-    byName: 'Yes, use the file names',
+    order: (list: string, n: number) =>
+      `${list} ${n === 1 ? 'has' : 'have'} no reliable recording time, so ${n === 1 ? 'its' : 'their'} place is a guess from the file name and date. Is the order right?`,
+    holeIn: (hole: string, clip: string) => `${hole} in ${clip}`,
+    conflict: (a: string, b: string) => `The recording times say ${a} was filmed before ${b}. Is that right?`,
+    byName: 'Yes, keep this order',
+    asFilmed: 'Yes, as filmed',
     asAdded: 'No, use the order the clips were added in',
+    byHoles: 'No, order by hole number',
     gps: (clip: string, prev: string, next: string) => `${clip} has no GPS. Which hole is it (the clip before is ${prev}, the clip after is ${next})?`,
     samePrev: (h: string) => `Same as the clip before (${h})`,
     sameNext: (h: string) => `Same as the clip after (${h})`,
@@ -113,11 +135,27 @@ const L = {
     same: (a: string, b: string) => `${a} and ${b} look like the same shot filmed from two angles. Which should be used?`,
     use: (s: string) => `Use ${s}`,
     bothAngles: 'Both (as a replay)',
+    sameKept: (shot: string, clips: string, kept: string) => `${shot} was filmed from more than one angle: ${clips}. Using ${kept}.`,
     clip: (n: number, name: string) => `clip ${n} (${name})`,
     noAi: 'The plan was made with fixed rules (no AI).',
     defaultKind: 'No format was mentioned, so it will be a YouTube video.',
     noShotsAtAll: 'There are no shots to make a video of yet.',
     skipped: (list: string) => `Clips without shots are skipped: ${list}.`,
+    reasons: {
+      practice_swing: 'A strike was heard but no ball was found – maybe a practice swing',
+      no_track: 'The ball was not found in the air, so the path is a guess',
+      implausible: 'The path does not look like a real shot (too slow, too short or a poor fit)',
+      default_path: 'The path is a default one, not measured',
+      carry_mismatch: 'The length does not fit the carry that was entered',
+      hole_limit: 'Landed further than the hole allows, so the path was shortened',
+      few_points: 'The ball was only seen briefly',
+      start_extrapolated: 'The ball at address was not found',
+      short_shot: 'Looks like a chip or a putt',
+      low_confidence: 'The analysis is unsure about this shot',
+      retake: 'Hit from almost the same spot shortly after another shot',
+      same_shot: 'Looks like the same shot filmed from another angle',
+    } satisfies Record<ReasonCode, string>,
+    at: (n: number, time: string) => `Clip ${n} · ${time}`,
   },
 };
 
@@ -125,42 +163,69 @@ export function isDoubtful(s: ShotSummary): boolean {
   return s.confidence < LOW_CONFIDENCE || s.flags.some((f) => DOUBT_FLAGS.includes(f));
 }
 
+/** Why a shot is doubtful, most telling first. No ball in the air and low confidence reads as a practice swing. */
+export function shotReasons(s: ShotSummary, ...extra: ReasonCode[]): ReasonCode[] {
+  const out = new Set<ReasonCode>(extra);
+  for (const f of s.flags) if ((REASON_CODES as readonly string[]).includes(f)) out.add(f as ReasonCode);
+  if (s.confidence < LOW_CONFIDENCE) out.add('low_confidence');
+  if (out.has('no_track') && out.has('low_confidence')) {
+    out.delete('no_track');
+    out.delete('low_confidence');
+    out.add('practice_swing');
+  }
+  return [...out].sort((a, b) => REASON_CODES.indexOf(a) - REASON_CODES.indexOf(b));
+}
+
+/** A reason in plain words. */
+export function reasonText(code: ReasonCode, locale: Locale = 'en'): string {
+  return L[locale].reasons[code];
+}
+
+/** "4:07" from seconds. */
+export function clock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** "Clip 4 · 0:37": where an item is in the video. */
+export function itemPlace(item: Pick<PlanItem, 'clip' | 't'>, locale: Locale = 'en'): string {
+  return L[locale].at(item.clip, clock(item.t));
+}
+
 /** A rough quality score for "only the best": confident, tracked shots win. */
 export function shotScore(s: ShotSummary): number {
   return s.confidence - (isDoubtful(s) ? 1 : 0) - s.flags.length * 0.05;
 }
 
-const ms = (iso: string | null) => (iso ? new Date(iso).getTime() : null);
-
-/** Consecutive shots that look like a retake: same hole, shortly after, close to the same spot. */
-export function retakePairs(s: RoundSummary): [ShotSummary, ShotSummary][] {
-  const out: [ShotSummary, ShotSummary][] = [];
-  for (let i = 1; i < s.shots.length; i++) {
-    const a = s.shots[i - 1];
-    const b = s.shots[i];
-    if (!a.hole || a.hole !== b.hole) continue;
-    const ta = ms(a.at);
-    const tb = ms(b.at);
-    const gap = ta !== null && tb !== null ? (tb - ta) / 1000 : a.clipId === b.clipId ? b.t - a.t : null;
-    if (gap === null || gap <= SAME_SHOT_S * 2 || gap > RETAKE_S) continue;
-    // In one clip the tee spot must match; across clips the same hole and time are enough.
-    if (a.clipId === b.clipId && Math.hypot(a.x - b.x, a.y - b.y) > RETAKE_SPOT) continue;
-    out.push([a, b]);
-  }
-  return out;
+/** The better angle of one strike: a confident, long track, filmed the way the video is shown. */
+export function angleScore(s: ShotSummary, clip: ClipSummary | undefined, kind: PlanKind): number {
+  return shotScore(s) + Math.min(s.trackPts, 60) / 300 + (clip && clip.portrait === (kind !== 'youtube') ? 0.1 : 0);
 }
 
-/** The same strike in two clips (two cameras running at once). */
-export function sameShotPairs(s: RoundSummary): [ShotSummary, ShotSummary][] {
+/**
+ * Consecutive strikes that look like a retake: same hole, shortly after, close to the same spot.
+ * A strike filmed from two angles counts once (`same` joins them, `pick` names the one to show);
+ * a pair that is one strike or two players' strikes is no retake.
+ */
+export function retakePairs(
+  s: RoundSummary,
+  same: ShotMatch[] = sameShotPairs(s),
+  pick: (g: ShotSummary[]) => ShotSummary = (g) => g[0],
+): [ShotSummary, ShotSummary][] {
+  const clip = new Map(s.clips.map((c) => [c.id, c]));
+  const groups = strikeGroups(s, same);
   const out: [ShotSummary, ShotSummary][] = [];
-  for (let i = 0; i < s.shots.length; i++)
-    for (let j = i + 1; j < s.shots.length; j++) {
-      const a = s.shots[i];
-      const b = s.shots[j];
-      const ta = ms(a.at);
-      const tb = ms(b.at);
-      if (a.clipId !== b.clipId && ta !== null && tb !== null && Math.abs(ta - tb) <= SAME_SHOT_S * 1000) out.push([a, b]);
-    }
+  for (let i = 1; i < groups.length; i++) {
+    const a = pick(groups[i - 1]);
+    const b = pick(groups[i]);
+    // Judged on one camera's view when a clip saw both strikes.
+    let pair: [ShotSummary, ShotSummary] = [a, b];
+    for (const x of groups[i - 1]) for (const y of groups[i]) if (x.clipId === y.clipId) pair = [x, y];
+    const [x, y] = pair;
+    const cx = clip.get(x.clipId);
+    const cy = clip.get(y.clipId);
+    if (cx && cy && compareShots(x, y, cx, cy).verdict === 'retake') out.push([a, b]);
+  }
   return out;
 }
 
@@ -192,9 +257,35 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     const c = s.clips.find((x) => x.id === id)!;
     return T.clip(c.n, c.name);
   };
+  const item = (x: ShotSummary, ...extra: ReasonCode[]): PlanItem => ({
+    shotId: x.id,
+    mediaId: x.clipId,
+    clip: x.clip,
+    clipName: s.clips.find((c) => c.id === x.clipId)?.name ?? '',
+    t: x.t,
+    reasons: shotReasons(x, ...extra),
+  });
+  const clipOf = new Map(s.clips.map((c) => [c.id, c]));
+  const best = (g: ShotSummary[]) => g.reduce((x, y) => (angleScore(y, clipOf.get(y.clipId), kind) > angleScore(x, clipOf.get(x.clipId), kind) ? y : x));
+
+  // One strike filmed from several angles: sure ones keep the better angle, the rest is asked below.
+  const same = sameShotPairs(s);
+  const sureGroups = strikeGroups(
+    s,
+    same.filter((m) => m.sure),
+  );
+  const keptOf = new Map<string, ShotSummary>();
+  for (const g of sureGroups) {
+    if (g.length < 2) continue;
+    const kept = best(g);
+    for (const x of g) keptOf.set(x.id, kept);
+    const shot = T.shot(kept);
+    notes.push(T.sameKept(shot[0].toUpperCase() + shot.slice(1), g.map((x) => clipName(x.clipId)).join(', '), clipName(kept.clipId)));
+  }
+  const dropped = new Set([...keptOf].filter(([id, kept]) => id !== kept.id).map(([id]) => id));
 
   // Shots the analysis is unsure about.
-  const doubtful = s.shots.filter(isDoubtful);
+  const doubtful = s.shots.filter((x) => isDoubtful(x) && !dropped.has(x.id));
   if (doubtful.length)
     questions.push({
       id: 'doubtful',
@@ -206,6 +297,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
       default: pref.goodOnly ? 'drop' : 'keep',
       shotIds: doubtful.map((x) => x.id),
       clipIds: [],
+      items: doubtful.slice(0, 200).map((x) => item(x)),
     });
 
   // Clips where no shot was found: only the YouTube video can use them (as a mood shot).
@@ -224,16 +316,24 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     });
   else if (empty.length) notes.push(T.skipped(list(empty.map((c) => T.clip(c.n, c.name)))));
 
-  // Clips without a recording time: the order falls back to the file name.
-  const untimed = s.clips.filter((c) => !c.recordedAt);
-  if (untimed.length && s.clips.length > 1)
+  // The order only needs a question when the times are missing or contradict the holes.
+  const conflict = s.order.conflict?.map((id) => s.clips.find((c) => c.id === id)!);
+  const untimed = s.clips.filter((c) => s.order.unsure.includes(c.id));
+  const holes = s.order.by !== 'hole' && s.clips.filter((c) => /^\d+$/.test(c.hole)).length >= 2 ? [{ id: 'holes', label: T.byHoles }] : [];
+  if (conflict && s.clips.length > 1)
     questions.push({
       id: 'order',
-      text: T.order(list(untimed.map((c) => T.clip(c.n, c.name)))),
-      options: [
-        { id: 'filename', label: T.byName },
-        { id: 'added', label: T.asAdded },
-      ],
+      text: T.conflict(...(conflict.map((c) => T.holeIn(T.hole(c.hole), T.clip(c.n, c.name))) as [string, string])),
+      options: [{ id: 'filmed', label: T.asFilmed }, ...holes],
+      default: 'filmed',
+      shotIds: [],
+      clipIds: conflict.map((c) => c.id),
+    });
+  else if (untimed.length && s.clips.length > 1)
+    questions.push({
+      id: 'order',
+      text: T.order(list(untimed.map((c) => T.clip(c.n, c.name))), untimed.length),
+      options: [{ id: 'filename', label: T.byName }, { id: 'added', label: T.asAdded }, ...holes],
       default: 'filename',
       shotIds: [],
       clipIds: untimed.map((c) => c.id),
@@ -259,7 +359,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
   });
 
   // Possible retakes (mulligans) on the same hole.
-  for (const [a, b] of retakePairs(s))
+  for (const [a, b] of retakePairs(s, same, best))
     questions.push({
       id: `retake:${a.id}:${b.id}`,
       text: T.retake(T.shot(a), T.shot(b)),
@@ -271,11 +371,18 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
       default: pref.goodOnly ? 'best' : 'both',
       shotIds: [a.id, b.id],
       clipIds: [],
+      items: [item(a, 'retake'), item(b, 'retake')],
     });
 
-  // The same shot filmed in two clips.
-  for (const [a, b] of sameShotPairs(s)) {
-    const better = shotScore(b) > shotScore(a) ? b : a;
+  // Maybe the same shot filmed in two clips.
+  const asked = new Set<string>();
+  for (const m of same) {
+    if (m.sure) continue;
+    const pair = [keptOf.get(m.a.id) ?? m.a, keptOf.get(m.b.id) ?? m.b];
+    const [a, b] = s.shots.filter((x) => pair.includes(x));
+    if (!b || asked.has(`${a.id}:${b.id}`)) continue;
+    asked.add(`${a.id}:${b.id}`);
+    const better = best([a, b]);
     questions.push({
       id: `same:${a.id}:${b.id}`,
       text: T.same(`${T.shot(a)}, ${clipName(a.clipId)}`, `${T.shot(b)}, ${clipName(b.clipId)}`),
@@ -287,6 +394,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
       default: `keep:${better.id}`,
       shotIds: [a.id, b.id],
       clipIds: [a.clipId, b.clipId],
+      items: [item(a, 'same_shot'), item(b, 'same_shot')],
     });
   }
 
@@ -294,9 +402,9 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
   return VideoPlan.parse({
     kind,
     template,
-    includeShotIds: s.shots.map((x) => x.id),
+    includeShotIds: s.shots.filter((x) => !dropped.has(x.id)).map((x) => x.id),
     title: pref.title ?? defaultTitle(s, locale),
     questions: questions.slice(0, 12),
-    notes,
+    notes: notes.slice(0, 10).map((n) => n.slice(0, 300)),
   });
 }

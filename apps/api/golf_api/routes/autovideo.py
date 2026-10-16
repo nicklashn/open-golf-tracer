@@ -17,6 +17,8 @@ from .projects import _project_media, get_project
 router = APIRouter(tags=["autovideo"])
 
 KINDS = ("youtube", "highlight", "shorts")
+# Up to 12 questions plus a keep/drop choice per shot ("shot:<id>") shown on the question cards.
+MAX_ANSWERS = 250
 
 
 def _short_map(v: dict[str, str] | None, limit: int, max_len: int) -> dict[str, str] | None:
@@ -47,7 +49,7 @@ class AutoVideoIn(BaseModel):
     @field_validator("answers")
     @classmethod
     def _answers(cls, v: dict[str, str] | None) -> dict[str, str] | None:
-        return _short_map(v, 20, 80)
+        return _short_map(v, MAX_ANSWERS, 80)
 
 
 class AnswersIn(BaseModel):
@@ -56,7 +58,7 @@ class AnswersIn(BaseModel):
     @field_validator("answers")
     @classmethod
     def _answers(cls, v: dict[str, str]) -> dict[str, str]:
-        return _short_map(v, 20, 80) or {}
+        return _short_map(v, MAX_ANSWERS, 80) or {}
 
 
 @router.post("/autovideo")

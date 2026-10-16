@@ -1,7 +1,7 @@
 import { migrateProject, type Project } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
-import { compose, planFromRules, prepare, readPreference, resolveAnswers, summarize, summaryText, VideoPlan } from '../src';
-import { demoProject, roundProject } from './fixtures';
+import { compose, itemPlace, planFromRules, prepare, readPreference, reasonText, resolveAnswers, shotChoices, summarize, summaryText, VideoPlan } from '../src';
+import { demoProject, roundProject, sound } from './fixtures';
 
 const params = [59.38, 0.557, 0.2887, 0.002126, -0.0008, 0.2177, -0.4986, 7.6239, 0.0059];
 const shot = (id: string, mediaId: string, impactTime: number, extra: Record<string, unknown> = {}) => ({
@@ -123,13 +123,73 @@ describe('planFromRules', () => {
     expect(shorts.notes.join(' ')).toContain('x.mov');
   });
 
-  it('asks whether file-name order is right when clips have no recording time', () => {
-    const doc = project([media('b2', null, '2'), media('a1', null, '1')], [shot('s2', 'b2', 5), shot('s1', 'a1', 5)]);
+  it('asks whether file-name order is right when clips have neither a recording time nor a hole', () => {
+    const doc = project([media('b2', null, null), media('a1', null, null)], [shot('s2', 'b2', 5), shot('s1', 'a1', 5)]);
     const plan = planFromRules(summarize(doc), '', 'en');
     expect(ids(plan)).toEqual(['order']);
+    expect(plan.questions[0].options.map((o) => o.id)).toEqual(['filename', 'added']);
     const order = (answers: Record<string, string>) => [...new Set(prepare(doc, plan, answers).doc.clips.map((c) => c.mediaId))];
     expect(order({})).toEqual(['a1', 'b2']); // file names
     expect(order({ order: 'added' })).toEqual(['b2', 'a1']); // as added
+  });
+
+  it('orders clips without a recording time by hole, wrapping 18 → 1, without asking', () => {
+    const doc = project(
+      [media('x1', null, '2'), media('x2', null, '17'), media('x3', null, '10'), media('x4', null, '1'), media('x5', null, '12')],
+      [shot('s1', 'x1', 5), shot('s2', 'x2', 5), shot('s3', 'x3', 5), shot('s4', 'x4', 5), shot('s5', 'x5', 5)],
+    );
+    const s = summarize(doc);
+    expect(s.clips.map((c) => c.hole)).toEqual(['10', '12', '17', '1', '2']);
+    expect(s.order.by).toBe('hole');
+    expect(planFromRules(s, '', 'en').questions).toEqual([]);
+  });
+
+  it('does not trust file dates over holes, and asks about a clip with neither', () => {
+    const file = { recordedAtSource: 'file' };
+    const doc = project(
+      [media('a', '2026-10-16T09:00:01Z', '3', file), media('b', '2026-10-16T09:00:02Z', '1', file), media('c', '2026-10-16T09:00:03Z', null, file)],
+      [shot('s1', 'a', 5), shot('s2', 'b', 5), shot('s3', 'c', 5)],
+    );
+    const s = summarize(doc);
+    expect(s.clips.map((c) => c.id)).toEqual(['b', 'a', 'c']);
+    // File dates are no strike times: copied files land seconds apart and are no "same shot".
+    expect(s.shots.every((x) => x.at === null)).toBe(true);
+    const plan = planFromRules(s, '', 'en');
+    expect(ids(plan)).toEqual(['order']);
+    expect(plan.questions[0].clipIds).toEqual(['c']);
+  });
+
+  it('keeps the filmed order but asks when sure times contradict the holes', () => {
+    const doc = project(
+      [
+        media('a', '2026-06-16T10:00:00+0200', '1'),
+        media('b', '2026-06-16T10:20:00+0200', '7'),
+        media('c', '2026-06-16T10:40:00+0200', '3'),
+        media('d', '2026-06-16T11:00:00+0200', '4'),
+      ],
+      [shot('s1', 'a', 5), shot('s2', 'b', 5), shot('s3', 'c', 5), shot('s4', 'd', 5)],
+    );
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(ids(plan)).toEqual(['order']);
+    const q = plan.questions[0];
+    expect(q.text).toBe('The recording times say hole 7 in clip 2 (b.mov) was filmed before hole 3 in clip 3 (c.mov). Is that right?');
+    expect(q.options.map((o) => o.id)).toEqual(['filmed', 'holes']);
+    expect(q.default).toBe('filmed');
+    const order = (answers: Record<string, string>) => [...new Set(prepare(doc, plan, answers).doc.clips.map((c) => c.mediaId))];
+    expect(order({})).toEqual(['a', 'b', 'c', 'd']);
+    expect(order({ order: 'holes' })).toEqual(['a', 'c', 'd', 'b']);
+  });
+
+  it('a round started on hole 10, filmed by name-timed clips, needs no question', () => {
+    const name = { recordedAtSource: 'filename' };
+    const holes = ['10', '11', '13', '18', '1', '2', '9'];
+    const doc = project(
+      holes.map((h, i) => media(`h${h}`, `2026-06-16T${String(10 + i).padStart(2, '0')}:00:00+0200`, h, name)),
+      holes.map((h) => shot(`s${h}`, `h${h}`, 5)),
+    );
+    const s = summarize(doc);
+    expect(s.order).toEqual({ by: 'time', unsure: [], conflict: null });
+    expect(planFromRules(s, '', 'en').questions).toEqual([]);
   });
 
   it('asks which hole a clip without GPS in the middle of a round is', () => {
@@ -170,10 +230,124 @@ describe('planFromRules', () => {
     expect(shown(prepare(doc, plan, { [q.id]: 'both' }).doc).sort()).toEqual(['sa', 'sb']);
   });
 
+  it('keeps the better angle of a shot two phones heard alike, without asking', () => {
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:01+0200', '1', { width: 1920, height: 1080 })],
+      [shot('sa', 'a', 7, { sound: sound(1) }), shot('sb', 'b', 6.02, { sound: sound(1, 0.3, 1) })],
+    );
+    const yt = planFromRules(summarize(doc), 'youtube', 'en');
+    expect(ids(yt)).toEqual([]);
+    expect(yt.includeShotIds).toEqual(['sb']); // landscape for YouTube
+    expect(yt.notes.join(' ')).toContain('Shot 2 (hole 1) was filmed from more than one angle: clip 1 (a.mov), clip 2 (b.mov). Using clip 2 (b.mov).');
+    expect(shown(prepare(doc, yt, {}).doc)).toEqual(['sb']);
+    expect(planFromRules(summarize(doc), 'tiktok', 'da').includeShotIds).toEqual(['sa']); // portrait for a short
+  });
+
+  it('does not merge a partner teeing off right after from the same spot', () => {
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:45+0200', '1')],
+      [shot('me', 'a', 7, { sound: sound(1) }), shot('partner', 'b', 7, { sound: sound(2), anchor: { x: 700, y: 1500 } })],
+    );
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(ids(plan)).toEqual([]);
+    expect(plan.includeShotIds).toEqual(['me', 'partner']);
+  });
+
+  it('asks when two clips sound alike but their clocks disagree', () => {
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:40+0200', '1')],
+      [shot('sa', 'a', 7, { sound: sound(1) }), shot('sb', 'b', 7, { sound: sound(1, 0.3) })],
+    );
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(ids(plan)).toEqual(['same:sa:sb']);
+    expect(plan.includeShotIds).toEqual(['sa', 'sb']);
+  });
+
+  it('asks about a retake filmed by two phones once, between the angles kept', () => {
+    const doc = project(
+      [
+        media('a1', '2026-06-16T10:00:00+0200', '1'),
+        media('b1', '2026-06-16T10:00:01+0200', '1', { width: 1920, height: 1080 }),
+        media('a2', '2026-06-16T10:01:00+0200', '1'),
+        media('b2', '2026-06-16T10:01:01+0200', '1', { width: 1920, height: 1080 }),
+      ],
+      [
+        shot('x1', 'a1', 7, { sound: sound(1) }),
+        shot('y1', 'b1', 6, { sound: sound(1, 0.3) }),
+        shot('x2', 'a2', 7, { sound: sound(3) }),
+        shot('y2', 'b2', 6, { sound: sound(3, 0.3) }),
+      ],
+    );
+    const plan = planFromRules(summarize(doc), 'youtube', 'en');
+    expect(ids(plan)).toEqual(['retake:y1:y2']);
+    expect(plan.includeShotIds).toEqual(['y1', 'y2']);
+    expect(shown(prepare(doc, plan, { 'retake:y1:y2': 'last' }).doc)).toEqual(['y2']);
+  });
+
   it('picks the template the preference asks for', () => {
     const s = summarize(plainRound());
     expect(planFromRules(s, 'tv style', 'en').template).toBe('tv');
     expect(planFromRules(s, 'calm', 'en').template).toBe('minimal');
+  });
+});
+
+describe('the shots a question is about (cards)', () => {
+  it('doubtful shots carry clip, time in the clip and reasons', () => {
+    const doc = plainRound();
+    doc.shots[1] = { ...doc.shots[1], impactTime: 27.24, warnings: [{ code: 'implausible' }, { code: 'few_points' }] };
+    doc.shots[2] = { ...doc.shots[2], confidence: 0.3, warnings: [{ code: 'no_track' }, { code: 'low_confidence' }] };
+    const q = planFromRules(summarize(doc), '', 'en').questions.find((x) => x.id === 'doubtful')!;
+    expect(q.items).toEqual([
+      { shotId: 's2', mediaId: 'b', clip: 2, clipName: 'b.mov', t: 27.2, reasons: ['implausible', 'few_points'] },
+      { shotId: 's3', mediaId: 'c', clip: 3, clipName: 'c.mov', t: 5, reasons: ['practice_swing'] },
+    ]);
+    expect(itemPlace(q.items![0], 'da')).toBe('Klip 2 · 0:27');
+    expect(reasonText('practice_swing', 'en')).toContain('practice swing');
+    expect(reasonText('no_track', 'da')).toContain('ikke fundet i luften');
+  });
+
+  it('retakes and the same shot from two angles list both shots', () => {
+    const plan = planFromRules(summarize(roundProject()), '', 'en');
+    expect(plan.questions[0].items?.map((i) => [i.shotId, i.reasons.includes('retake')])).toEqual([
+      ['s2', true],
+      ['s3', true],
+    ]);
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:02+0200', '1')],
+      [shot('sa', 'a', 7, { confidence: 0.7 }), shot('sb', 'b', 5.5, { confidence: 0.9 })],
+    );
+    const same = planFromRules(summarize(doc), '', 'en').questions.find((x) => x.id.startsWith('same:'))!;
+    expect(same.items?.map((i) => [i.mediaId, i.clip, i.t, i.reasons])).toEqual([
+      ['a', 1, 7, ['same_shot']],
+      ['b', 2, 5.5, ['same_shot']],
+    ]);
+  });
+
+  it('a stored plan without items still parses', () => {
+    const plan = planFromRules(summarize(roundProject()), '', 'en');
+    const old = { ...plan, questions: plan.questions.map(({ items: _, ...q }) => q) };
+    expect(VideoPlan.parse(old).questions[0].items).toBeUndefined();
+    expect(shotChoices(VideoPlan.parse(old), { 'shot:s2': 'drop' }).size).toBe(0);
+  });
+
+  it("a choice for one shot wins over the question's answer", () => {
+    const doc = plainRound();
+    doc.shots[1] = { ...doc.shots[1], warnings: [{ code: 'no_track' }] };
+    doc.shots[2] = { ...doc.shots[2], confidence: 0.3 };
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(shown(prepare(doc, plan, { doubtful: 'keep', 'shot:s3': 'drop' }).doc)).toEqual(['s1', 's2']);
+    expect(shown(prepare(doc, plan, { doubtful: 'drop', 'shot:s2': 'keep' }).doc)).toEqual(['s1', 's2']);
+    // Only 'keep' / 'drop' for shots the questions show; anything else is ignored.
+    expect(shown(prepare(doc, plan, { 'shot:s3': 'maybe', 'shot:s1': 'drop' }).doc)).toEqual(['s1', 's2', 's3']);
+    // Same shot from two angles: keep the other angle too.
+    const two = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:02+0200', '1')],
+      [shot('sa', 'a', 7, { confidence: 0.7 }), shot('sb', 'b', 5.5, { confidence: 0.9 })],
+    );
+    const p2 = planFromRules(summarize(two), '', 'en');
+    expect(shown(prepare(two, p2, { 'shot:sa': 'keep' }).doc).sort()).toEqual(['sa', 'sb']);
+    const [v] = compose(doc, plan, { 'shot:s2': 'drop', 'shot:s3': 'drop' }, { locale: 'en' });
+    expect(v.document.layers.filter((l) => l.type === 'statCard')).toHaveLength(1);
   });
 });
 

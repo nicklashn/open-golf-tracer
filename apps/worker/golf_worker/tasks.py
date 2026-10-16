@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from golf_api.chronology import epoch
 from golf_api.db import session_scope, utcnow
 from golf_api.documents import clean_shot
 from golf_api.models import Media, Project
@@ -213,7 +214,7 @@ def _place(m: Media, src: Path) -> dict | None:
 MARGIN_TRUSTED_M = 15   # a neighbour's hole is trusted when no other hole is within this much
 
 
-def _round_holes(project_id: str, skip: str) -> list[tuple[str, str]]:
+def _round_holes(project_id: str, skip: str) -> list[tuple[float, str]]:
     """(recorded at, hole) of the project's other clips whose hole is certain."""
     out = []
     with session_scope() as db:
@@ -223,8 +224,8 @@ def _round_holes(project_id: str, skip: str) -> list[tuple[str, str]]:
             if mid == skip or not pl.get("hole") or pl.get("alternatives") or float(pl.get("margin") or 0) < MARGIN_TRUSTED_M:
                 continue
             mm = db.get(Media, mid)
-            rec = (mm.probe or {}).get("recordedAt") if mm else None
-            if rec:
+            rec = epoch((mm.probe or {}).get("recordedAt")) if mm else None
+            if rec is not None:
                 out.append((rec, pl["hole"]))
     return out
 
@@ -234,8 +235,8 @@ def _resolve_tee(project_id: str, m: Media, place: dict) -> dict:
     before and after). Unresolved, the place keeps no hole – and caps nothing."""
     from golf_api.routes.geo import pick_alternative
 
-    rec = (m.probe or {}).get("recordedAt")
-    if not rec:
+    rec = epoch((m.probe or {}).get("recordedAt"))
+    if rec is None:
         return place
     holes = _round_holes(project_id, m.id)
     prev = max((h for h in holes if h[0] < rec), default=None)

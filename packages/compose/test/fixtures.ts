@@ -107,3 +107,16 @@ export function withStableIds<T>(fn: () => T): T {
 
 /** Stable JSON for comparing documents (key order as built). */
 export const stable = (p: unknown) => JSON.parse(JSON.stringify(p));
+
+/** A made-up sound signature (see match.ts): what one strike sounded like (`seed`), heard by one phone (`noise`), `lag` frames late. */
+export function sound(seed: number, noise = 0, lag = 0) {
+  const rng = (r: number) => () => ((r = (r * 9301 + 49297) % 233280) / 233280) * 2 - 1;
+  const heard = rng(seed);
+  const hiss = rng(seed * 7 + 3);
+  const base = [0, 1, 2].map(() => Array.from({ length: 90 }, () => heard() * 1.5));
+  return {
+    rate: 40,
+    start: -0.5,
+    bands: base.map((row) => Array.from({ length: 80 }, (_, k) => (k === 20 || k === 21 ? 0 : Number((row[k + 5 - lag] + noise * hiss()).toFixed(1))))),
+  };
+}

@@ -9,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from .chronology import clip_slot
 from .config import ROOT
 from .errors import ApiError
 from .models import Media, Project
@@ -16,7 +17,7 @@ from .models import Media, Project
 SCHEMA_VERSION = 1
 MAX_DOC_BYTES = 5 * 1024 * 1024
 SHOT_KEYS = {"id", "mediaId", "source", "kind", "impactTime", "confidence", "warnings", "camera", "anchor", "track", "params",
-             "rmsPx", "auto", "constraints", "timing", "slowmo", "club", "style", "visible", "label"}
+             "rmsPx", "auto", "constraints", "timing", "slowmo", "club", "style", "visible", "label", "sound"}
 
 
 @functools.cache
@@ -43,7 +44,8 @@ def media_ref(m: Media) -> dict[str, Any]:
     p = m.probe or {}
     return {"id": m.id, "kind": m.kind, "name": m.filename[:255], "width": int(p.get("width") or 0), "height": int(p.get("height") or 0),
             "fps": float(p.get("fps") or 0), "duration": float(p.get("duration") or 0), "hdr": bool(p.get("hdr")),
-            "hasAudio": bool(p.get("hasAudio")), "geo": p.get("geo"), "recordedAt": p.get("recordedAt")}
+            "hasAudio": bool(p.get("hasAudio")), "geo": p.get("geo"), "recordedAt": p.get("recordedAt"),
+            "recordedAtSource": p.get("recordedAtSource")}
 
 
 def new_document(name: str, video: Media | None = None) -> dict[str, Any]:
@@ -55,20 +57,17 @@ def new_document(name: str, video: Media | None = None) -> dict[str, Any]:
 
 
 def attach_video(doc: dict[str, Any], ref: dict[str, Any]) -> None:
-    """Adds a clip of the whole video, placed among the other clips by when it was filmed."""
+    """Adds a clip of the whole video, placed among the other clips in the round order (chronology.py,
+    like clipSlot in the editor)."""
     doc.setdefault("media", {})[ref["id"]] = ref
+    _place_clip(doc, ref["id"])
+
+
+def _place_clip(doc: dict[str, Any], media_id: str) -> None:
     clips = doc.setdefault("clips", [])
-    clip = {"id": f"clip_{ref['id'][-8:]}_{len(clips)}", "kind": "video", "mediaId": ref["id"], "in": 0,
-            "out": round(float(ref.get("duration") or 0), 4), "speed": 1, "volume": 1, "muted": False}
-    when = ref.get("recordedAt") or ""
-    at = len(clips)
-    if when:
-        for i, c in enumerate(clips):
-            other = (doc["media"].get(c.get("mediaId")) or {}).get("recordedAt") or ""
-            if other and other > when:
-                at = i
-                break
-    clips.insert(at, clip)
+    clip = {"id": f"clip_{media_id[-8:]}_{len(clips)}", "kind": "video", "mediaId": media_id, "in": 0,
+            "out": round(float(doc["media"][media_id].get("duration") or 0), 4), "speed": 1, "volume": 1, "muted": False}
+    clips.insert(clip_slot(doc, media_id), clip)
 
 
 def add_video(doc: dict[str, Any], m: Media) -> None:
@@ -92,8 +91,10 @@ def merged_document(p: Project) -> dict[str, Any]:
     have = {s.get("id") for s in doc.get("shots", [])}
     gone = set(doc.get("dismissedShots", []))
     for media_id, res in (p.analysis or {}).items():
-        if media_id not in doc.get("media", {}) and res.get("attach"):
-            attach_video(doc, res["attach"])
+        # A new clip is placed once its hole is known too (the round order may go by hole).
+        new = media_id not in doc.get("media", {}) and bool(res.get("attach"))
+        if new:
+            doc.setdefault("media", {})[media_id] = copy.deepcopy(res["attach"])
         if media_id not in doc.get("media", {}):
             continue
         place = dict(res.get("place") or {})
@@ -104,6 +105,8 @@ def merged_document(p: Project) -> dict[str, Any]:
         # A place without a hole (an ambiguous tee) is replaced once the round resolves it.
         if "course" in place and (not current or (not current.get("hole") and place.get("hole"))):
             doc["media"][media_id]["place"] = {k: v for k, v in place.items() if k not in ("alternatives", "margin")}
+        if new:
+            _place_clip(doc, media_id)
         for shot in res.get("shots", []):
             if shot["id"] not in have and shot["id"] not in gone:
                 doc.setdefault("shots", []).append(shot)

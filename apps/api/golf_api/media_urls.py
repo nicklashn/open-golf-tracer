@@ -48,6 +48,7 @@ def public_media(m: Media) -> dict[str, Any]:
         "hasAudio": bool(p.get("hasAudio")),
         "geo": p.get("geo"),
         "recordedAt": p.get("recordedAt"),
+        "recordedAtSource": p.get("recordedAtSource"),
         "urls": {v: media_url(m, v) for v in VARIANTS if v == "original" or (m.derived or {}).get(v)},
         "thumbs": (m.derived or {}).get("thumbs_info"),
         "createdAt": m.created_at.isoformat(),
