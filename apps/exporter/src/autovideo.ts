@@ -16,7 +16,7 @@ import { basename, extname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
-import type { PlanQuestion } from '@golf/compose';
+import { itemPlace, reasonText, type PlanQuestion } from '@golf/compose';
 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.avi', '.webm']);
 
@@ -130,7 +130,7 @@ async function waitFor(c: Client, projectId: string, label: string, done: (jobs:
 
 /** Shows the questions together; Enter keeps the default. When input ends (piped, no terminal)
  *  the remaining questions keep their defaults. */
-async function ask(questions: PlanQuestion[]): Promise<Record<string, string>> {
+async function ask(questions: PlanQuestion[], locale: 'da' | 'en'): Promise<Record<string, string>> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   let closed = false;
   const ended = new Promise<string>((done) =>
@@ -143,6 +143,10 @@ async function ask(questions: PlanQuestion[]): Promise<Record<string, string>> {
   try {
     for (const [n, q] of questions.entries()) {
       process.stderr.write(`\n${n + 1}. ${q.text}\n`);
+      for (const item of q.items ?? [])
+        process.stderr.write(
+          `   - ${itemPlace(item, locale)} (${item.clipName})${item.reasons.length ? `: ${item.reasons.map((r) => reasonText(r, locale)).join('; ')}` : ''}\n`,
+        );
       q.options.forEach((o, i) => process.stderr.write(`   ${i + 1}) ${o.label}${o.id === q.default ? '  (default)' : ''}\n`));
       const a = closed ? '' : (await Promise.race([rl.question('   > '), ended])).trim();
       const pick = q.options[Number(a) - 1];
@@ -202,7 +206,7 @@ async function main(): Promise<void> {
     process.stderr.write(`\r  Video: ${job.message} ${Math.round(job.progress * 100)}%      `);
     if (job.status === 'awaiting_answers') {
       const questions = (job.result.questions ?? []) as PlanQuestion[];
-      const answers = await ask(questions);
+      const answers = await ask(questions, locale);
       job = await c.call<Job>('POST', `/jobs/${job.id}/answers`, { answers });
     } else if (job.status === 'failed' || job.status === 'canceled') throw new Error(`The video failed: ${job.error || job.status}`);
     else if (job.status === 'succeeded') break;

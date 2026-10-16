@@ -5,7 +5,7 @@
 import { TEMPLATES } from '@golf/render';
 import { migrateProject, newId, timelineDuration, type Clip, type Layer, type Project } from '@golf/schema';
 import { layerDefaults, type LayerNames } from './layers';
-import { resolveAnswers, type PlanAnswers, type VideoPlan } from './plan';
+import { resolveAnswers, shotChoices, type PlanAnswers, type VideoPlan } from './plan';
 import { BROLL_S, shotScore } from './rules';
 import { shortFor } from './shorts';
 import { clipOrder, summarize } from './summary';
@@ -25,7 +25,7 @@ export interface ComposeOptions {
 
 /**
  * The project as the plan and answers want it before a generator runs: shots left out are
- * hidden, clips are in playing order, clips without GPS get the hole the user picked.
+ * hidden (per-shot choices win over a question's answer), clips are in playing order, clips without GPS get the hole the user picked.
  */
 export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined): { doc: Project; broll: string[] } {
   const a = resolveAnswers(plan, answers);
@@ -50,6 +50,11 @@ export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | nu
       const chosen = choice.slice(5);
       for (const id of question.shotIds) if (id !== chosen) keep.delete(id);
     }
+  }
+  // A choice for one shot wins over its question's answer.
+  for (const [id, choice] of shotChoices(plan, answers)) {
+    if (choice === 'drop') keep.delete(id);
+    else if (byId.has(id)) keep.add(id);
   }
 
   // Playing order: as filmed (file names for clips without a time), as added, or the plan's own.

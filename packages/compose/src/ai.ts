@@ -173,7 +173,7 @@ export function userMessage(summary: RoundSummary, preference: string, rulePlan:
     '',
     'RULE PLAN',
     JSON.stringify(plan),
-    ...(answers ? ['', 'ANSWERS (question id → chosen option id)', JSON.stringify(answers)] : []),
+    ...(answers ? ['', 'ANSWERS (question id → chosen option id; shot:<shot id> → keep or drop for that one shot, which wins)', JSON.stringify(answers)] : []),
   ].join('\n');
 }
 

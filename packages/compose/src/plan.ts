@@ -10,6 +10,40 @@ export type PlanKind = (typeof PLAN_KINDS)[number];
 
 const shortText = (max: number) => z.string().trim().max(max);
 
+/**
+ * Why a shot is asked about, as codes the apps turn into plain words: the analysis' warnings,
+ * plus `practice_swing` (no ball in the air and low confidence), `retake` and `same_shot`.
+ */
+export const REASON_CODES = [
+  'no_track',
+  'implausible',
+  'carry_mismatch',
+  'default_path',
+  'short_shot',
+  'low_confidence',
+  'few_points',
+  'start_extrapolated',
+  'hole_limit',
+  'practice_swing',
+  'retake',
+  'same_shot',
+] as const;
+export const ReasonCode = z.enum(REASON_CODES);
+export type ReasonCode = z.infer<typeof ReasonCode>;
+
+/** One shot a question is about, with where to find it in the video. */
+export const PlanItem = z.object({
+  shotId: z.string().max(64),
+  mediaId: z.string().max(64),
+  /** The clip's position in the round (1-based) and its file name. */
+  clip: z.number().int().min(0).max(9999),
+  clipName: shortText(200),
+  /** Seconds into the clip's video file at the strike: the file's own clock, as a player shows it (not real time for slow motion). */
+  t: z.number().min(0),
+  reasons: z.array(ReasonCode).max(12).default([]),
+});
+export type PlanItem = z.infer<typeof PlanItem>;
+
 export const PlanQuestion = z.object({
   id: z.string().min(1).max(80),
   text: shortText(300).min(1),
@@ -21,6 +55,8 @@ export const PlanQuestion = z.object({
   default: z.string().min(1).max(80),
   shotIds: z.array(z.string().max(64)).max(200).default([]),
   clipIds: z.array(z.string().max(64)).max(200).default([]),
+  /** The shots asked about, shown as cards; each can be kept or removed on its own. */
+  items: z.array(PlanItem).max(200).optional(),
 });
 export type PlanQuestion = z.infer<typeof PlanQuestion>;
 
@@ -53,9 +89,24 @@ export const VideoPlan = z
   });
 export type VideoPlan = z.infer<typeof VideoPlan>;
 
-/** Answers by question id: the chosen option id. */
+/** Answers by question id: the chosen option id; `shot:<shotId>` → 'keep' | 'drop' for one shot. */
 export const PlanAnswers = z.record(z.string().max(80), z.string().max(80));
 export type PlanAnswers = z.infer<typeof PlanAnswers>;
+
+export const ShotChoice = z.enum(['keep', 'drop']);
+export type ShotChoice = z.infer<typeof ShotChoice>;
+export const shotAnswerKey = (shotId: string) => `shot:${shotId}`;
+
+/** Per-shot choices for shots shown as items of a question; they win over the question's answer. */
+export function shotChoices(plan: VideoPlan, answers: PlanAnswers | null | undefined): Map<string, ShotChoice> {
+  const out = new Map<string, ShotChoice>();
+  for (const q of plan.questions)
+    for (const item of q.items ?? []) {
+      const c = ShotChoice.safeParse(answers?.[shotAnswerKey(item.shotId)]);
+      if (c.success) out.set(item.shotId, c.data);
+    }
+  return out;
+}
 
 /** The chosen option for every question: the user's answer when it is one of the options, else the default. */
 export function resolveAnswers(plan: VideoPlan, answers: PlanAnswers | null | undefined): Record<string, string> {

@@ -94,3 +94,14 @@ def test_rejects_clips_from_other_projects_and_oversized_input(client, tiny_vide
     assert r.status_code == 422
     r = client.post("/api/autovideo", json={"projectId": p["id"], "preference": "x" * 1001})
     assert r.status_code == 422
+
+
+def test_answers_take_a_choice_per_shot(client, tiny_video):
+    p, _ = _round(client, tiny_video)
+    job = client.post("/api/autovideo", json={"projectId": p["id"]}).json()
+    client.post(f"/api/internal/jobs/{job['id']}/await", json={"result": {"questions": []}}, headers=_internal())
+    answers = {"doubtful": "keep", **{f"shot:s{i}": "drop" for i in range(60)}}
+    r = client.post(f"/api/jobs/{job['id']}/answers", json={"answers": answers})
+    assert r.status_code == 200, r.text
+    too_many = {f"shot:s{i}": "drop" for i in range(300)}
+    assert client.post("/api/autovideo", json={"projectId": p["id"], "answers": too_many}).status_code == 422

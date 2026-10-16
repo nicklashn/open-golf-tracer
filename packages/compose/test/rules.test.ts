@@ -1,6 +1,6 @@
 import { migrateProject, type Project } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
-import { compose, planFromRules, prepare, readPreference, resolveAnswers, summarize, summaryText, VideoPlan } from '../src';
+import { compose, itemPlace, planFromRules, prepare, readPreference, reasonText, resolveAnswers, shotChoices, summarize, summaryText, VideoPlan } from '../src';
 import { demoProject, roundProject } from './fixtures';
 
 const params = [59.38, 0.557, 0.2887, 0.002126, -0.0008, 0.2177, -0.4986, 7.6239, 0.0059];
@@ -174,6 +174,66 @@ describe('planFromRules', () => {
     const s = summarize(plainRound());
     expect(planFromRules(s, 'tv style', 'en').template).toBe('tv');
     expect(planFromRules(s, 'calm', 'en').template).toBe('minimal');
+  });
+});
+
+describe('the shots a question is about (cards)', () => {
+  it('doubtful shots carry clip, time in the clip and reasons', () => {
+    const doc = plainRound();
+    doc.shots[1] = { ...doc.shots[1], impactTime: 27.24, warnings: [{ code: 'implausible' }, { code: 'few_points' }] };
+    doc.shots[2] = { ...doc.shots[2], confidence: 0.3, warnings: [{ code: 'no_track' }, { code: 'low_confidence' }] };
+    const q = planFromRules(summarize(doc), '', 'en').questions.find((x) => x.id === 'doubtful')!;
+    expect(q.items).toEqual([
+      { shotId: 's2', mediaId: 'b', clip: 2, clipName: 'b.mov', t: 27.2, reasons: ['implausible', 'few_points'] },
+      { shotId: 's3', mediaId: 'c', clip: 3, clipName: 'c.mov', t: 5, reasons: ['practice_swing'] },
+    ]);
+    expect(itemPlace(q.items![0], 'da')).toBe('Klip 2 · 0:27');
+    expect(reasonText('practice_swing', 'en')).toContain('practice swing');
+    expect(reasonText('no_track', 'da')).toContain('ikke fundet i luften');
+  });
+
+  it('retakes and the same shot from two angles list both shots', () => {
+    const plan = planFromRules(summarize(roundProject()), '', 'en');
+    expect(plan.questions[0].items?.map((i) => [i.shotId, i.reasons.includes('retake')])).toEqual([
+      ['s2', true],
+      ['s3', true],
+    ]);
+    const doc = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:02+0200', '1')],
+      [shot('sa', 'a', 7, { confidence: 0.7 }), shot('sb', 'b', 5.5, { confidence: 0.9 })],
+    );
+    const same = planFromRules(summarize(doc), '', 'en').questions.find((x) => x.id.startsWith('same:'))!;
+    expect(same.items?.map((i) => [i.mediaId, i.clip, i.t, i.reasons])).toEqual([
+      ['a', 1, 7, ['same_shot']],
+      ['b', 2, 5.5, ['same_shot']],
+    ]);
+  });
+
+  it('a stored plan without items still parses', () => {
+    const plan = planFromRules(summarize(roundProject()), '', 'en');
+    const old = { ...plan, questions: plan.questions.map(({ items: _, ...q }) => q) };
+    expect(VideoPlan.parse(old).questions[0].items).toBeUndefined();
+    expect(shotChoices(VideoPlan.parse(old), { 'shot:s2': 'drop' }).size).toBe(0);
+  });
+
+  it("a choice for one shot wins over the question's answer", () => {
+    const doc = plainRound();
+    doc.shots[1] = { ...doc.shots[1], warnings: [{ code: 'no_track' }] };
+    doc.shots[2] = { ...doc.shots[2], confidence: 0.3 };
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(shown(prepare(doc, plan, { doubtful: 'keep', 'shot:s3': 'drop' }).doc)).toEqual(['s1', 's2']);
+    expect(shown(prepare(doc, plan, { doubtful: 'drop', 'shot:s2': 'keep' }).doc)).toEqual(['s1', 's2']);
+    // Only 'keep' / 'drop' for shots the questions show; anything else is ignored.
+    expect(shown(prepare(doc, plan, { 'shot:s3': 'maybe', 'shot:s1': 'drop' }).doc)).toEqual(['s1', 's2', 's3']);
+    // Same shot from two angles: keep the other angle too.
+    const two = project(
+      [media('a', '2026-06-16T10:00:00+0200', '1'), media('b', '2026-06-16T10:00:02+0200', '1')],
+      [shot('sa', 'a', 7, { confidence: 0.7 }), shot('sb', 'b', 5.5, { confidence: 0.9 })],
+    );
+    const p2 = planFromRules(summarize(two), '', 'en');
+    expect(shown(prepare(two, p2, { 'shot:sa': 'keep' }).doc).sort()).toEqual(['sa', 'sb']);
+    const [v] = compose(doc, plan, { 'shot:s2': 'drop', 'shot:s3': 'drop' }, { locale: 'en' });
+    expect(v.document.layers.filter((l) => l.type === 'statCard')).toHaveLength(1);
   });
 });
 

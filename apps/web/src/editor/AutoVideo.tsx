@@ -3,12 +3,16 @@
 /**
  * "Make a video for me": pick clips, write a preference, and the server's compose job edits the
  * video. When the rules are unsure it asks once, with every question on one screen and the
- * default answer already picked; otherwise it runs to the end on its own.
+ * default answer already picked; otherwise it runs to the end on its own. Questions about
+ * particular shots show each one as a card (a short loop around the strike) that can be kept or
+ * removed on its own, or opened in the editor.
  */
-import type { PlanQuestion } from '@golf/compose';
-import { Check, Copy, ExternalLink, Loader2, Sparkles } from 'lucide-react';
+import { clock, shotAnswerKey, type PlanItem, type PlanQuestion, type ShotChoice } from '@golf/compose';
+import { sourcePath } from '@golf/render';
+import type { Shot } from '@golf/schema';
+import { Check, Copy, ExternalLink, Loader2, Pause, Play, Sparkles, SquarePen } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/controls';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -20,6 +24,7 @@ import { useJobEvents, type JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
 import { saveNow } from './autosave';
+import * as ops from './ops';
 import { useEditor } from './store';
 
 interface Result {
@@ -173,7 +178,31 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
               <ol className="flex max-h-[50vh] flex-col gap-4 overflow-y-auto pr-1" data-testid="auto-questions">
                 {questions.map((q, i) => (
                   <li key={q.id}>
-                    <Question n={i + 1} q={q} value={answers[q.id] ?? q.default} onChange={(v) => setAnswers((a) => ({ ...a, [q.id]: v }))} />
+                    <Question
+                      n={i + 1}
+                      q={q}
+                      value={answers[q.id] ?? q.default}
+                      // A new answer for the question starts its shots over from that answer.
+                      onChange={(v) =>
+                        setAnswers((a) => {
+                          const next = { ...a, [q.id]: v };
+                          for (const item of q.items ?? []) delete next[shotAnswerKey(item.shotId)];
+                          return next;
+                        })
+                      }
+                    />
+                    {q.items?.length ? (
+                      <ShotCards
+                        q={q}
+                        answer={answers[q.id] ?? q.default}
+                        choices={answers}
+                        onChoose={(shotId, c) => setAnswers((a) => ({ ...a, [shotAnswerKey(shotId)]: c }))}
+                        onFix={(shot) => {
+                          onOpenChange(false);
+                          ops.jumpToShot(shot);
+                        }}
+                      />
+                    ) : null}
                   </li>
                 ))}
               </ol>
@@ -294,6 +323,214 @@ function Question({ n, q, value, onChange }: { n: number; q: PlanQuestion; value
         ))}
       </div>
     </fieldset>
+  );
+}
+
+/** Whether a question's answer keeps a shot; null when it depends on more than the answer ("only the best"). */
+function keptByAnswer(q: PlanQuestion, answer: string, shotId: string): ShotChoice | null {
+  if (q.id === 'doubtful') return answer === 'drop' ? 'drop' : 'keep';
+  if (answer === 'both') return 'keep';
+  if (q.id.startsWith('retake:') && answer === 'last') return shotId === q.shotIds[0] ? 'drop' : 'keep';
+  if (q.id.startsWith('same:') && answer.startsWith('keep:')) return answer.slice(5) === shotId ? 'keep' : 'drop';
+  return null;
+}
+
+function ShotCards(p: {
+  q: PlanQuestion;
+  answer: string;
+  choices: Record<string, string>;
+  onChoose: (shotId: string, c: ShotChoice) => void;
+  onFix: (shot: Shot) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <ul className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label={t.auto.shotsAsked}>
+      {(p.q.items ?? []).map((item) => {
+        const own = p.choices[shotAnswerKey(item.shotId)];
+        const choice = own === 'keep' || own === 'drop' ? own : keptByAnswer(p.q, p.answer, item.shotId);
+        return (
+          <li key={item.shotId}>
+            <ShotCard item={item} choice={choice} onChoose={(c) => p.onChoose(item.shotId, c)} onFix={p.onFix} />
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ShotCard({
+  item,
+  choice,
+  onChoose,
+  onFix,
+}: {
+  item: PlanItem;
+  choice: ShotChoice | null;
+  onChoose: (c: ShotChoice) => void;
+  onFix: (shot: Shot) => void;
+}) {
+  const { t, f } = useI18n();
+  const T = t.auto;
+  const shot = useEditor((s) => s.doc.shots.find((x) => x.id === item.shotId));
+  const place = f(T.at, { n: item.clip, time: clock(item.t) });
+  const toggle = (c: ShotChoice, label: string, text: string) => (
+    <Button
+      type="button"
+      size="sm"
+      variant={choice === c ? (c === 'drop' ? 'danger' : 'primary') : 'secondary'}
+      aria-pressed={choice === c}
+      aria-label={f(label, { place })}
+      onClick={() => onChoose(c)}
+    >
+      {choice === c ? <Check aria-hidden /> : null}
+      {text}
+    </Button>
+  );
+  return (
+    <article
+      className={cn(
+        'flex h-full flex-col overflow-hidden rounded-md border bg-surface',
+        choice === 'drop' ? 'border-border opacity-80' : 'border-border-strong',
+      )}
+      aria-label={place}
+      data-testid="auto-shot"
+    >
+      <ShotLoop item={item} shot={shot} label={f(T.loopLabel, { place })} />
+      <div className="flex flex-1 flex-col gap-2 p-3">
+        <p className="tabular text-[13px] font-semibold">
+          {place}
+          <span className="ml-1 font-normal text-fg-muted">{item.clipName}</span>
+        </p>
+        {item.reasons.length ? (
+          <ul className="list-disc pl-4 text-[12px] text-fg-muted">
+            {item.reasons.map((r) => (
+              <li key={r}>{T.reasons[r]}</li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="mt-auto flex flex-wrap gap-2 pt-1">
+          {toggle('keep', T.keepShotLabel, T.keepShot)}
+          {toggle('drop', T.removeShotLabel, T.removeShot)}
+          <Button type="button" size="sm" variant="ghost" disabled={!shot} aria-label={f(T.fixInEditorLabel, { place })} onClick={() => shot && onFix(shot)}>
+            <SquarePen aria-hidden />
+            {T.fixInEditor}
+          </Button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!mq) return;
+    setReduced(mq.matches);
+    const on = () => setReduced(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  return reduced;
+}
+
+/** About 3 s around the strike (1 s before, 2 s after), looped and muted, with the tracer's path on top. */
+function ShotLoop({ item, shot, label }: { item: PlanItem; shot: Shot | undefined; label: string }) {
+  const { t } = useI18n();
+  const m = useEditor((s) => s.media[item.mediaId]);
+  const doc = useEditor((s) => s.doc.media[item.mediaId]);
+  const src = m?.urls.proxy ?? m?.urls.original;
+  const reduced = useReducedMotion();
+  const ref = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [wanted, setWanted] = useState<boolean | null>(null);
+  const from = Math.max(0, item.t - 1);
+  const to = item.t + 2;
+  // Plays by itself only while on screen and when the user has not asked for less motion.
+  const play = wanted ?? !reduced;
+
+  useEffect(() => {
+    const v = ref.current;
+    if (!v) return;
+    let visible = false;
+    const sync = () => {
+      if (play && visible) void v.play().catch(() => {});
+      else v.pause();
+    };
+    const ready = () => {
+      v.currentTime = play ? from : item.t;
+      sync();
+    };
+    const loop = () => {
+      if (v.currentTime >= to || v.currentTime < from - 0.25) v.currentTime = from;
+    };
+    const io = new IntersectionObserver(([e]) => {
+      visible = e.isIntersecting;
+      sync();
+    });
+    io.observe(v);
+    if (v.readyState >= 1) ready();
+    v.addEventListener('loadedmetadata', ready);
+    v.addEventListener('timeupdate', loop);
+    return () => {
+      io.disconnect();
+      v.removeEventListener('loadedmetadata', ready);
+      v.removeEventListener('timeupdate', loop);
+    };
+  }, [play, from, to, item.t, src]);
+
+  const path = useMemo(() => {
+    const sp = shot ? sourcePath(shot) : null;
+    if (!sp) return '';
+    const step = Math.max(1, Math.floor(sp.n / 60));
+    const pts: string[] = [];
+    for (let i = 0; i < sp.n; i += step) pts.push(`${sp.u[i].toFixed(1)},${sp.v[i].toFixed(1)}`);
+    return pts.join(' ');
+  }, [shot]);
+
+  if (!src) return <div className="flex aspect-video items-center justify-center bg-surface-sunken text-[12px] text-fg-muted">{t.auto.noPreview}</div>;
+  return (
+    <div className="relative aspect-video bg-black">
+      <video
+        ref={ref}
+        src={`${src}#t=${item.t.toFixed(2)}`}
+        muted
+        playsInline
+        preload="metadata"
+        aria-label={label}
+        className="absolute inset-0 size-full object-contain"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+      />
+      {path && doc ? (
+        <svg
+          viewBox={`0 0 ${doc.width} ${doc.height}`}
+          preserveAspectRatio="xMidYMid meet"
+          className="pointer-events-none absolute inset-0 size-full"
+          aria-hidden
+        >
+          <polyline
+            points={path}
+            fill="none"
+            stroke={shot?.style.color ?? '#ff3b30'}
+            strokeWidth={Math.max(doc.width, doc.height) * 0.006}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity={0.85}
+          />
+        </svg>
+      ) : null}
+      <Button
+        type="button"
+        size="iconSm"
+        variant="secondary"
+        className="absolute right-2 bottom-2 opacity-90"
+        aria-label={playing ? t.auto.pause : t.auto.play}
+        onClick={() => setWanted(!playing)}
+      >
+        {playing ? <Pause aria-hidden /> : <Play aria-hidden />}
+      </Button>
+    </div>
   );
 }
 

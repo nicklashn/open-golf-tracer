@@ -4,7 +4,7 @@
  */
 import { TEMPLATES } from '@golf/render';
 import type { WarningCode } from '@golf/schema';
-import { VideoPlan, type PlanKind, type PlanQuestion } from './plan';
+import { REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type ReasonCode } from './plan';
 import type { RoundSummary, ShotSummary } from './summary';
 
 type Locale = 'da' | 'en';
@@ -88,6 +88,21 @@ const L = {
     defaultKind: 'Formatet er ikke nævnt, så det bliver en YouTube-video.',
     noShotsAtAll: 'Der er ingen slag at lave video af endnu.',
     skipped: (list: string) => `Klip uden slag springes over: ${list}.`,
+    reasons: {
+      practice_swing: 'Der lød et slag, men bolden blev ikke fundet – måske et prøvesving',
+      no_track: 'Bolden blev ikke fundet i luften, så banen er gættet',
+      implausible: 'Banen ligner ikke et rigtigt slag (for langsom, for kort eller passer dårligt)',
+      default_path: 'Banen er en standardbane, ikke målt',
+      carry_mismatch: 'Længden passer ikke med den carry, der er skrevet ind',
+      hole_limit: 'Landede længere væk end hullet tillader, så banen er forkortet',
+      few_points: 'Bolden blev kun set kortvarigt',
+      start_extrapolated: 'Bolden ved opstilling blev ikke fundet',
+      short_shot: 'Ligner en chip eller et putt',
+      low_confidence: 'Analysen er usikker på slaget',
+      retake: 'Slået fra næsten samme sted kort efter et andet slag',
+      same_shot: 'Ser ud til at være samme slag filmet fra en anden vinkel',
+    } satisfies Record<ReasonCode, string>,
+    at: (n: number, time: string) => `Klip ${n} · ${time}`,
   },
   en: {
     hole: (h: string) => `hole ${h}`,
@@ -118,11 +133,55 @@ const L = {
     defaultKind: 'No format was mentioned, so it will be a YouTube video.',
     noShotsAtAll: 'There are no shots to make a video of yet.',
     skipped: (list: string) => `Clips without shots are skipped: ${list}.`,
+    reasons: {
+      practice_swing: 'A strike was heard but no ball was found – maybe a practice swing',
+      no_track: 'The ball was not found in the air, so the path is a guess',
+      implausible: 'The path does not look like a real shot (too slow, too short or a poor fit)',
+      default_path: 'The path is a default one, not measured',
+      carry_mismatch: 'The length does not fit the carry that was entered',
+      hole_limit: 'Landed further than the hole allows, so the path was shortened',
+      few_points: 'The ball was only seen briefly',
+      start_extrapolated: 'The ball at address was not found',
+      short_shot: 'Looks like a chip or a putt',
+      low_confidence: 'The analysis is unsure about this shot',
+      retake: 'Hit from almost the same spot shortly after another shot',
+      same_shot: 'Looks like the same shot filmed from another angle',
+    } satisfies Record<ReasonCode, string>,
+    at: (n: number, time: string) => `Clip ${n} · ${time}`,
   },
 };
 
 export function isDoubtful(s: ShotSummary): boolean {
   return s.confidence < LOW_CONFIDENCE || s.flags.some((f) => DOUBT_FLAGS.includes(f));
+}
+
+/** Why a shot is doubtful, most telling first. No ball in the air and low confidence reads as a practice swing. */
+export function shotReasons(s: ShotSummary, ...extra: ReasonCode[]): ReasonCode[] {
+  const out = new Set<ReasonCode>(extra);
+  for (const f of s.flags) if ((REASON_CODES as readonly string[]).includes(f)) out.add(f as ReasonCode);
+  if (s.confidence < LOW_CONFIDENCE) out.add('low_confidence');
+  if (out.has('no_track') && out.has('low_confidence')) {
+    out.delete('no_track');
+    out.delete('low_confidence');
+    out.add('practice_swing');
+  }
+  return [...out].sort((a, b) => REASON_CODES.indexOf(a) - REASON_CODES.indexOf(b));
+}
+
+/** A reason in plain words. */
+export function reasonText(code: ReasonCode, locale: Locale = 'en'): string {
+  return L[locale].reasons[code];
+}
+
+/** "4:07" from seconds. */
+export function clock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** "Clip 4 · 0:37": where an item is in the video. */
+export function itemPlace(item: Pick<PlanItem, 'clip' | 't'>, locale: Locale = 'en'): string {
+  return L[locale].at(item.clip, clock(item.t));
 }
 
 /** A rough quality score for "only the best": confident, tracked shots win. */
@@ -192,6 +251,14 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     const c = s.clips.find((x) => x.id === id)!;
     return T.clip(c.n, c.name);
   };
+  const item = (x: ShotSummary, ...extra: ReasonCode[]): PlanItem => ({
+    shotId: x.id,
+    mediaId: x.clipId,
+    clip: x.clip,
+    clipName: s.clips.find((c) => c.id === x.clipId)?.name ?? '',
+    t: x.t,
+    reasons: shotReasons(x, ...extra),
+  });
 
   // Shots the analysis is unsure about.
   const doubtful = s.shots.filter(isDoubtful);
@@ -206,6 +273,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
       default: pref.goodOnly ? 'drop' : 'keep',
       shotIds: doubtful.map((x) => x.id),
       clipIds: [],
+      items: doubtful.slice(0, 200).map((x) => item(x)),
     });
 
   // Clips where no shot was found: only the YouTube video can use them (as a mood shot).
@@ -271,6 +339,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
       default: pref.goodOnly ? 'best' : 'both',
       shotIds: [a.id, b.id],
       clipIds: [],
+      items: [item(a, 'retake'), item(b, 'retake')],
     });
 
   // The same shot filmed in two clips.
@@ -287,6 +356,7 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
       default: `keep:${better.id}`,
       shotIds: [a.id, b.id],
       clipIds: [a.clipId, b.clipId],
+      items: [item(a, 'same_shot'), item(b, 'same_shot')],
     });
   }
 
