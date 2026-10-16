@@ -239,7 +239,12 @@ const en: Dict = {
     test: 'Test connection',
     testOk: 'The connection works: {model}, {tokens} tokens, {ms} ms.',
     testFailed: 'The connection does not work',
-    privacyCloud: 'Only the summary (shot data and your text) is sent to {provider} – never video or images.',
+    privacyCloud: 'Only the summary (shot data and your text) is sent to {provider} – never video, and still frames only if you turn that on.',
+    privacyCloudVision:
+      'The summary (shot data and your text) is sent to {provider}, and a few still frames from the green when the putt count is unsure – never video.',
+    vision: 'Let the AI look at pictures when unsure (putts)',
+    visionHint:
+      'When the analysis is unsure how many putts you took, the model gets a few still frames from the green instead of asking you. With Ollama they stay on your PC; with a cloud provider they are sent there. Needs a model that can see images.',
     privacyLocal: 'Everything stays on your machine: the model runs locally.',
     privacyNone: 'No AI: nothing is sent anywhere.',
   },
