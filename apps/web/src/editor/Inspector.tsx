@@ -819,7 +819,7 @@ function LayerProps({ layer, P }: { layer: Layer; P: (p: Record<string, unknown>
   const shots = useEditor((s) => s.doc.shots);
   const shotOptions = [
     { value: '__current', label: t.layers.currentShot },
-    ...shots.map((s, i) => ({ value: s.id, label: s.label || f(t.shots.shot, { n: i + 1 }) })),
+    ...shots.filter((s) => s.kind !== 'putt').map((s, i) => ({ value: s.id, label: s.label || f(t.shots.shot, { n: i + 1 }) })),
   ];
   switch (layer.type) {
     case 'text': {

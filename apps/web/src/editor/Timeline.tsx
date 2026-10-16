@@ -477,7 +477,7 @@ export function Timeline() {
                 onClick={() => ops.jumpToShot(s)}
               >
                 {s.confidence < 0.6 ? <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden /> : null}
-                <span className="truncate">{s.label || `${t.shots.shot.replace('{n}', String(i + 1))}`}</span>
+                <span className="truncate">{s.label || (s.kind === 'putt' ? t.shots.putt : t.shots.shot.replace('{n}', String(i + 1)))}</span>
               </button>
             ))}
           </Row>
