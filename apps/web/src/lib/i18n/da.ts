@@ -208,6 +208,8 @@ const da = {
       low_confidence: 'Analysen er usikker på slaget.',
       retake: 'Slået fra næsten samme sted kort efter et andet slag.',
       same_shot: 'Ser ud til at være samme slag filmet fra en anden vinkel.',
+      next_shot_distance: 'Næste slag blev filmet {next} m herfra, men banen viser {carry} m.',
+      putt_count_unsure: 'Analysen er usikker på antallet af putts.',
     },
   },
   ai: {

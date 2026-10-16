@@ -3,9 +3,9 @@
  * a project – no video, no images, no project document – and it is what the rules read too.
  */
 import { shotStats } from '@golf/render';
-import type { GeoPoint, MediaRef, Project, Shot, WarningCode } from '@golf/schema';
+import { byTimeline, type GeoPoint, type MediaRef, type Project, type Shot, type WarningCode } from '@golf/schema';
 import { isoDate, isSure, roundMedia, roundOrder } from './chronology';
-import { playedShots } from './videos';
+import { annotateNext, holeScores, type HoleScore } from './score';
 
 export interface ClipSummary {
   id: string;
@@ -24,6 +24,8 @@ export interface ClipSummary {
   course: string;
   hole: string;
   par: number | null;
+  /** Metres from the tee along the hole (GPS), when known. */
+  fromTee: number | null;
   shots: number;
 }
 
@@ -52,6 +54,29 @@ export interface ShotSummary {
   y: number;
   /** The strike's sound signature, when the clip had audio (see `match.ts`). */
   sound: Shot['sound'] | null;
+  /** Metres by GPS to where the next stroke on the hole was filmed (see score.ts). */
+  nextM?: number | null;
+  /** The flight's carry strongly contradicts `nextM` (reason `next_shot_distance`). */
+  nextOff?: boolean;
+  /** No measured carry: `nextM` as a suggestion. */
+  carrySuggestM?: number | null;
+}
+
+/** A chip or a putt: never traced, but a stroke for the score. */
+export interface StrokeSummary {
+  id: string;
+  kind: 'short' | 'putt';
+  clipId: string;
+  clip: number;
+  t: number;
+  hole: string;
+  par: number | null;
+  confidence: number;
+  /** Analysis warnings (e.g. `putt_count_unsure`). */
+  flags: string[];
+  /** Putts: seconds into the clip when the ball stopped or dropped, and whether it was holed. */
+  end: number | null;
+  holed: boolean | null;
 }
 
 export interface RoundSummary {
@@ -61,6 +86,11 @@ export interface RoundSummary {
   date: string;
   clips: ClipSummary[];
   shots: ShotSummary[];
+  /** Chips and putts in round order (any visibility: they are strokes, not tracer shots). */
+  chips: StrokeSummary[];
+  putts: StrokeSummary[];
+  /** The score of each hole filmed, in round order (see score.ts). */
+  holes: HoleScore[];
   /** How the clip order was found (see `roundOrder`): clip ids placed without a sure time, and two clips whose times contradict their holes. */
   order: { by: 'time' | 'hole' | 'mixed'; unsure: string[]; conflict: [string, string] | null };
 }
@@ -83,10 +113,31 @@ export function summarize(doc: Project): RoundSummary {
   const ordered = roundOrder(roundMedia(doc));
   const order = ordered.media;
   const nOf = new Map(order.map((m, i) => [m.id, i + 1]));
-  const shots = playedShots(doc).sort((a, b) => (nOf.get(a.mediaId) ?? 1e9) - (nOf.get(b.mediaId) ?? 1e9) || a.impactTime - b.impactTime);
+  const inRound = (s: Shot) => nOf.has(s.mediaId) && !!doc.media[s.mediaId];
+  const byRound = (a: Shot, b: Shot) => (nOf.get(a.mediaId) ?? 1e9) - (nOf.get(b.mediaId) ?? 1e9) || a.impactTime - b.impactTime;
+  const shots = doc.shots
+    .filter((s) => s.visible && s.kind === 'full' && doc.media[s.mediaId])
+    .sort(byTimeline(doc.clips))
+    .sort(byRound);
+  const stroke = (s: Shot): StrokeSummary => {
+    const m = doc.media[s.mediaId];
+    return {
+      id: s.id,
+      kind: s.kind === 'putt' ? 'putt' : 'short',
+      clipId: s.mediaId,
+      clip: nOf.get(s.mediaId) ?? 0,
+      t: round(s.impactTime, 1),
+      hole: m.place?.hole ?? '',
+      par: m.place?.par ?? null,
+      confidence: round(s.confidence, 2),
+      flags: [...new Set(s.warnings.map((w) => w.code as string))],
+      end: s.kind === 'putt' ? round(s.putt?.end ?? s.impactTime, 1) : null,
+      holed: s.kind === 'putt' ? (s.putt?.holed ?? null) : null,
+    };
+  };
   const first = order.find(isSure);
   const d = isoDate(first?.recordedAt);
-  return {
+  const summary: RoundSummary = {
     name: doc.name,
     course: order.find((m) => m.place?.course)?.place?.course ?? '',
     date: d ? d.toISOString().slice(0, 10) : '',
@@ -104,6 +155,7 @@ export function summarize(doc: Project): RoundSummary {
       course: m.place?.course ?? '',
       hole: m.place?.hole ?? '',
       par: m.place?.par ?? null,
+      fromTee: m.place?.fromTee ?? null,
       shots: shots.filter((s) => s.mediaId === m.id).length,
     })),
     shots: shots.map((s, i) => {
@@ -131,8 +183,20 @@ export function summarize(doc: Project): RoundSummary {
         sound: s.sound ?? null,
       };
     }),
+    chips: doc.shots
+      .filter((s) => s.kind === 'short' && inRound(s))
+      .sort(byRound)
+      .map(stroke),
+    putts: doc.shots
+      .filter((s) => s.kind === 'putt' && inRound(s))
+      .sort(byRound)
+      .map(stroke),
+    holes: [],
     order: { by: ordered.by, unsure: ordered.unsure, conflict: ordered.conflict && [ordered.conflict[0].id, ordered.conflict[1].id] },
   };
+  annotateNext(summary);
+  summary.holes = holeScores(summary);
+  return summary;
 }
 
 /**
@@ -147,7 +211,17 @@ export function summaryText(s: RoundSummary): string {
     );
   for (const x of s.shots)
     lines.push(
-      `shot ${x.n} id=${x.id} clip=${x.clip} t=${x.t} hole=${x.hole || '?'} par=${x.par ?? '?'} club=${x.club} carry=${x.carryM ?? '?'} apex=${x.apexM ?? '?'} conf=${x.confidence} flags=${x.flags.join(',') || '-'}`,
+      `shot ${x.n} id=${x.id} clip=${x.clip} t=${x.t} hole=${x.hole || '?'} par=${x.par ?? '?'} club=${x.club} carry=${x.carrySuggestM ? `~${x.carrySuggestM}` : (x.carryM ?? '?')} apex=${x.apexM ?? '?'} conf=${x.confidence} flags=${[...x.flags, ...(x.nextOff ? ['next_shot_distance'] : [])].join(',') || '-'}${x.nextM ? ` next=${x.nextM}` : ''}`,
     );
+  // Only with putts on video can a hole be complete.
+  const holes = s.putts.length ? s.holes : [];
+  if (holes.length) {
+    const done = holes.filter((h) => h.strokes !== null);
+    const strokes = done.reduce((n, h) => n + h.strokes!, 0);
+    const par = done.reduce((n, h) => n + h.par!, 0);
+    lines.push(
+      `score (hole:strokes/par putts, ?=not every stroke filmed) ${holes.map((h) => `${h.hole}:${h.strokes ?? '?'}/${h.par ?? '?'} ${h.putts}p`).join(', ')}${done.length ? ` total ${strokes}/${par}` : ''}`,
+    );
+  }
   return lines.join('\n');
 }
