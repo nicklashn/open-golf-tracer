@@ -208,6 +208,8 @@ const da = {
       low_confidence: 'Analysen er usikker på slaget.',
       retake: 'Slået fra næsten samme sted kort efter et andet slag.',
       same_shot: 'Ser ud til at være samme slag filmet fra en anden vinkel.',
+      next_shot_distance: 'Næste slag blev filmet {next} m herfra, men banen viser {carry} m.',
+      putt_count_unsure: 'Analysen er usikker på antallet af putts.',
     },
   },
   ai: {
@@ -237,7 +239,12 @@ const da = {
     test: 'Test forbindelse',
     testOk: 'Forbindelsen virker: {model}, {tokens} tokens, {ms} ms.',
     testFailed: 'Forbindelsen virker ikke',
-    privacyCloud: 'Kun resuméet (slagdata og din tekst) sendes til {provider} – aldrig video eller billeder.',
+    privacyCloud: 'Kun resuméet (slagdata og din tekst) sendes til {provider} – aldrig video, og kun stillbilleder, hvis du slår det til.',
+    privacyCloudVision:
+      'Resuméet (slagdata og din tekst) sendes til {provider} og, når antallet af putts er usikkert, nogle få stillbilleder fra greenen – aldrig video.',
+    vision: "Lad AI'en se billeder, når den er i tvivl (putts)",
+    visionHint:
+      'Når analysen er i tvivl om, hvor mange putts du brugte, får modellen nogle få stillbilleder fra greenen i stedet for at spørge dig. Med Ollama bliver de på din pc; med en cloud-udbyder sendes de dertil. Kræver en model, der kan se billeder.',
     privacyLocal: 'Alt bliver på din maskine: modellen kører lokalt.',
     privacyNone: 'Ingen AI: intet sendes nogen steder hen.',
   },
@@ -285,6 +292,14 @@ const da = {
     retracking: 'Sporer …',
     delete: 'Slet slag',
     shortShot: 'Kort slag',
+    putt: 'Putt',
+    puttHoled: 'I hul',
+    puttRoll: 'Ruller {s} s',
+    puttLead: 'Putts vises som almindelig video uden tracer.',
+    puttHoledLabel: 'I hul?',
+    puttHoledYes: 'Ja',
+    puttHoledNo: 'Nej',
+    puttHoledUnknown: 'Ved ikke',
     warnings: {
       low_confidence: 'Vi er ikke helt sikre på dette slag.',
       no_track: 'Bolden kunne ikke ses i flugt, så banen er et bud. Træk i landingspunktet for at rette den.',
@@ -296,6 +311,7 @@ const da = {
       default_path: 'Standardbane – ret den med håndtagene.',
       hole_limit: 'Estimatet var længere end hullet tillader, så banen er lagt efter afstanden til green. Mål gerne på kortet.',
       manual: 'Tilføjet manuelt.',
+      putt_count_unsure: 'Vi er ikke sikre på, hvor mange putts der var, eller om det sidste gik i hul. Tjek puttene på denne green.',
     },
   },
   map: {

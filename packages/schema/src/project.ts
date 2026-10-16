@@ -100,6 +100,7 @@ export const WarningCode = z.enum([
   'default_path',
   'manual',
   'hole_limit',
+  'putt_count_unsure',
 ]);
 export type WarningCode = z.infer<typeof WarningCode>;
 
@@ -132,9 +133,13 @@ export const Shot = z.object({
   id,
   mediaId: id,
   source: z.enum(['auto', 'manual']).default('auto'),
-  kind: z.enum(['full', 'short']).default('full'),
+  /** full = traced shot; short = chip/pitch (hidden by default); putt = on the green, never traced. */
+  kind: z.enum(['full', 'short', 'putt']).default('full'),
   /** Source-video seconds of the strike. */
   impactTime: seconds,
+  /** Putts only: source-video seconds when the ball came to rest or dropped, and whether it was
+   *  holed (null = unknown). Several putts on one green are separate shots in order. */
+  putt: z.object({ end: seconds, holed: z.boolean().nullable().default(null) }).optional(),
   confidence: unit.default(1),
   warnings: z.array(ShotWarning).default([]),
   camera: z.object({ cx: finite, cy: finite }),

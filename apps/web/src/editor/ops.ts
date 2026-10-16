@@ -74,6 +74,12 @@ export function setShotVisible(id: string, visible: boolean) {
   });
 }
 
+export function setPuttHoled(id: string, holed: boolean | null) {
+  updateShot('Putt', id, (s) => {
+    if (s.putt) s.putt.holed = holed;
+  });
+}
+
 export function deleteShot(id: string) {
   E().edit(
     'Delete shot',

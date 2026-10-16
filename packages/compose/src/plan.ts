@@ -7,12 +7,19 @@ import { z } from 'zod';
 
 export const PLAN_KINDS = ['youtube', 'highlight', 'shorts'] as const;
 export type PlanKind = (typeof PLAN_KINDS)[number];
+/** Which putts a video shows (never traced): none, only those that went in, or each hole's putting. */
+export const PUTT_MODES = ['none', 'holed', 'all'] as const;
+export type PuttMode = (typeof PUTT_MODES)[number];
+/** Without a choice: the YouTube video shows the putting of each hole, shorts only holed putts. */
+export const defaultPutts = (kind: PlanKind): PuttMode => (kind === 'youtube' ? 'all' : 'holed');
 
 const shortText = (max: number) => z.string().trim().max(max);
 
 /**
  * Why a shot is asked about, as codes the apps turn into plain words: the analysis' warnings,
- * plus `practice_swing` (no ball in the air and low confidence), `retake` and `same_shot`.
+ * plus `practice_swing` (no ball in the air and low confidence), `retake`, `same_shot`,
+ * `next_shot_distance` (the next stroke was filmed much closer than the flight says) and
+ * `putt_count_unsure`.
  */
 export const REASON_CODES = [
   'no_track',
@@ -27,6 +34,8 @@ export const REASON_CODES = [
   'practice_swing',
   'retake',
   'same_shot',
+  'next_shot_distance',
+  'putt_count_unsure',
 ] as const;
 export const ReasonCode = z.enum(REASON_CODES);
 export type ReasonCode = z.infer<typeof ReasonCode>;
@@ -41,6 +50,9 @@ export const PlanItem = z.object({
   /** Seconds into the clip's video file at the strike: the file's own clock, as a player shows it (not real time for slow motion). */
   t: z.number().min(0),
   reasons: z.array(ReasonCode).max(12).default([]),
+  /** With `next_shot_distance`: metres to where the next stroke was filmed, and the flight's carry. */
+  nextM: z.number().min(0).optional(),
+  carryM: z.number().min(0).optional(),
 });
 export type PlanItem = z.infer<typeof PlanItem>;
 
@@ -74,6 +86,8 @@ export const VideoPlan = z
     /** Playing order as shot ids; clips follow the first shot of each. Omitted = as filmed. */
     order: z.array(z.string().max(64)).max(500).optional(),
     title: shortText(120).min(1),
+    /** Putts shown; omitted = `defaultPutts(kind)`. */
+    putts: z.enum(PUTT_MODES).optional(),
     /** A line of text shown with a shot (e.g. "Birdie putt"), by shot id. */
     shotTexts: z.record(z.string().max(64), shortText(80)).optional(),
     /** Description for YouTube or social posts. */
@@ -96,6 +110,8 @@ export type PlanAnswers = z.infer<typeof PlanAnswers>;
 export const ShotChoice = z.enum(['keep', 'drop']);
 export type ShotChoice = z.infer<typeof ShotChoice>;
 export const shotAnswerKey = (shotId: string) => `shot:${shotId}`;
+/** The question about a hole's putts (options in rules.ts). */
+export const puttQuestionId = (hole: string) => `putts:${hole}`;
 
 /** Per-shot choices for shots shown as items of a question; they win over the question's answer. */
 export function shotChoices(plan: VideoPlan, answers: PlanAnswers | null | undefined): Map<string, ShotChoice> {

@@ -91,7 +91,9 @@ def answer(job_id: str, body: AnswersIn, db: Session = Depends(get_db), user: Us
         raise ApiError(409, "not_waiting", "This video is not waiting for answers.")
     # The plan the questions came from goes along, so it is not made (or paid for) twice, and so
     # do the tokens the first AI call used (the ceiling is per video).
-    q.answer(db, j, {"answers": body.answers, "plan": (j.result or {}).get("plan"), "usage": (j.result or {}).get("usage")})
+    # Answers the AI found itself from still frames (putts) go along too.
+    r = j.result or {}
+    q.answer(db, j, {"answers": body.answers, "plan": r.get("plan"), "usage": r.get("usage"), "vision": r.get("vision")})
     db.commit()
     return q.public(j)
 
@@ -106,6 +108,8 @@ class AiSettingsIn(BaseModel):
     # None keeps the stored key, "" removes it.
     apiKey: str | None = Field(None, max_length=400)
     maxTokens: int = Field(8000, ge=500, le=200_000)
+    # Still frames from the green when the putt count is unsure; None keeps the stored choice.
+    vision: bool | None = None
 
 
 @router.get("/ai/settings")
@@ -117,11 +121,13 @@ def get_ai_settings(db: Session = Depends(get_db), user: User = Depends(current_
 def put_ai_settings(body: AiSettingsIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     row = db.get(AiSettings, user.id)
     if row is None:
-        row = AiSettings(user_id=user.id, api_key="")
+        row = AiSettings(user_id=user.id, api_key="", vision=ai.effective(db, user.id)["vision"])
         db.add(row)
     row.provider, row.model, row.base_url, row.max_tokens = body.provider, body.model.strip(), body.baseUrl.strip(), body.maxTokens
     if body.apiKey is not None:
         row.api_key = body.apiKey.strip()
+    if body.vision is not None:
+        row.vision = body.vision
     row.updated_at = utcnow()
     db.commit()
     return ai.public(db, user)

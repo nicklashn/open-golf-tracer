@@ -1,5 +1,8 @@
 """Which AI model "Make a video for me" uses: the user's own settings, else the .env defaults.
 
+With `vision` on, the exporter may also send a few still frames from the green when the putt
+count is unsure (local with Ollama, to the provider with a cloud model). Off by default.
+
 The API key is only ever handed to the exporter (internal endpoint). Browsers see it masked;
 it is not logged and not part of projects or the data export."""
 from __future__ import annotations
@@ -32,17 +35,20 @@ def _server() -> dict[str, Any]:
     provider = s.ai_provider if s.ai_provider in PROVIDERS else "none"
     d = DEFAULTS.get(provider, {})
     return {"provider": provider, "model": s.ai_model or d.get("model", ""), "baseUrl": s.ai_base_url or d.get("baseUrl", ""),
-            "apiKey": s.ai_api_key, "maxTokens": max(500, s.ai_max_tokens)}
+            "apiKey": s.ai_api_key, "maxTokens": max(500, s.ai_max_tokens), "vision": s.ai_vision}
 
 
 def effective(db: Session, user_id: str | None) -> dict[str, Any]:
     """The AI configuration a job of this user runs with (key included – internal use only)."""
     row = db.get(AiSettings, user_id) if user_id else None
-    if row is None or row.provider not in PROVIDERS:
+    if row is None:
         return {**_server(), "source": "server"}
+    # Once saved, the user's own choice on still frames wins, also with the server's model.
+    if row.provider not in PROVIDERS:
+        return {**_server(), "vision": bool(row.vision), "source": "server"}
     d = DEFAULTS.get(row.provider, {})
     return {"provider": row.provider, "model": row.model or d.get("model", ""), "baseUrl": row.base_url or d.get("baseUrl", ""),
-            "apiKey": row.api_key, "maxTokens": max(500, row.max_tokens), "source": "user"}
+            "apiKey": row.api_key, "maxTokens": max(500, row.max_tokens), "vision": bool(row.vision), "source": "user"}
 
 
 def public(db: Session, user: User) -> dict[str, Any]:
@@ -56,8 +62,10 @@ def public(db: Session, user: User) -> dict[str, Any]:
         "baseUrl": row.base_url if row else "",
         "keyMasked": mask(row.api_key) if row else "",
         "maxTokens": row.max_tokens if row else server["maxTokens"],
+        "vision": eff["vision"],
         "effective": {"provider": eff["provider"], "model": eff["model"], "baseUrl": eff["baseUrl"], "source": eff["source"],
-                      "keyMasked": mask(eff["apiKey"]), "maxTokens": eff["maxTokens"], "cloud": eff["provider"] in CLOUD},
+                      "keyMasked": mask(eff["apiKey"]), "maxTokens": eff["maxTokens"], "cloud": eff["provider"] in CLOUD,
+                      "vision": eff["vision"] and eff["provider"] != "none"},
         "server": {"provider": server["provider"], "model": server["model"], "keyMasked": mask(server["apiKey"])},
         "providers": ["server", *PROVIDERS],
         "defaults": DEFAULTS,

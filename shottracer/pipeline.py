@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from . import audio as audio_mod
+from . import putt as putt_mod
 from .detect import Ball, BallDetector, feet_roi, get_detector, pick_golfer
 from .impact import Impact, PresenceProbe, ball_left, choose_impact
 from .physics import Flight, default_flight, fit_flight
@@ -32,6 +33,10 @@ MIN_SHOT_GAP = 2.0   # two strikes closer than this are the same shot
 GREEN_SLACK_M = 25.0  # a ball may carry this far past the green before the hole says no
 WEAK_SHOT_CONF = 0.3  # below this, a shot with no sound or ball evidence is hidden
 SHORT_GAME_M = 40.0  # this close to the green: chip, pitch or putt, not traced
+GREEN_NEAR_M = 8.0   # the camera this close to a mapped green (or ...
+PUTT_TO_GREEN_M = 15.0  # ... this close to the hole's end): look for putts first
+PUTT_LONG_SIDE = 960  # putts are followed in frames this size, or larger for a tiny ball
+PUTT_BALL_PX = 3.0
 
 Progress = Callable[[float, str], None]
 
@@ -50,6 +55,7 @@ class Options:
     carry: float | None = None                   # known carry in metres (scales the 3D fit)
     club: str | None = None                      # driver/wood/longIron/midIron/shortIron/wedge; None = auto
     to_green: float | None = None                # metres from the player to the green (hole from GPS)
+    green_m: float | None = None                 # metres from the player to the nearest mapped green (0 = on it)
     ref_time: float | None = None                # manual ball: time the ball was clicked (strike follows)
 
 
@@ -218,9 +224,24 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
     shots: list[dict] = []
     warnings: list[str] = []
     used: list[float] = []
+    auto = opt.impact is None and opt.ball is None
+    green = auto and _by_green(opt)
+    spans: list[tuple[float, float]] = []   # followed for putts
+    ticks: list | None = None
+
+    def emit(doc: dict, t: float) -> None:
+        sound = audio_mod.signature(*aud, t) if aud else None
+        if sound:
+            doc["sound"] = sound
+        shots.append(doc)
+        if on_shot:
+            on_shot(doc)
+
     for k, addr in enumerate(addresses):
         base = 0.3 + 0.68 * k / max(1, len(addresses))
         report(base, f"shot {k + 1}/{len(addresses)}")
+        if any(a <= addr.ref_idx / info.fps <= b for a, b in spans):
+            continue
         stop = None
         if opt.ref_time is not None and opt.impact is None:
             stop = min(info.frame_count, addr.ref_idx + int(8.0 * info.fps))
@@ -229,23 +250,39 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
         elif len(addresses) > 1:
             stop = min(info.frame_count, addr.ref_idx + int(6.0 * info.fps))
         impact = _find_impact(info, addr, strikes, opt, stop=stop)
+        if impact is not None and any(abs(impact.time - t) < MIN_SHOT_GAP for t in used):
+            continue
+        sh, err = None, None
+        if impact is not None and not green:
+            try:
+                sh = _track_and_fit(info, det, impact, addr.ball, opt)
+            except RuntimeError as exc:
+                err = str(exc)
+        if auto and addr.ball is not None and (green or (impact is not None and _maybe_putt(opt, sh))):
+            # On the green, or a stroke that did not fly: follow the ball through the putts.
+            if ticks is None:
+                ticks = audio_mod.find_strikes(*aud, min_ratio=PUTT_TICK) if aud else []
+            putts, span = _putts(info, det, addr, opt, ticks, len(shots))
+            if putts:
+                spans.append(span)
+                for doc in putts:
+                    used.append(doc["impactTime"])
+                    emit(doc, doc["impactTime"])
+                if impact is None or any(abs(d["impactTime"] - impact.time) < 1.0 for d in putts):
+                    continue
         if impact is None:
             continue
-        if any(abs(impact.time - t) < MIN_SHOT_GAP for t in used):
-            continue
-        try:
-            sh = _track_and_fit(info, det, impact, addr.ball, opt)
-        except RuntimeError as exc:
-            warnings.append(str(exc))
+        if sh is None and err is None:
+            try:
+                sh = _track_and_fit(info, det, impact, addr.ball, opt)
+            except RuntimeError as exc:
+                err = str(exc)
+        if sh is None:
+            warnings.append(err or "")
             continue
         used.append(impact.time)
-        doc = _shot_doc(info, sh, len(shots), opt)
-        sound = audio_mod.signature(*aud, impact.time) if aud else None
-        if sound:
-            doc["sound"] = sound
-        shots.append(doc)
-        if on_shot:
-            on_shot(doc)
+        emit(_shot_doc(info, sh, len(shots), opt), impact.time)
+    _settle_putts(shots, info.diag)
     shots.sort(key=lambda s: s["impactTime"])
     report(1.0, "done")
     return {
@@ -326,6 +363,123 @@ def _shot_doc(info: VideoInfo, sh: ShotAnalysis, n: int, opt: Options) -> dict:
         "stats": sh.stats,
         "impactMethod": sh.impact.method,
     }
+
+
+# =============================================================================================
+# Putts
+
+
+PUTT_TICK = 3.0   # a putt's tick is far softer than a full strike (find_strikes ratio)
+
+
+def _by_green(opt: Options) -> bool:
+    if opt.green_m is not None:
+        return opt.green_m <= GREEN_NEAR_M
+    return opt.to_green is not None and opt.to_green <= PUTT_TO_GREEN_M
+
+
+def _maybe_putt(opt: Options, sh: ShotAnalysis | None) -> bool:
+    """A stroke worth following on the ground: no believable flight, and not far from a green."""
+    if (opt.to_green is not None and opt.to_green >= 2 * SHORT_GAME_M) or (opt.green_m is not None and opt.green_m >= 2 * SHORT_GAME_M):
+        return False
+    return sh is None or sh.track is None or bool(sh.verdict and ("slow" in sh.verdict or "flight time" in sh.verdict))
+
+
+def _putts(info: VideoInfo, det: BallDetector, addr: Address, opt: Options, ticks, n0: int) -> tuple[list[dict], tuple[float, float]]:
+    """Follow the ball lying at this address through the putts that follow (putt.py)."""
+    ball = addr.ball
+    assert ball is not None
+    sp = min(1.0, max(PUTT_LONG_SIDE / info.long_side, PUTT_BALL_PX / max(ball.r, 0.5)))
+    w, h = info.width, info.height
+    if sp != 1.0:   # as decode() sizes it
+        w, h = max(2, int(round(w * sp / 2)) * 2), max(2, int(round(h * sp / 2)) * 2)
+    sx, sy = w / info.width, h / info.height
+    step = max(1, round(info.fps / putt_mod.FOLLOW_FPS))
+    t_ref = addr.ref_idx / info.fps
+    stop = min(info.frame_count, addr.ref_idx + int(putt_mod.MAX_FOLLOW_S * info.fps))
+    frames = decode(info, start=addr.ref_idx, stop=stop, scale=sp, gray=True)
+    try:
+        seen = putt_mod.follow(((i / info.fps, g) for i, g in frames if (i - addr.ref_idx) % step == 0),
+                               (ball.x * sx, ball.y * sy), ball.r * 0.5 * (sx + sy))
+    finally:
+        frames.close()
+    rolls = [ro for ro in putt_mod.segment(seen) if ro.is_putt]
+    _log(f"putts from {t_ref:.1f} s: {len(rolls)} ({', '.join(f'{ro.start:.1f}-{ro.end:.1f} {ro.ended}' for ro in rolls)})")
+    prior = putt_mod.green_prior(opt.green_m, opt.to_green)
+    docs = []
+    for ro in rolls:
+        tick = min((p for p in ticks if -0.12 <= p.time - ro.start <= 0.08), key=lambda p: abs(p.time - ro.start), default=None)
+        t0 = float(tick.time) if tick else ro.start
+        if ro.holed and _hidden_by_player(info, det, ro, sx, sy):
+            ro.holed, ro.unsure = None, "a player stood where the ball vanished"
+        codes: list[tuple[str, str]] = []
+        if ro.unsure:
+            codes.append(("putt_count_unsure", ro.unsure))
+        if len(ro.t) < 8:
+            codes.append(("few_points", str(len(ro.t))))
+        conf = putt_mod.confidence(ro, prior, tick is not None)
+        if conf < 0.6:
+            codes.insert(0, ("low_confidence", ""))
+        docs.append(_putt_doc(info, ro, t0, conf, codes, n0 + len(docs), opt, sx, sy, "roll + sound" if tick else "roll"))
+    return docs, (t_ref, float(seen.t[-1]) if len(seen.t) else t_ref)
+
+
+def _hidden_by_player(info: VideoInfo, det: BallDetector, ro: putt_mod.Roll, sx: float, sy: float) -> bool:
+    """Someone standing where the ball vanished hides it; it need not have dropped."""
+    _, frame = _at(info, ro.end + 0.5)
+    if frame is None:
+        return False
+    x, y = float(ro.u[-1]) / sx, float(ro.v[-1]) / sy
+    return any(b.x1 <= x <= b.x2 and b.y1 <= y <= b.y2 for b in det.people(frame))
+
+
+def _putt_doc(info: VideoInfo, ro: putt_mod.Roll, t0: float, conf: float, codes: list[tuple[str, str]], n: int, opt: Options,
+              sx: float, sy: float, method: str) -> dict:
+    """A putt as an editor shot: never traced, so the flight is a neutral default and the track
+    is the ball's path on the ground."""
+    anchor = {"x": round(float(ro.u[0]) / sx, 2), "y": round(float(ro.v[0]) / sy, 2)}
+    k = max(1, (len(ro.t) - 1) // 120 + 1)
+    track = {"t": [round(float(t) - t0, 4) for t in ro.t[1::k]],
+             "u": [round(float(u) / sx, 2) for u in ro.u[1::k]],
+             "v": [round(float(v) / sy, 2) for v in ro.v[1::k]]}
+    fl = default_flight((anchor["x"], anchor["y"]), info.width / 2, info.height / 2, info.long_side, info.fps, club="wedge")
+    plist = [round(float(x), 6) for x in fl.params]
+    return {
+        "id": f"shot{n + 1}_{int(t0 * 1000)}",
+        "source": "auto",
+        "kind": "putt",
+        "impactTime": round(t0, 4),
+        "putt": {"end": round(max(ro.end, t0), 4), "holed": ro.holed},
+        "confidence": conf,
+        "warnings": [{"code": c, "detail": d[:300]} if d else {"code": c} for c, d in codes],
+        "camera": {"cx": info.width / 2, "cy": info.height / 2},
+        "anchor": anchor,
+        "track": track,
+        "params": plist,
+        "rmsPx": None,
+        "auto": {"params": plist, "anchor": anchor, "impactTime": round(t0, 4)},
+        "slowmo": opt.slowmo,
+        "club": "auto",
+        "visible": True,
+        "label": "",
+        "stats": {},
+        "impactMethod": method,
+    }
+
+
+def _settle_putts(shots: list[dict], diag: float) -> None:
+    """Putts followed separately (the ball was lost between them): a putt followed by another
+    was not the last one, so it was not holed – unless the next starts elsewhere (another ball)."""
+    putts = sorted((s for s in shots if s["kind"] == "putt"), key=lambda s: s["impactTime"])
+    for a, b in zip(putts, putts[1:]):
+        a["warnings"] = [w for w in a["warnings"] if w.get("detail") != putt_mod.STILL_LYING]
+        if a["putt"]["holed"] is not True:
+            continue
+        tr = a["track"]
+        end = (tr["u"][-1], tr["v"][-1]) if tr["u"] else (a["anchor"]["x"], a["anchor"]["y"])
+        near = math.hypot(b["anchor"]["x"] - end[0], b["anchor"]["y"] - end[1]) < 0.03 * diag
+        a["putt"]["holed"] = False if near else None
+        a["warnings"].append({"code": "putt_count_unsure", "detail": "another putt follows the one that seemed to drop"})
 
 
 # =============================================================================================

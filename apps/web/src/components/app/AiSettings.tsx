@@ -7,7 +7,7 @@
 import { PlugZap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Select } from '@/components/ui/controls';
+import { Select, Switch } from '@/components/ui/controls';
 import { Field, Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/toast';
 import { api, errorMessage } from '@/lib/api';
@@ -22,7 +22,18 @@ export interface AiSettingsInfo {
   baseUrl: string;
   keyMasked: string;
   maxTokens: number;
-  effective: { provider: Exclude<Provider, 'server'>; model: string; baseUrl: string; source: string; keyMasked: string; maxTokens: number; cloud: boolean };
+  /** Still frames from the green may be sent when the putt count is unsure. */
+  vision: boolean;
+  effective: {
+    provider: Exclude<Provider, 'server'>;
+    model: string;
+    baseUrl: string;
+    source: string;
+    keyMasked: string;
+    maxTokens: number;
+    cloud: boolean;
+    vision: boolean;
+  };
   server: { provider: Exclude<Provider, 'server'>; model: string; keyMasked: string };
   defaults: Record<string, { baseUrl: string; model: string }>;
 }
@@ -41,20 +52,20 @@ export function aiPrivacy(t: ReturnType<typeof useI18n>['t'], eff: AiSettingsInf
             return eff.provider;
           }
         })();
-  return t.ai.privacyCloud.replace('{provider}', who);
+  return (eff.vision ? t.ai.privacyCloudVision : t.ai.privacyCloud).replace('{provider}', who);
 }
 
 export function AiSettingsForm() {
   const { t, f } = useI18n();
   const [info, setInfo] = useState<AiSettingsInfo | null>(null);
-  const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: 8000 });
+  const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: 8000, vision: false });
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     void api<AiSettingsInfo>('/ai/settings').then((s) => {
       setInfo(s);
-      setForm({ provider: s.provider, model: s.model, baseUrl: s.baseUrl, apiKey: '', maxTokens: s.maxTokens });
+      setForm({ provider: s.provider, model: s.model, baseUrl: s.baseUrl, apiKey: '', maxTokens: s.maxTokens, vision: s.vision });
     });
   }, []);
 
@@ -69,6 +80,7 @@ export function AiSettingsForm() {
         model: form.model,
         baseUrl: form.baseUrl,
         maxTokens: form.maxTokens,
+        vision: form.vision,
         ...(apiKey !== undefined ? { apiKey } : {}),
       };
       const s = await api<AiSettingsInfo>('/ai/settings', { method: 'PUT', body });
@@ -178,6 +190,15 @@ export function AiSettingsForm() {
             )}
           </Field>
         </>
+      ) : null}
+      {form.provider !== 'none' ? (
+        <div className="grid gap-1">
+          <label className="flex items-center justify-between gap-3 text-sm">
+            {t.ai.vision}
+            <Switch checked={form.vision} onChange={(v) => setForm({ ...form, vision: v })} label={t.ai.vision} />
+          </label>
+          <p className="text-[13px] text-fg-muted">{t.ai.visionHint}</p>
+        </div>
       ) : null}
       <p className="text-[13px] text-fg-muted" data-testid="ai-privacy">
         {aiPrivacy(t, info.effective)}
