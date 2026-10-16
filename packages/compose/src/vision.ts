@@ -119,11 +119,12 @@ export async function resolvePuttsWithVision(cfg: AiConfig, hole: PuttHole, fram
 // The putts question. Ids and options as rules.ts asks them: `putts:<hole>` → '1' | '2' | '3' |
 // '4+', and `holed:<hole>` → 'yes' | 'no'. Kept here so they are easy to adapt.
 
+// The putts question (rules.ts puttsQuestion): options '1'–'4' = that many putts, the last holed
+// ('4' = four or more); 'notHoled' = the last did not drop or was not filmed to the end.
 export const PUTTS_PREFIX = 'putts:';
-export const HOLED_PREFIX = 'holed:';
 export const puttsHoleOf = (q: PlanQuestion): string | null => (q.id.startsWith(PUTTS_PREFIX) ? q.id.slice(PUTTS_PREFIX.length) : null);
-export const puttsOption = (n: number) => (n >= 4 ? '4+' : String(n));
-export const holedOption = (holed: boolean) => (holed ? 'yes' : 'no');
+/** The option for what the AI saw; null when it could not see whether the ball dropped. */
+export const puttsOption = (n: number, holed: boolean | null): string | null => (holed === null ? null : holed ? String(Math.min(4, n)) : 'notHoled');
 
 /**
  * Where to look for a putts question: in the clip with most of its putts, from the first putt's
@@ -163,17 +164,10 @@ export function applyPuttVision(
 ): { plan: VideoPlan; answers: PlanAnswers; note: string } | null {
   if (v.confidence < VISION_MIN_CONFIDENCE) return null;
   const putts = plan.questions.find((q) => q.id === PUTTS_PREFIX + hole);
-  const option = puttsOption(v.putts);
-  if (!putts || !putts.options.some((o) => o.id === option)) return null;
+  const option = puttsOption(v.putts, v.holed);
+  if (!putts || !option || !putts.options.some((o) => o.id === option)) return null;
   const answers: PlanAnswers = { [putts.id]: option };
-  // A holed question the frames did not settle stays.
-  const holedQ = plan.questions.find((q) => q.id === HOLED_PREFIX + hole);
-  const holed = v.holed === null ? null : holedOption(v.holed);
   const drop = new Set([putts.id]);
-  if (holed && (!holedQ || holedQ.options.some((o) => o.id === holed))) {
-    answers[HOLED_PREFIX + hole] = holed;
-    if (holedQ) drop.add(holedQ.id);
-  }
   const note = NOTE[locale](v.putts, hole);
   return {
     plan: { ...plan, questions: plan.questions.filter((q) => !drop.has(q.id)), notes: [...plan.notes.slice(0, 9), note] },

@@ -22,7 +22,7 @@ vi.mock('@golf/compose', async (importOriginal) => {
           {
             id: 'putts:2',
             text: 'Hvor mange putts på hul 2?',
-            options: ['1', '2', '3', '4+'].map((id) => ({ id, label: id })),
+            options: ['1', '2', '3', '4', 'notHoled'].map((id) => ({ id, label: id })),
             default: '2',
             shotIds: ['s2', 's3'],
             clipIds: [],
@@ -122,7 +122,7 @@ describe('compose job: the AI looks at the putting', () => {
     const asked = f.calls.find((c) => c.op === 'awaitAnswers')!.args[1] as Asked;
     expect(asked.plan.questions.map((q) => q.id)).toEqual(['retake:s2:s3']);
     expect(asked.plan.notes).toContain("AI'en talte 2 putts på hul 2 ud fra billeder.");
-    expect(asked.vision!.answers).toEqual({ 'putts:2': '2', 'holed:2': 'yes' });
+    expect(asked.vision!.answers).toEqual({ 'putts:2': '2' });
     expect(asked.usage.calls).toBe(2);
     expect(lines.some((l) => l.includes('ai vision call') && l.includes('"inputTokens":4000'))).toBe(true);
     expect(lines.join('\n')).not.toContain('sk-SECRET');

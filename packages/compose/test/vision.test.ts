@@ -158,7 +158,7 @@ describe('vision: token ceiling', () => {
 const puttsQ = (hole: string): PlanQuestion => ({
   id: `putts:${hole}`,
   text: `Hvor mange putts på hul ${hole}?`,
-  options: ['1', '2', '3', '4+'].map((id) => ({ id, label: id })),
+  options: ['1', '2', '3', '4', 'notHoled'].map((id) => ({ id, label: id })),
   default: '2',
   shotIds: ['p1', 'p2'],
   clipIds: [],
@@ -168,31 +168,23 @@ const puttsQ = (hole: string): PlanQuestion => ({
     { shotId: 'x', mediaId: 'other', clip: 4, clipName: 'h.mov', t: 2, reasons: [] },
   ],
 });
-const holedQ: PlanQuestion = {
-  id: 'holed:7',
-  text: 'I hul?',
-  options: ['yes', 'no'].map((id) => ({ id, label: id })),
-  default: 'yes',
-  shotIds: [],
-  clipIds: [],
-};
-const plan = VideoPlan.parse({ kind: 'youtube', includeShotIds: [], title: 'T', questions: [puttsQ('7'), holedQ, puttsQ('8')], notes: ['first'] });
+const plan = VideoPlan.parse({ kind: 'youtube', includeShotIds: [], title: 'T', questions: [puttsQ('7'), puttsQ('8')], notes: ['first'] });
 
 describe('the putts question', () => {
   it('fills the answers and drops the questions when the model is sure', () => {
     const out = applyPuttVision(plan, '7', { putts: 2, holed: true, confidence: 0.8 }, 'da')!;
-    expect(out.answers).toEqual({ 'putts:7': '2', 'holed:7': 'yes' });
+    expect(out.answers).toEqual({ 'putts:7': '2' });
     expect(out.plan.questions.map((q) => q.id)).toEqual(['putts:8']);
     expect(out.note).toBe("AI'en talte 2 putts på hul 7 ud fra billeder.");
     expect(out.plan.notes).toEqual(['first', out.note]);
-    expect(applyPuttVision(plan, '7', { putts: 5, holed: null, confidence: 0.9 }, 'en')!.answers).toEqual({ 'putts:7': '4+' });
+    expect(applyPuttVision(plan, '7', { putts: 5, holed: true, confidence: 0.9 }, 'en')!.answers).toEqual({ 'putts:7': '4' });
+    expect(applyPuttVision(plan, '7', { putts: 2, holed: false, confidence: 0.9 }, 'en')!.answers).toEqual({ 'putts:7': 'notHoled' });
   });
 
-  it('keeps the question when the model is unsure, and the holed question when the frames did not show it', () => {
+  it('keeps the question when the model is unsure or did not see whether the ball dropped', () => {
     expect(applyPuttVision(plan, '7', { putts: 2, holed: true, confidence: 0.69 }, 'da')).toBeNull();
-    const out = applyPuttVision(plan, '7', { putts: 1, holed: null, confidence: 0.95 }, 'en')!;
-    expect(out.plan.questions.map((q) => q.id)).toEqual(['holed:7', 'putts:8']);
-    expect(out.note).toBe('The AI counted 1 putt on hole 7 from still frames.');
+    expect(applyPuttVision(plan, '7', { putts: 1, holed: null, confidence: 0.95 }, 'en')).toBeNull();
+    expect(applyPuttVision(plan, '7', { putts: 1, holed: true, confidence: 0.95 }, 'en')!.note).toBe('The AI counted 1 putt on hole 7 from still frames.');
   });
 
   it('looks from the first putt −1 s to the end of the last +1 s, in the clip with most putts', () => {
