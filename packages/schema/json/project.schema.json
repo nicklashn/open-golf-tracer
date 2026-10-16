@@ -433,13 +433,34 @@
             "type": "string",
             "enum": [
               "full",
-              "short"
+              "short",
+              "putt"
             ]
           },
           "impactTime": {
             "type": "number",
             "minimum": 0,
             "maximum": 86400
+          },
+          "putt": {
+            "type": "object",
+            "properties": {
+              "end": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              },
+              "holed": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "end"
+            ]
           },
           "confidence": {
             "default": 1,
