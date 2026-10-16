@@ -7,7 +7,7 @@
       "const": 1
     },
     "name": {
-      "default": "Uden titel",
+      "default": "Untitled",
       "type": "string",
       "maxLength": 120
     },
@@ -273,6 +273,21 @@
               {
                 "type": "string",
                 "maxLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recordedAtSource": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "metadata",
+                  "filename",
+                  "file"
+                ]
               },
               {
                 "type": "null"

@@ -4,6 +4,7 @@
  */
 import { shotStats } from '@golf/render';
 import type { MediaRef, Project, Shot, WarningCode } from '@golf/schema';
+import { isoDate, isSure, roundMedia, roundOrder } from './chronology';
 import { playedShots } from './videos';
 
 export interface ClipSummary {
@@ -11,7 +12,7 @@ export interface ClipSummary {
   /** Position in the round (1-based), see `clipOrder`. */
   n: number;
   name: string;
-  /** ISO time the clip was filmed, or null when the file did not say. */
+  /** ISO time the clip was filmed, or null when neither the file's metadata nor its name said. */
   recordedAt: string | null;
   seconds: number;
   portrait: boolean;
@@ -52,39 +53,30 @@ export interface RoundSummary {
   date: string;
   clips: ClipSummary[];
   shots: ShotSummary[];
+  /** How the clip order was found (see `roundOrder`): clip ids placed without a sure time, and two clips whose times contradict their holes. */
+  order: { by: 'time' | 'hole' | 'mixed'; unsure: string[]; conflict: [string, string] | null };
 }
-
-export const isoDate = (s: string | null | undefined): Date | null => {
-  if (!s) return null;
-  const d = new Date(s.replace(/([+-]\d\d)(\d\d)$/, '$1:$2'));
-  return Number.isNaN(d.getTime()) ? null : d;
-};
 
 /** Rounded to `decimals` places without float noise (2.4, not 2.4000000000000004): fewer tokens. */
 const round = (v: number, decimals: number) => Number(v.toFixed(decimals));
 
-/**
- * The clips of the round in the order they were played: by the time they were filmed; clips
- * the file gave no time for follow by file name.
- */
+/** The clips of the round in the order they were played (see chronology.ts). */
 export function clipOrder(doc: Project): MediaRef[] {
-  const vids = Object.values(doc.media).filter((m) => m.kind === 'video' && doc.clips.some((c) => c.mediaId === m.id));
-  const timed = vids.filter((m) => isoDate(m.recordedAt)).sort((a, b) => isoDate(a.recordedAt)!.getTime() - isoDate(b.recordedAt)!.getTime());
-  const untimed = vids.filter((m) => !isoDate(m.recordedAt)).sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
-  return [...timed, ...untimed];
+  return roundOrder(roundMedia(doc)).media;
 }
 
-/** When the shot was struck (ms since epoch), if the clip's start time is known. */
+/** When the shot was struck (ms since epoch), if the clip's start time is surely known. */
 export function strikeTime(shot: Shot, media: MediaRef): number | null {
-  const start = isoDate(media.recordedAt);
+  const start = isSure(media) ? isoDate(media.recordedAt) : null;
   return start ? start.getTime() + (shot.impactTime / Math.max(1, shot.slowmo)) * 1000 : null;
 }
 
 export function summarize(doc: Project): RoundSummary {
-  const order = clipOrder(doc);
+  const ordered = roundOrder(roundMedia(doc));
+  const order = ordered.media;
   const nOf = new Map(order.map((m, i) => [m.id, i + 1]));
   const shots = playedShots(doc).sort((a, b) => (nOf.get(a.mediaId) ?? 1e9) - (nOf.get(b.mediaId) ?? 1e9) || a.impactTime - b.impactTime);
-  const first = order.find((m) => isoDate(m.recordedAt));
+  const first = order.find(isSure);
   const d = isoDate(first?.recordedAt);
   return {
     name: doc.name,
@@ -94,7 +86,7 @@ export function summarize(doc: Project): RoundSummary {
       id: m.id,
       n: i + 1,
       name: m.name,
-      recordedAt: m.recordedAt,
+      recordedAt: isSure(m) ? m.recordedAt : null,
       seconds: round(m.duration, 1),
       portrait: m.height > m.width,
       gps: !!m.geo,
@@ -125,6 +117,7 @@ export function summarize(doc: Project): RoundSummary {
         y: round(s.anchor.y / Math.max(1, m.height), 2),
       };
     }),
+    order: { by: ordered.by, unsure: ordered.unsure, conflict: ordered.conflict && [ordered.conflict[0].id, ordered.conflict[1].id] },
   };
 }
 

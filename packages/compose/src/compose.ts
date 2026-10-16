@@ -8,6 +8,7 @@ import { layerDefaults, type LayerNames } from './layers';
 import { resolveAnswers, shotChoices, type PlanAnswers, type VideoPlan } from './plan';
 import { BROLL_S, shotScore } from './rules';
 import { shortFor } from './shorts';
+import { byHole, roundMedia } from './chronology';
 import { clipOrder, summarize } from './summary';
 import { highlightShort, playedShots, youtubeVideo } from './videos';
 
@@ -57,9 +58,10 @@ export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | nu
     else if (byId.has(id)) keep.add(id);
   }
 
-  // Playing order: as filmed (file names for clips without a time), as added, or the plan's own.
+  // Playing order: as filmed (see chronology.ts), as added, by hole, or the plan's own.
   const media = { ...doc.media };
-  let order = a.order === 'added' ? [...new Set(doc.clips.map((c) => c.mediaId))] : clipOrder(doc).map((m) => m.id);
+  let order =
+    a.order === 'added' ? [...new Set(doc.clips.map((c) => c.mediaId))] : (a.order === 'holes' ? byHole(roundMedia(doc)) : clipOrder(doc)).map((m) => m.id);
   if (plan.order?.length) {
     const fromPlan = [...new Set(plan.order.map((id) => byId.get(id)?.clipId).filter((x): x is string => !!x))];
     order = [...fromPlan, ...order.filter((id) => !fromPlan.includes(id))];

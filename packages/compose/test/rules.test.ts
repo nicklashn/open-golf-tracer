@@ -123,13 +123,73 @@ describe('planFromRules', () => {
     expect(shorts.notes.join(' ')).toContain('x.mov');
   });
 
-  it('asks whether file-name order is right when clips have no recording time', () => {
-    const doc = project([media('b2', null, '2'), media('a1', null, '1')], [shot('s2', 'b2', 5), shot('s1', 'a1', 5)]);
+  it('asks whether file-name order is right when clips have neither a recording time nor a hole', () => {
+    const doc = project([media('b2', null, null), media('a1', null, null)], [shot('s2', 'b2', 5), shot('s1', 'a1', 5)]);
     const plan = planFromRules(summarize(doc), '', 'en');
     expect(ids(plan)).toEqual(['order']);
+    expect(plan.questions[0].options.map((o) => o.id)).toEqual(['filename', 'added']);
     const order = (answers: Record<string, string>) => [...new Set(prepare(doc, plan, answers).doc.clips.map((c) => c.mediaId))];
     expect(order({})).toEqual(['a1', 'b2']); // file names
     expect(order({ order: 'added' })).toEqual(['b2', 'a1']); // as added
+  });
+
+  it('orders clips without a recording time by hole, wrapping 18 → 1, without asking', () => {
+    const doc = project(
+      [media('x1', null, '2'), media('x2', null, '17'), media('x3', null, '10'), media('x4', null, '1'), media('x5', null, '12')],
+      [shot('s1', 'x1', 5), shot('s2', 'x2', 5), shot('s3', 'x3', 5), shot('s4', 'x4', 5), shot('s5', 'x5', 5)],
+    );
+    const s = summarize(doc);
+    expect(s.clips.map((c) => c.hole)).toEqual(['10', '12', '17', '1', '2']);
+    expect(s.order.by).toBe('hole');
+    expect(planFromRules(s, '', 'en').questions).toEqual([]);
+  });
+
+  it('does not trust file dates over holes, and asks about a clip with neither', () => {
+    const file = { recordedAtSource: 'file' };
+    const doc = project(
+      [media('a', '2026-10-16T09:00:01Z', '3', file), media('b', '2026-10-16T09:00:02Z', '1', file), media('c', '2026-10-16T09:00:03Z', null, file)],
+      [shot('s1', 'a', 5), shot('s2', 'b', 5), shot('s3', 'c', 5)],
+    );
+    const s = summarize(doc);
+    expect(s.clips.map((c) => c.id)).toEqual(['b', 'a', 'c']);
+    // File dates are no strike times: copied files land seconds apart and are no "same shot".
+    expect(s.shots.every((x) => x.at === null)).toBe(true);
+    const plan = planFromRules(s, '', 'en');
+    expect(ids(plan)).toEqual(['order']);
+    expect(plan.questions[0].clipIds).toEqual(['c']);
+  });
+
+  it('keeps the filmed order but asks when sure times contradict the holes', () => {
+    const doc = project(
+      [
+        media('a', '2026-06-16T10:00:00+0200', '1'),
+        media('b', '2026-06-16T10:20:00+0200', '7'),
+        media('c', '2026-06-16T10:40:00+0200', '3'),
+        media('d', '2026-06-16T11:00:00+0200', '4'),
+      ],
+      [shot('s1', 'a', 5), shot('s2', 'b', 5), shot('s3', 'c', 5), shot('s4', 'd', 5)],
+    );
+    const plan = planFromRules(summarize(doc), '', 'en');
+    expect(ids(plan)).toEqual(['order']);
+    const q = plan.questions[0];
+    expect(q.text).toBe('The recording times say hole 7 in clip 2 (b.mov) was filmed before hole 3 in clip 3 (c.mov). Is that right?');
+    expect(q.options.map((o) => o.id)).toEqual(['filmed', 'holes']);
+    expect(q.default).toBe('filmed');
+    const order = (answers: Record<string, string>) => [...new Set(prepare(doc, plan, answers).doc.clips.map((c) => c.mediaId))];
+    expect(order({})).toEqual(['a', 'b', 'c', 'd']);
+    expect(order({ order: 'holes' })).toEqual(['a', 'c', 'd', 'b']);
+  });
+
+  it('a round started on hole 10, filmed by name-timed clips, needs no question', () => {
+    const name = { recordedAtSource: 'filename' };
+    const holes = ['10', '11', '13', '18', '1', '2', '9'];
+    const doc = project(
+      holes.map((h, i) => media(`h${h}`, `2026-06-16T${String(10 + i).padStart(2, '0')}:00:00+0200`, h, name)),
+      holes.map((h) => shot(`s${h}`, `h${h}`, 5)),
+    );
+    const s = summarize(doc);
+    expect(s.order).toEqual({ by: 'time', unsure: [], conflict: null });
+    expect(planFromRules(s, '', 'en').questions).toEqual([]);
   });
 
   it('asks which hole a clip without GPS in the middle of a round is', () => {

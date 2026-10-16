@@ -107,7 +107,10 @@ export async function uploadFile(file: File, opts: { projectId?: string | null; 
       }
     }
     if (!status) {
-      status = await api('/uploads', { body: { filename: file.name, size: file.size, kind, projectId: opts.projectId ?? null } });
+      // lastModified: the last fallback for when a clip was filmed (see chronology.py).
+      status = await api('/uploads', {
+        body: { filename: file.name, size: file.size, kind, projectId: opts.projectId ?? null, lastModified: file.lastModified || null },
+      });
       remember(key, status!.id);
     }
     const st = status!;

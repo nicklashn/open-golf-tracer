@@ -69,9 +69,14 @@ const L = {
       `Der blev ikke fundet slag i ${n === 1 ? 'et klip' : `${n} klip`}: ${list}. Hvad skal der ske med ${n === 1 ? 'det' : 'dem'}?`,
     skip: 'Spring over',
     broll: `Brug som stemningsklip (op til ${BROLL_S} s)`,
-    order: (list: string) => `${list} har ingen optagetid, så rækkefølgen bygger på filnavnet. Er det rigtigt?`,
-    byName: 'Ja, brug filnavnene',
+    order: (list: string, n: number) =>
+      `${list} har ingen sikker optagetid, så ${n === 1 ? 'dets' : 'deres'} plads er gættet ud fra filnavn og fildato. Er rækkefølgen rigtig?`,
+    holeIn: (hole: string, clip: string) => `${hole} i ${clip}`,
+    conflict: (a: string, b: string) => `Optagetiderne siger, at ${a} blev filmet før ${b}. Passer det?`,
+    byName: 'Ja, behold rækkefølgen',
+    asFilmed: 'Ja, som de blev filmet',
     asAdded: 'Nej, brug rækkefølgen klippene blev tilføjet i',
+    byHoles: 'Nej, sorter efter hulnummer',
     gps: (clip: string, prev: string, next: string) => `${clip} har ingen GPS. Hvilket hul er det (klippet før er ${prev}, klippet efter er ${next})?`,
     samePrev: (h: string) => `Samme som klippet før (${h})`,
     sameNext: (h: string) => `Samme som klippet efter (${h})`,
@@ -114,9 +119,14 @@ const L = {
       `No shots were found in ${n === 1 ? 'one clip' : `${n} clips`}: ${list}. What should happen to ${n === 1 ? 'it' : 'them'}?`,
     skip: 'Skip',
     broll: `Use as a mood shot (up to ${BROLL_S} s)`,
-    order: (list: string) => `${list} have no recording time, so the order is based on the file names. Is that right?`,
-    byName: 'Yes, use the file names',
+    order: (list: string, n: number) =>
+      `${list} ${n === 1 ? 'has' : 'have'} no reliable recording time, so ${n === 1 ? 'its' : 'their'} place is a guess from the file name and date. Is the order right?`,
+    holeIn: (hole: string, clip: string) => `${hole} in ${clip}`,
+    conflict: (a: string, b: string) => `The recording times say ${a} was filmed before ${b}. Is that right?`,
+    byName: 'Yes, keep this order',
+    asFilmed: 'Yes, as filmed',
     asAdded: 'No, use the order the clips were added in',
+    byHoles: 'No, order by hole number',
     gps: (clip: string, prev: string, next: string) => `${clip} has no GPS. Which hole is it (the clip before is ${prev}, the clip after is ${next})?`,
     samePrev: (h: string) => `Same as the clip before (${h})`,
     sameNext: (h: string) => `Same as the clip after (${h})`,
@@ -292,16 +302,24 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     });
   else if (empty.length) notes.push(T.skipped(list(empty.map((c) => T.clip(c.n, c.name)))));
 
-  // Clips without a recording time: the order falls back to the file name.
-  const untimed = s.clips.filter((c) => !c.recordedAt);
-  if (untimed.length && s.clips.length > 1)
+  // The order only needs a question when the times are missing or contradict the holes.
+  const conflict = s.order.conflict?.map((id) => s.clips.find((c) => c.id === id)!);
+  const untimed = s.clips.filter((c) => s.order.unsure.includes(c.id));
+  const holes = s.order.by !== 'hole' && s.clips.filter((c) => /^\d+$/.test(c.hole)).length >= 2 ? [{ id: 'holes', label: T.byHoles }] : [];
+  if (conflict && s.clips.length > 1)
     questions.push({
       id: 'order',
-      text: T.order(list(untimed.map((c) => T.clip(c.n, c.name)))),
-      options: [
-        { id: 'filename', label: T.byName },
-        { id: 'added', label: T.asAdded },
-      ],
+      text: T.conflict(...(conflict.map((c) => T.holeIn(T.hole(c.hole), T.clip(c.n, c.name))) as [string, string])),
+      options: [{ id: 'filmed', label: T.asFilmed }, ...holes],
+      default: 'filmed',
+      shotIds: [],
+      clipIds: conflict.map((c) => c.id),
+    });
+  else if (untimed.length && s.clips.length > 1)
+    questions.push({
+      id: 'order',
+      text: T.order(list(untimed.map((c) => T.clip(c.n, c.name))), untimed.length),
+      options: [{ id: 'filename', label: T.byName }, { id: 'added', label: T.asAdded }, ...holes],
       default: 'filename',
       shotIds: [],
       clipIds: untimed.map((c) => c.id),
