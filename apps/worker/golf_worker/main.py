@@ -1,7 +1,7 @@
 """Worker loop: claims jobs from the database queue and runs them.
 
 Two lanes run in parallel so a long analysis never blocks proxies for the next upload:
-  media lane:    ingest
+  media lane:    ingest (INGEST_PARALLEL at once, default 2; 1 on machines with 4 cores or fewer)
   analysis lane: analyze, retrack (GPU)
 
 python -m golf_worker [--once] [--lanes media,analysis]
@@ -36,6 +36,16 @@ log = logging.getLogger("golf.worker")
 
 LANES = {"media": ["ingest"], "analysis": ["analyze", "retrack"]}
 HEARTBEAT_S = 15
+
+
+def lane_threads(lane: str) -> int:
+    if lane != "media":
+        return 1
+    try:
+        n = int(os.environ.get("INGEST_PARALLEL", ""))
+    except ValueError:
+        n = 1 if (os.cpu_count() or 1) <= 4 else 2
+    return max(1, n)
 
 
 def run_job(job_id: str) -> None:
@@ -137,8 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         # Load the ball detector now (torch + weights take 20-50 s cold), not when the first
         # video is waiting for its analysis.
         threading.Thread(target=_warm_detector, daemon=True).start()
-    log.info("worker %s starting with lanes: %s", worker_id, ", ".join(lanes))
-    threads = [threading.Thread(target=lane_loop, args=(ln, LANES[ln], a.once, worker_id), daemon=True) for ln in lanes]
+    log.info("worker %s starting with lanes: %s", worker_id, ", ".join(f"{ln} x{lane_threads(ln)}" for ln in lanes))
+    threads = [threading.Thread(target=lane_loop, args=(ln if i == 0 else f"{ln}{i + 1}", LANES[ln], a.once, worker_id), daemon=True)
+               for ln in lanes for i in range(lane_threads(ln))]
     for t in threads:
         t.start()
     try:

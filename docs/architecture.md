@@ -73,10 +73,16 @@ sættes i kø igen (`maintenance.py`). Fremskridt sendes til browseren med Serve
 
 | Bane | Hvem | Jobs |
 |---|---|---|
-| `media` | Python-worker | `ingest`: probe, poster, proxy (kort GOP), thumbnail-sprite, waveform |
+| `media` | Python-worker (`INGEST_PARALLEL` jobs ad gangen, standard 2; 1 ved ≤ 4 CPU-kerner) | `ingest`: probe, poster, proxy (kort GOP), thumbnail-sprite, waveform |
 | `analysis` | Python-worker | `analyze`, `retrack` (shottracer.analyze) |
 | `export` | Node-exporter | `export` via `/api/internal` (beskyttet af `INTERNAL_TOKEN`) |
 | `compose` | Node-exporter (egen bane, så en lang eksport ikke blokerer) | `compose`: "Lav video for mig" (se nedenfor) |
+
+`ingest` afkoder originalen én gang: samme ffmpeg-kørsel laver proxyen (1280 px, fuld billedrate,
+GOP 4) og thumbnail-spriten (`split`), mens poster og waveform kører ved siden af. Med NVIDIA bliver
+afkodning og skalering på GPU'en (`-hwaccel cuda` + `scale_cuda` → NVENC); fejler det, laves proxyen
+igen på CPU'en (x264 `ultrafast`). HDR, roterede og 10-bit-videoer går altid CPU-vejen (tone mapping).
+`analyze` venter ikke på `ingest`; den læser originalen.
 
 Et job kan også parkeres med status `awaiting_answers` (ingen worker holder det imens) og
 sendes tilbage i køen med `POST /api/jobs/{id}/answers`; `defer` sætter et job i kø igen

@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +23,7 @@ from golf_api.documents import clean_shot
 from golf_api.models import Media, Project
 from golf_api.storage import storage, tmp_dir
 
-from .ffmpeg import Canceled, ffmpeg, h264_args, hwaccel_args, run, tonemap_filter
+from .ffmpeg import Canceled, cuda_ok, ffmpeg, h264_args, hwaccel_args, run, tonemap_filter
 
 log = logging.getLogger("golf.worker")
 
@@ -46,8 +47,11 @@ def _media(media_id: str) -> Media:
         return m
 
 
+_derived_lock = threading.Lock()   # ingest steps run in parallel and each rewrites media.derived
+
+
 def _save_derived(media_id: str, key: str, path: Path, extra: dict[str, Any] | None = None) -> None:
-    with session_scope() as db:
+    with _derived_lock, session_scope() as db:
         m = db.get(Media, media_id)
         if m is None:
             return
@@ -73,6 +77,73 @@ def _vf_scale(w: int, h: int, long_side: int) -> str:
 
 # --- ingest ------------------------------------------------------------------------------------
 
+NVDEC_CODECS = ("h264", "hevc", "vp9", "av1")
+
+
+def _thumb_plan(probe: dict) -> dict:
+    dur = float(probe.get("duration") or 0)
+    n = int(min(MAX_THUMBS, max(10, math.ceil(dur))))
+    interval = max(dur / n, 1 / max(1.0, float(probe.get("fps") or 30)))
+    n = max(1, min(n, int(dur / interval)))
+    w = round(THUMB_HEIGHT * probe.get("width", 16) / max(1, probe.get("height", 9)) / 2) * 2
+    return {"count": n, "cols": THUMB_COLS, "rows": math.ceil(n / THUMB_COLS), "width": w, "height": THUMB_HEIGHT, "interval": interval}
+
+
+def _proxy_size(w: int, h: int) -> tuple[int, int]:
+    if max(w, h) <= PROXY_LONG_SIDE:
+        return w // 2 * 2, h // 2 * 2
+    if w >= h:
+        return PROXY_LONG_SIDE, round(h * PROXY_LONG_SIDE / w / 2) * 2
+    return round(w * PROXY_LONG_SIDE / h / 2) * 2, PROXY_LONG_SIDE
+
+
+def _gpu_proxy_ok(probe: dict) -> bool:
+    """Decode and scale on the GPU: plain 8-bit 4:2:0 SDR without rotation (HDR tone mapping and
+    autorotation need CPU frames)."""
+    return (not probe.get("hdr") and not probe.get("rotation") and probe.get("codec") in NVDEC_CODECS
+            and probe.get("pix_fmt") in ("yuv420p", "yuvj420p") and bool(probe.get("width")) and cuda_ok())
+
+
+def proxy_cmds(src: Path, out: Path, thumbs: Path | None, probe: dict, vp9: bool = False) -> list[list[str]]:
+    """ffmpeg commands that make the proxy, and the thumbnail sprite from the same decode, best first."""
+    w, h = int(probe.get("width") or 0), int(probe.get("height") or 0)
+    fps = float(probe.get("fps") or 30)
+    rate = [f"fps={PROXY_MAX_FPS}"] if fps > PROXY_MAX_FPS + 1 else []
+    t = _thumb_plan(probe)
+    if vp9:
+        # Browsers without H.264 (e.g. open-source Chromium in CI) need VP9.
+        audio = ["-c:a", "libopus", "-b:a", "96k", "-ac", "2"]
+    else:
+        audio = ["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart"]
+
+    def build(pre: list[str], chain: list[str], download: list[str], video: list[str]) -> list[str]:
+        graph = "[0:v:0]" + ",".join(chain)
+        if thumbs:
+            sprite = [f"fps=1/{t['interval']:.5f}", *download, f"scale={t['width']}:{t['height']}:flags=area",
+                      f"tile={t['cols']}x{t['rows']}", "format=yuvj420p"]
+            graph += f",split=2[pv][tv];[tv]{','.join(sprite)}[th]"
+        else:
+            graph += "[pv]"
+        cmd = [ffmpeg(), "-y", "-v", "error", *pre, "-i", str(src), "-filter_complex", graph, "-map", "[pv]", "-map", "0:a:0?",
+               *video, *audio, str(out)]
+        return cmd + (["-map", "[th]", "-frames:v", "1", "-q:v", "5", str(thumbs)] if thumbs else [])
+
+    cmds = []
+    if not vp9 and _gpu_proxy_ok(probe):
+        pw, ph = _proxy_size(w, h)
+        cmds.append(build(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"], [*rate, f"scale_cuda={pw}:{ph}"],
+                          ["hwdownload", "format=nv12"], h264_args(crf=23, keyint=PROXY_KEYINT, cuda_frames=True)))
+    if vp9:
+        video = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-b:v", "0", "-crf", "34",
+                 "-g", str(PROXY_KEYINT), "-pix_fmt", "yuv420p"]
+    else:
+        video = h264_args(crf=23, keyint=PROXY_KEYINT, fast_decode=True, preview=True)
+    chain = [tonemap_filter()] if probe.get("hdr") else []
+    chain += [*rate, _vf_scale(w, h, PROXY_LONG_SIDE) + ":flags=area", "format=yuv420p"]
+    cmds.append(build(hwaccel_args(), chain, [], video))
+    return cmds
+
+
 def ingest(job: dict, report: Report) -> dict:
     m = _media(job["payload"]["media_id"])
     src = storage().local_path(m.storage_key)
@@ -94,46 +165,6 @@ def ingest(job: dict, report: Report) -> dict:
             _save_derived(m.id, f"{prefix}/poster.jpg", out)
         steps.append(("poster", poster))
 
-    if m.kind == "video":
-        def proxy():
-            vp9 = os.environ.get("PROXY_CODEC", "h264").lower() == "vp9"
-            out = work / ("proxy.webm" if vp9 else "proxy.mp4")
-            fps = float(probe.get("fps") or 30)
-            filters = [tonemap_filter()] if hdr else []
-            filters.append(_vf_scale(probe.get("width", 0), probe.get("height", 0), PROXY_LONG_SIDE))
-            if fps > PROXY_MAX_FPS + 1:
-                filters.append(f"fps={PROXY_MAX_FPS}")
-            filters.append("format=yuv420p")
-            if vp9:
-                # Browsers without H.264 (e.g. open-source Chromium in CI) need VP9.
-                codec = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-b:v", "0", "-crf", "34",
-                         "-g", str(PROXY_KEYINT), "-pix_fmt", "yuv420p", "-c:a", "libopus", "-b:a", "96k", "-ac", "2"]
-            else:
-                codec = [*h264_args(crf=23, keyint=PROXY_KEYINT, fast_decode=True), "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart"]
-            cmd = [ffmpeg(), "-y", "-v", "error", *hwaccel_args(), "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?", "-vf", ",".join(filters),
-                   *codec, str(out)]
-            run(cmd, dur, lambda f: report(0.1 + 0.6 * f, "Making the preview"))
-            _save_derived(m.id, f"{prefix}/{out.name}", out)
-        steps.append(("proxy", proxy))
-
-        def thumbs():
-            n = int(min(MAX_THUMBS, max(10, math.ceil(dur))))
-            interval = max(dur / n, 1 / max(1.0, float(probe.get("fps") or 30)))
-            n = max(1, min(n, int(dur / interval)))
-            rows = math.ceil(n / THUMB_COLS)
-            out = work / "thumbs.jpg"
-            vf = ",".join(f for f in (tonemap_filter() if hdr else "", f"fps=1/{interval:.5f}", f"scale=-2:{THUMB_HEIGHT}",
-                                      f"tile={THUMB_COLS}x{rows}", "format=yuvj420p") if f)
-            run([ffmpeg(), "-y", "-v", "error", *hwaccel_args(), "-i", str(src), "-an", "-vf", vf, "-frames:v", "1", "-q:v", "5", str(out)],
-                dur, lambda f: report(0.7 + 0.15 * f, "Making thumbnails"))
-            w = round(THUMB_HEIGHT * probe.get("width", 16) / max(1, probe.get("height", 9)) / 2) * 2
-            info = {"count": n, "cols": THUMB_COLS, "rows": rows, "width": w, "height": THUMB_HEIGHT, "interval": interval}
-            meta = work / "thumbs.json"
-            meta.write_text(json.dumps(info))
-            _save_derived(m.id, f"{prefix}/thumbs.jpg", out, {"thumbs_info": info})
-            _save_derived(m.id, f"{prefix}/thumbs.json", meta)
-        steps.append(("thumbs", thumbs))
-
     if m.kind in ("video", "audio") and (probe.get("hasAudio") or m.kind == "audio"):
         def waveform():
             out = work / "waveform.json"
@@ -142,19 +173,53 @@ def ingest(job: dict, report: Report) -> dict:
             _save_derived(m.id, f"{prefix}/waveform.json", out)
         steps.append(("waveform", waveform))
 
-    labels = {"poster": "Making the poster", "proxy": "Making the preview", "thumbs": "Making thumbnails", "waveform": "Making the waveform"}
-    for i, (name, fn) in enumerate(steps):
-        if not report(i / max(1, len(steps)) * 0.95, labels[name]):
-            raise Canceled()
-        try:
-            fn()
-        except Canceled:
-            raise
-        except Exception as exc:
-            # Thumbnails or the waveform failing must not block editing; the proxy must work.
-            if name in ("proxy",) or m.kind == "image":
+    def proxy():
+        vp9 = os.environ.get("PROXY_CODEC", "h264").lower() == "vp9"
+        out = work / ("proxy.webm" if vp9 else "proxy.mp4")
+        sprite = work / "thumbs.jpg"
+        cmds = proxy_cmds(src, out, sprite, probe, vp9)
+        for i, cmd in enumerate(cmds):
+            try:
+                t0 = time.perf_counter()
+                run(cmd, dur, lambda f: report(0.05 + 0.9 * f, "Making the preview"))
+                log.info("preview for %s made in %.1f s (%s)", m.id, time.perf_counter() - t0,
+                         "GPU decode+scale" if "scale_cuda" in cmd[cmd.index("-filter_complex") + 1] else cmd[cmd.index("-c:v") + 1])
+                break
+            except Canceled:
                 raise
-            log.warning("ingest %s failed for %s: %s", name, m.id, exc)
+            except Exception as exc:
+                if i == len(cmds) - 1:
+                    raise
+                log.warning("GPU preview failed for %s, using the CPU: %s", m.id, exc)
+                out.unlink(missing_ok=True)
+                sprite.unlink(missing_ok=True)
+        _save_derived(m.id, f"{prefix}/{out.name}", out)
+        if not sprite.exists() or sprite.stat().st_size == 0:
+            log.warning("ingest thumbs missing for %s", m.id)
+            return
+        info = _thumb_plan(probe)
+        meta = work / "thumbs.json"
+        meta.write_text(json.dumps(info))
+        _save_derived(m.id, f"{prefix}/thumbs.jpg", sprite, {"thumbs_info": info})
+        _save_derived(m.id, f"{prefix}/thumbs.json", meta)
+
+    # The poster and waveform are quick; they run beside the single decode that makes the proxy
+    # and thumbnails.
+    labels = {"poster": "Making the poster", "waveform": "Making the waveform"}
+    if not report(0.0, "Making the preview" if m.kind == "video" else labels[steps[0][0]] if steps else ""):
+        raise Canceled()
+    with ThreadPoolExecutor(max_workers=max(1, len(steps))) as pool:
+        side = [(name, pool.submit(fn)) for name, fn in steps]
+        if m.kind == "video":
+            proxy()
+        for name, fut in side:
+            try:
+                fut.result()
+            except Exception as exc:
+                # The poster or waveform failing must not block editing; the proxy must work.
+                if m.kind == "image":
+                    raise
+                log.warning("ingest %s failed for %s: %s", name, m.id, exc)
     with session_scope() as db:
         mm = db.get(Media, m.id)
         if mm is not None:

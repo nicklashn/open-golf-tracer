@@ -32,6 +32,16 @@ def encoder_ok(codec: str) -> bool:
     return subprocess.run(cmd, capture_output=True).returncode == 0
 
 
+@functools.cache
+def cuda_ok() -> bool:
+    """CUDA frames -> scale_cuda -> NVENC works, so a proxy can be made without leaving the GPU."""
+    if not (encoder_ok("h264_nvenc") and has_filter("scale_cuda") and has_filter("hwupload_cuda")):
+        return False
+    cmd = [ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=0.1", "-vf", "format=nv12,hwupload_cuda,scale_cuda=256:192",
+           "-c:v", "h264_nvenc", "-f", "null", "-"]
+    return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
 def tonemap_filter() -> str:
     """HLG/PQ -> SDR BT.709 for previews and SDR exports."""
     if has_filter("zscale") and has_filter("tonemap"):
@@ -42,18 +52,22 @@ def tonemap_filter() -> str:
     return "null"
 
 
-def h264_args(crf: int = 23, keyint: int | None = None, fast_decode: bool = False) -> list[str]:
-    if encoder_ok("h264_nvenc"):
+def h264_args(crf: int = 23, keyint: int | None = None, fast_decode: bool = False, preview: bool = False,
+              cuda_frames: bool = False) -> list[str]:
+    """preview: fastest x264 preset (a higher crf keeps the size of veryfast); cuda_frames: input is already on the GPU."""
+    if cuda_frames or encoder_ok("h264_nvenc"):
         args = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(crf), "-b:v", "0", "-bf", "0"]
+    elif preview:
+        args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf + 7), "-bf", "0"]
     else:
         args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-bf", "0"]
-        if fast_decode:
-            args += ["-tune", "fastdecode"]
+    if fast_decode and "libx264" in args:
+        args += ["-tune", "fastdecode"]
     if keyint:
         args += ["-g", str(keyint), "-keyint_min", str(keyint)]
         if "libx264" in args:
             args += ["-sc_threshold", "0"]
-    return args + ["-pix_fmt", "yuv420p"]
+    return args if cuda_frames else [*args, "-pix_fmt", "yuv420p"]
 
 
 def run(cmd: list[str], duration: float = 0.0, on_progress: Callable[[float], bool] | None = None) -> None:

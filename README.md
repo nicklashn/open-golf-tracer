@@ -100,6 +100,7 @@ Everything has sensible defaults, and nothing has to be set. To change something
 | `GOLF_DETECTOR` | Ball detector: `rfdetr` (default, ONNX), `rfdetr-torch`, `yolo` or `blob` |
 | `GOLF_HDR_TONEMAP` | `1` tone-maps HDR videos to SDR before analysis |
 | `PROXY_CODEC` | Editor preview codec: `h264` (default) or `vp9` |
+| `INGEST_PARALLEL` | Videos prepared at once (preview, thumbnails, waveform); default 2, or 1 on PCs with 4 CPU cores or fewer |
 | `EXPORT_CPU` | `1` forces CPU encoding even when a GPU encoder exists |
 | `NEXT_PUBLIC_MAP_SATELLITE` | Satellite map in "Measure on map": empty = auto, `1` = always, `0` = never |
 | `LISTEN_HOST`, `ALLOWED_HOSTS` | Network access, see above |
