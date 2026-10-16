@@ -10,3 +10,4 @@ export * from './shorts';
 export * from './summary';
 export * from './videos';
 export * from './ai';
+export * from './vision';

@@ -239,7 +239,12 @@ const da = {
     test: 'Test forbindelse',
     testOk: 'Forbindelsen virker: {model}, {tokens} tokens, {ms} ms.',
     testFailed: 'Forbindelsen virker ikke',
-    privacyCloud: 'Kun resuméet (slagdata og din tekst) sendes til {provider} – aldrig video eller billeder.',
+    privacyCloud: 'Kun resuméet (slagdata og din tekst) sendes til {provider} – aldrig video, og kun stillbilleder, hvis du slår det til.',
+    privacyCloudVision:
+      'Resuméet (slagdata og din tekst) sendes til {provider} og, når antallet af putts er usikkert, nogle få stillbilleder fra greenen – aldrig video.',
+    vision: "Lad AI'en se billeder, når den er i tvivl (putts)",
+    visionHint:
+      'Når analysen er i tvivl om, hvor mange putts du brugte, får modellen nogle få stillbilleder fra greenen i stedet for at spørge dig. Med Ollama bliver de på din pc; med en cloud-udbyder sendes de dertil. Kræver en model, der kan se billeder.',
     privacyLocal: 'Alt bliver på din maskine: modellen kører lokalt.',
     privacyNone: 'Ingen AI: intet sendes nogen steder hen.',
   },

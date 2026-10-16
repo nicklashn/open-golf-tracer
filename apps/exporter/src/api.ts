@@ -57,6 +57,8 @@ export class InternalApi {
       baseUrl: string;
       apiKey: string;
       maxTokens: number;
+      /** May send still frames from the green when the putt count is unsure. */
+      vision: boolean;
       source: string;
     }>('GET', `/jobs/${id}/ai`);
   }
