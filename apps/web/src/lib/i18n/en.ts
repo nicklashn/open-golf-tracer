@@ -210,6 +210,8 @@ const en: Dict = {
       low_confidence: 'The analysis is unsure about this shot.',
       retake: 'Hit from almost the same spot shortly after another shot.',
       same_shot: 'Looks like the same shot filmed from another angle.',
+      next_shot_distance: 'The next stroke was filmed {next} m from here, but the flight shows {carry} m.',
+      putt_count_unsure: 'The analysis is unsure how many putts there were.',
     },
   },
   ai: {
@@ -239,7 +241,12 @@ const en: Dict = {
     test: 'Test connection',
     testOk: 'The connection works: {model}, {tokens} tokens, {ms} ms.',
     testFailed: 'The connection does not work',
-    privacyCloud: 'Only the summary (shot data and your text) is sent to {provider} – never video or images.',
+    privacyCloud: 'Only the summary (shot data and your text) is sent to {provider} – never video, and still frames only if you turn that on.',
+    privacyCloudVision:
+      'The summary (shot data and your text) is sent to {provider}, and a few still frames from the green when the putt count is unsure – never video.',
+    vision: 'Let the AI look at pictures when unsure (putts)',
+    visionHint:
+      'When the analysis is unsure how many putts you took, the model gets a few still frames from the green instead of asking you. With Ollama they stay on your PC; with a cloud provider they are sent there. Needs a model that can see images.',
     privacyLocal: 'Everything stays on your machine: the model runs locally.',
     privacyNone: 'No AI: nothing is sent anywhere.',
   },
@@ -287,6 +294,14 @@ const en: Dict = {
     retracking: 'Tracking …',
     delete: 'Delete shot',
     shortShot: 'Short shot',
+    putt: 'Putt',
+    puttHoled: 'Holed',
+    puttRoll: 'Rolls {s} s',
+    puttLead: 'Putts are shown as plain video, without a tracer.',
+    puttHoledLabel: 'In the hole?',
+    puttHoledYes: 'Yes',
+    puttHoledNo: 'No',
+    puttHoledUnknown: 'Unknown',
     warnings: {
       low_confidence: 'We are not quite sure about this shot.',
       no_track: 'The ball could not be seen in flight, so the path is a guess. Drag the landing point to fix it.',
@@ -298,6 +313,7 @@ const en: Dict = {
       default_path: 'Default path – fix it with the handles.',
       hole_limit: 'The estimate was longer than the hole allows, so the flight follows the distance to the green. Measure it on the map to be sure.',
       manual: 'Added manually.',
+      putt_count_unsure: 'We are not sure how many putts there were, or whether the last one dropped. Check the putts on this green.',
     },
   },
   map: {

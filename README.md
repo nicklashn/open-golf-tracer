@@ -105,7 +105,7 @@ Everything has sensible defaults, and nothing has to be set. To change something
 | `NEXT_PUBLIC_MAP_SATELLITE` | Satellite map in "Measure on map": empty = auto, `1` = always, `0` = never |
 | `LISTEN_HOST`, `ALLOWED_HOSTS` | Network access, see above |
 | `LOG_LEVEL` | `INFO` by default |
-| `AI_PROVIDER`, `AI_MODEL`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MAX_TOKENS` | Optional AI model for "Make video for me", see below |
+| `AI_PROVIDER`, `AI_MODEL`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MAX_TOKENS`, `AI_VISION` | Optional AI model for "Make video for me", see below |
 
 Restart the app after changing `.env` (rebuild with `npm run build` after changing a
 `NEXT_PUBLIC_` variable).
@@ -114,7 +114,8 @@ Restart the app after changing `.env` (rebuild with `npm run build` after changi
 
 Everything works without AI. With a model it reads your preference, words the questions better and
 writes the title, texts and an upload description. The model only sees **a text summary** of the
-round (one line per clip and per shot), never video or images; at most 2 calls per video.
+round (one line per clip and per shot), never video; at most 2 calls per video. Still frames only if
+you turn that on (`AI_VISION`, below).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -123,6 +124,7 @@ round (one line per clip and per shot), never video or images; at most 2 calls p
 | `AI_BASE_URL` | provider default | e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://openrouter.ai/api/v1` |
 | `AI_API_KEY` | – | Never sent to the browser, logged, or stored in projects or the data export |
 | `AI_MAX_TOKENS` | `8000` | Token ceiling per video (in + out, all calls); above it the job stops with a clear error |
+| `AI_VISION` | `0` | `1` = when the putt count on a hole is unsure, the model looks at 6 still frames from the green (max 768 px) instead of asking you. Needs a model that can see images; one call per hole, at most 6 per video, about 5 000 tokens each (counted in `AI_MAX_TOKENS`). With Ollama the frames stay on the PC; with a cloud provider they are sent there. Answers below 0.7 confidence are asked as usual |
 
 The same can be chosen in the app under **Settings → AI** (with "Test connection"); otherwise the
 `.env` defaults are used. Token usage is shown when the video is done.
@@ -147,7 +149,8 @@ The same can be chosen in the app under **Settings → AI** (with "Test connecti
   good shots, calm style"). The app plans and cuts the video itself. When in doubt (uncertain flights,
   clips without shots or recording time, clips without GPS, possible retakes, the same shot from two
   angles) it asks once, with a default answer for every question. Works entirely without AI, or with an
-  optional AI model (Ollama, OpenAI-compatible or Anthropic) that only sees a text summary; also from
+  optional AI model (Ollama, OpenAI-compatible or Anthropic) that sees a text summary (and, only if you
+  turn it on, a few still frames from the green when the putt count is unsure); also from
   the command line (see below).
 - **Graphics:** text, titles, stat cards, lower thirds, shapes, images/logos, with keyframes and
   in/out animations. Templates (Range session, Minimal, TV broadcast, Hole in one, Swing, Neon).

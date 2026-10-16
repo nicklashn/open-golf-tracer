@@ -3,14 +3,15 @@
  * project passed in is never changed; each video is a new project (one per short).
  */
 import { TEMPLATES } from '@golf/render';
-import { migrateProject, newId, timelineDuration, type Clip, type Layer, type Project } from '@golf/schema';
+import { byTimeline, migrateProject, newId, timelineDuration, type Clip, type Layer, type Project } from '@golf/schema';
 import { layerDefaults, type LayerNames } from './layers';
-import { resolveAnswers, shotChoices, type PlanAnswers, type VideoPlan } from './plan';
+import { defaultPutts, puttQuestionId, resolveAnswers, shotChoices, type PlanAnswers, type VideoPlan } from './plan';
 import { BROLL_S, shotScore } from './rules';
-import { shortFor } from './shorts';
+import { holeScores } from './score';
+import { puttShort, shortFor } from './shorts';
 import { byHole, roundMedia } from './chronology';
 import { clipOrder, summarize } from './summary';
-import { highlightShort, playedShots, youtubeVideo } from './videos';
+import { highlightShort, playedShots, shownPutts, youtubeVideo } from './videos';
 
 type Locale = 'da' | 'en';
 
@@ -27,8 +28,10 @@ export interface ComposeOptions {
 /**
  * The project as the plan and answers want it before a generator runs: shots left out are
  * hidden (per-shot choices win over a question's answer), clips are in playing order, clips without GPS get the hole the user picked.
+ * Putts: an answer to `putts:<hole>` keeps the last N found and says whether the last went in;
+ * `uncut` lists the holes with more putts than were found (their putting is not shortened).
  */
-export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined): { doc: Project; broll: string[] } {
+export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined): { doc: Project; broll: string[]; uncut: string[] } {
   const a = resolveAnswers(plan, answers);
   const summary = summarize(doc);
   const byId = new Map(summary.shots.map((s) => [s.id, s]));
@@ -52,9 +55,25 @@ export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | nu
       for (const id of question.shotIds) if (id !== chosen) keep.delete(id);
     }
   }
+  const putts = new Map(summary.putts.map((p) => [p.id, { visible: true, holed: p.holed }]));
+  const uncut: string[] = [];
+  for (const h of summary.holes) {
+    const choice = a[puttQuestionId(h.hole)];
+    const ids = summary.putts.filter((p) => p.hole === h.hole).map((p) => p.id);
+    if (!choice || !ids.length) continue;
+    if (choice === 'notHoled') putts.get(ids[ids.length - 1])!.holed = false;
+    else {
+      const n = Number(choice);
+      if (n > ids.length) uncut.push(h.hole);
+      if (n < 4) for (const id of ids.slice(0, Math.max(0, ids.length - n))) putts.get(id)!.visible = false;
+      putts.get(ids[ids.length - 1])!.holed = true;
+    }
+  }
   // A choice for one shot wins over its question's answer.
   for (const [id, choice] of shotChoices(plan, answers)) {
-    if (choice === 'drop') keep.delete(id);
+    const p = putts.get(id);
+    if (p) p.visible = choice === 'keep';
+    else if (choice === 'drop') keep.delete(id);
     else if (byId.has(id)) keep.add(id);
   }
 
@@ -80,9 +99,13 @@ export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | nu
     if (clip && from && media[clip] && media[from]?.place) media[clip] = { ...media[clip], place: { ...media[from].place! } };
   }
 
-  const shots = doc.shots.map((s) => (byId.has(s.id) ? { ...s, visible: keep.has(s.id) } : s));
+  const shots = doc.shots.map((s) => {
+    if (byId.has(s.id)) return { ...s, visible: keep.has(s.id) };
+    const p = putts.get(s.id);
+    return p ? { ...s, visible: p.visible, putt: { end: s.putt?.end ?? s.impactTime, holed: p.holed } } : s;
+  });
   const broll = a.noShots === 'broll' ? (q('noShots')?.clipIds ?? []) : [];
-  return { doc: migrateProject({ ...doc, media, clips, shots }), broll };
+  return { doc: migrateProject({ ...doc, media, clips, shots }), broll, uncut };
 }
 
 /** Clips without shots as short mood shots, each placed before the first cut of a later clip. */
@@ -131,18 +154,24 @@ function withTemplateLook(doc: Project, template: string | null): Project {
 
 /** Builds the video(s) the plan describes. Empty when no shot is left to show. */
 export function compose(source: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined, opts: ComposeOptions): ComposedVideo[] {
-  const { doc: prepared, broll } = prepare(source, plan, answers);
+  const { doc: prepared, broll, uncut } = prepare(source, plan, answers);
   const doc = withTemplateLook(prepared, plan.template);
   const names = opts.names ?? {};
-  if (!playedShots(doc).length) return [];
+  const putts = plan.putts ?? defaultPutts(plan.kind);
+  if (!playedShots(doc).length && !shownPutts(doc, putts).length) return [];
   if (plan.kind === 'shorts')
-    return playedShots(doc).map((shot, i) => {
-      const short = shortFor(doc, shot, `${plan.title} – ${i + 1}`, opts.locale);
+    return [...playedShots(doc), ...shownPutts(doc, putts)].sort(byTimeline(doc.clips)).map((shot, i) => {
+      const name = `${plan.title} – ${i + 1}`;
+      const short = shot.kind === 'putt' ? puttShort(doc, shot, name) : shortFor(doc, shot, name, opts.locale);
       const total = timelineDuration(short);
       const one = migrateProject({ ...short, layers: short.layers.map((l) => ({ ...l, end: Math.min(l.end, total) })) });
       return { name: one.name, document: one };
     });
+  // Scores from the project as filmed (a shot left out of the video is still a stroke), with the answers.
+  const scores = holeScores(summarize(source), resolveAnswers(plan, answers));
   const video =
-    plan.kind === 'youtube' ? withBroll(youtubeVideo(doc, opts.locale, plan.title, names), doc, broll) : highlightShort(doc, opts.locale, plan.title, names);
+    plan.kind === 'youtube'
+      ? withBroll(youtubeVideo(doc, opts.locale, plan.title, names, { putts, scores, uncut }), doc, broll)
+      : highlightShort(doc, opts.locale, plan.title, names, { putts });
   return [{ name: plan.title, document: withShotTexts(video, plan, opts) }];
 }

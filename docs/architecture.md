@@ -112,7 +112,13 @@ samme fra kommandolinjen via det offentlige API (upload, jobs, eksport).
 `packages/compose/src/ai.ts`: AI'en tænker, koden arbejder.
 
 - Modellen får kun `summaryText(summary)`, brugerens tekst, regel-planen og (andet kald) svarene.
-  Aldrig video, billeder eller projektdokumentet.
+  Aldrig video eller projektdokumentet.
+- Valgfrit (`AI_VISION` / Indstillinger → AI, slået fra som standard): er analysen i tvivl om antallet af
+  putts på et hul (spørgsmålet `putts:<hul>`), tager exporteren 6 JPEG-stillbilleder (maks. 768 px) af
+  greenen med ffmpeg direkte til hukommelsen (`frames.ts`), og `resolvePuttsWithVision` (`vision.ts`) spørger
+  modellen om `{putts, holed, confidence}`. Ét kald pr. hul, maks. 6 pr. video, i samme token-loft (med plads
+  til kaldet efter svarene). Ved confidence ≥ 0,7 udfyldes svaret og spørgsmålet fjernes (med en note);
+  ellers – eller ved fejl, f.eks. en model uden billeder – spørges brugeren som før.
 - Fast systemprompt først i hvert kald (prompt caching; Anthropic får `cache_control`), uden dynamisk indhold.
 - Svaret er en lille JSON-plan (structured output, hvor udbyderen kan), som `mergeAiPlan` lægger oven på
   regel-planen inden for rammerne: kun slag fra regel-planen, samme spørgsmål og valgmuligheder (kun

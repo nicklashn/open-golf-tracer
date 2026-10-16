@@ -55,7 +55,7 @@ describe('reading the preference without AI', () => {
     expect(readPreference('a TikTok of the best shots')).toMatchObject({ kind: 'highlight', goodOnly: true });
     expect(readPreference('en short af hvert slag')).toMatchObject({ kind: 'shorts' });
     expect(readPreference('Title "Sommer på Royal"').title).toBe('Sommer på Royal');
-    expect(readPreference('')).toEqual({ kind: null, goodOnly: false, template: null, title: null });
+    expect(readPreference('')).toEqual({ kind: null, goodOnly: false, template: null, title: null, putts: null });
   });
 });
 

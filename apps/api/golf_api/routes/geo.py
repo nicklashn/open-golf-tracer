@@ -238,6 +238,26 @@ def _hole_info(c: tuple[float, float, float, dict[str, Any]]) -> dict[str, Any]:
             "fromTee": round(s, 1), "toGreen": round(max(0.0, length - s), 1), "line": h["line"][:50]}
 
 
+def green_distance(lat: float, lon: float, course: dict[str, Any] | None = None) -> float | None:
+    """Metres from a point to the nearest mapped green (0 = on it); None when no green is mapped."""
+    data = course if course is not None else cached_course(lat, lon)
+    best: float | None = None
+    for f in data.get("features", []):
+        if f.get("k") != "green" or len(f.get("ring", [])) < 3:
+            continue
+        pts = [_local((lat, lon), q) for q in f["ring"]]
+        inside, d = False, 1e12
+        for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1]):
+            if (ay > 0) != (by > 0) and ax + (0 - ay) * (bx - ax) / (by - ay) > 0:
+                inside = not inside
+            dx, dy = bx - ax, by - ay
+            t = max(0.0, min(1.0, (-ax * dx - ay * dy) / ((dx * dx + dy * dy) or 1e-9)))
+            d = min(d, math.hypot(ax + t * dx, ay + t * dy))
+        d = 0.0 if inside else d
+        best = d if best is None else min(best, d)
+    return None if best is None else round(best, 1)
+
+
 def pick_alternative(place: dict[str, Any], previous_hole: str | None, next_hole: str | None) -> dict[str, Any]:
     """Resolves an ambiguous tee with the holes filmed just before/after (a round goes 1, 2, 3 …):
     the candidate that follows the previous hole, or precedes the next one. Else unchanged."""

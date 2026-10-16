@@ -5,8 +5,8 @@
 import { TEMPLATES } from '@golf/render';
 import type { WarningCode } from '@golf/schema';
 import { compareShots, sameShotPairs, strikeGroups, type ShotMatch } from './match';
-import { REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type ReasonCode } from './plan';
-import type { ClipSummary, RoundSummary, ShotSummary } from './summary';
+import { puttQuestionId, REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type PuttMode, type ReasonCode } from './plan';
+import type { ClipSummary, RoundSummary, ShotSummary, StrokeSummary } from './summary';
 
 type Locale = 'da' | 'en';
 
@@ -23,6 +23,8 @@ export interface Preference {
   goodOnly: boolean;
   template: string | null;
   title: string | null;
+  /** Which putts to show, when the wish says. */
+  putts: PuttMode | null;
 }
 
 const has = (text: string, words: string[]) => words.some((w) => text.includes(w));
@@ -50,8 +52,16 @@ export function readPreference(text: string): Preference {
   else if (has(t, [' tv', 'tv-', 'broadcast', 'fjernsyn'])) template = 'tv';
   else if (has(t, ['neon'])) template = 'neon';
   else if (has(t, ['hole in one', 'hole-in-one'])) template = 'holeInOne';
+  let putts: PuttMode | null = null;
+  if (has(t, ['uden putt', 'ingen putt', 'no putt', 'without putt', 'skip putt', 'skip the putt', 'uden putning', 'no putting', 'without putting']))
+    putts = 'none';
+  else if (
+    has(t, ['putts der går i', 'putt der går i', 'putts, der går i', 'putts i hul', 'holed putt', 'putts that drop', 'putts that go in', 'putts that went in'])
+  )
+    putts = 'holed';
+  else if (has(t, ['alle putts', 'all putts', 'all the putts', 'med putts', 'with putts', 'include putts', 'hele putningen', 'every putt'])) putts = 'all';
   const quoted = text.match(/["“”«]([^"“”»]{2,120})["“”»]/);
-  return { kind, goodOnly, template, title: quoted ? quoted[1].trim() : null };
+  return { kind, goodOnly, template, title: quoted ? quoted[1].trim() : null, putts };
 }
 
 const L = {
@@ -103,7 +113,13 @@ const L = {
       low_confidence: 'Analysen er usikker på slaget',
       retake: 'Slået fra næsten samme sted kort efter et andet slag',
       same_shot: 'Ser ud til at være samme slag filmet fra en anden vinkel',
+      next_shot_distance: 'Næste slag blev filmet {next} m herfra, men banen viser {carry} m',
+      putt_count_unsure: 'Analysen er usikker på antallet af putts',
     } satisfies Record<ReasonCode, string>,
+    putts: (hole: string, n: number) =>
+      `${hole[0].toUpperCase()}${hole.slice(1)}: analysen fandt ${n === 1 ? 'et putt' : `${n} putts`}, men er usikker. Hvor mange putts var der?`,
+    puttN: (n: number) => `${n === 4 ? '4+' : n} ${n === 1 ? 'putt' : 'putts'}, i hul`,
+    notHoled: 'Ikke i hul / ikke filmet til ende',
     at: (n: number, time: string) => `Klip ${n} · ${time}`,
   },
   en: {
@@ -154,13 +170,19 @@ const L = {
       low_confidence: 'The analysis is unsure about this shot',
       retake: 'Hit from almost the same spot shortly after another shot',
       same_shot: 'Looks like the same shot filmed from another angle',
+      next_shot_distance: 'The next stroke was filmed {next} m from here, but the flight shows {carry} m',
+      putt_count_unsure: 'The analysis is unsure how many putts there were',
     } satisfies Record<ReasonCode, string>,
+    putts: (hole: string, n: number) =>
+      `${hole[0].toUpperCase()}${hole.slice(1)}: the analysis found ${n === 1 ? 'one putt' : `${n} putts`} but is unsure. How many putts were there?`,
+    puttN: (n: number) => `${n === 4 ? '4+' : n} ${n === 1 ? 'putt' : 'putts'}, holed`,
+    notHoled: 'Not holed / not filmed to the end',
     at: (n: number, time: string) => `Clip ${n} · ${time}`,
   },
 };
 
 export function isDoubtful(s: ShotSummary): boolean {
-  return s.confidence < LOW_CONFIDENCE || s.flags.some((f) => DOUBT_FLAGS.includes(f));
+  return s.confidence < LOW_CONFIDENCE || s.flags.some((f) => DOUBT_FLAGS.includes(f)) || !!s.nextOff;
 }
 
 /** Why a shot is doubtful, most telling first. No ball in the air and low confidence reads as a practice swing. */
@@ -168,6 +190,7 @@ export function shotReasons(s: ShotSummary, ...extra: ReasonCode[]): ReasonCode[
   const out = new Set<ReasonCode>(extra);
   for (const f of s.flags) if ((REASON_CODES as readonly string[]).includes(f)) out.add(f as ReasonCode);
   if (s.confidence < LOW_CONFIDENCE) out.add('low_confidence');
+  if (s.nextOff) out.add('next_shot_distance');
   if (out.has('no_track') && out.has('low_confidence')) {
     out.delete('no_track');
     out.delete('low_confidence');
@@ -176,9 +199,9 @@ export function shotReasons(s: ShotSummary, ...extra: ReasonCode[]): ReasonCode[
   return [...out].sort((a, b) => REASON_CODES.indexOf(a) - REASON_CODES.indexOf(b));
 }
 
-/** A reason in plain words. */
-export function reasonText(code: ReasonCode, locale: Locale = 'en'): string {
-  return L[locale].reasons[code];
+/** A reason in plain words (`next_shot_distance` with the item's distances). */
+export function reasonText(code: ReasonCode, locale: Locale = 'en', item?: Pick<PlanItem, 'nextM' | 'carryM'>): string {
+  return L[locale].reasons[code].replace('{next}', String(item?.nextM ?? '?')).replace('{carry}', String(item?.carryM ?? '?'));
 }
 
 /** "4:07" from seconds. */
@@ -257,13 +280,14 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     const c = s.clips.find((x) => x.id === id)!;
     return T.clip(c.n, c.name);
   };
-  const item = (x: ShotSummary, ...extra: ReasonCode[]): PlanItem => ({
+  const item = (x: ShotSummary | StrokeSummary, ...extra: ReasonCode[]): PlanItem => ({
     shotId: x.id,
     mediaId: x.clipId,
     clip: x.clip,
     clipName: s.clips.find((c) => c.id === x.clipId)?.name ?? '',
     t: x.t,
-    reasons: shotReasons(x, ...extra),
+    reasons: 'kind' in x ? extra : shotReasons(x, ...extra),
+    ...('kind' in x || !x.nextOff || x.nextM == null || x.carryM === null ? {} : { nextM: x.nextM, carryM: x.carryM }),
   });
   const clipOf = new Map(s.clips.map((c) => [c.id, c]));
   const best = (g: ShotSummary[]) => g.reduce((x, y) => (angleScore(y, clipOf.get(y.clipId), kind) > angleScore(x, clipOf.get(x.clipId), kind) ? y : x));
@@ -398,10 +422,33 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     });
   }
 
+  // Putts the analysis is unsure about, per hole. The id and options are fixed so another step
+  // (e.g. a vision model) can fill in answers before the user sees them:
+  //   id `putts:<hole>`; options '1', '2', '3' = that many putts, the last holed; '4' = four or
+  //   more, the last holed; 'notHoled' = the last did not drop (or was not filmed to the end).
+  // The answer sets the hole's score and the putts shown (the last N of those found).
+  const putts = pref.putts ?? null;
+  if (kind === 'youtube' || putts !== 'none')
+    for (const h of s.holes) {
+      if (!h.puttsUnsure) continue;
+      const list = s.putts.filter((p) => p.hole === h.hole);
+      const last = list[list.length - 1];
+      questions.push({
+        id: puttQuestionId(h.hole),
+        text: T.putts(T.hole(h.hole), list.length),
+        options: [...[1, 2, 3, 4].map((n) => ({ id: String(n), label: T.puttN(n) })), { id: 'notHoled', label: T.notHoled }],
+        default: last.holed === true ? String(Math.min(4, list.length)) : 'notHoled',
+        shotIds: list.map((p) => p.id),
+        clipIds: [...new Set(list.map((p) => p.clipId))],
+        items: list.slice(0, 200).map((p) => item(p, 'putt_count_unsure')),
+      });
+    }
+
   const template = pref.template && templatesFor().includes(pref.template) ? pref.template : null;
   return VideoPlan.parse({
     kind,
     template,
+    ...(putts ? { putts } : {}),
     includeShotIds: s.shots.filter((x) => !dropped.has(x.id)).map((x) => x.id),
     title: pref.title ?? defaultTitle(s, locale),
     questions: questions.slice(0, 12),

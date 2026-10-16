@@ -22,7 +22,8 @@ def test_defaults_come_from_env(client, monkeypatch):
     s = client.get("/api/ai/settings").json()
     assert s["provider"] == "server"
     assert s["effective"] == {"provider": "ollama", "model": "qwen2.5", "baseUrl": "http://localhost:11434/v1", "source": "server",
-                              "keyMasked": "", "maxTokens": 8000, "cloud": False}
+                              "keyMasked": "", "maxTokens": 8000, "cloud": False, "vision": False}
+    assert s["vision"] is False
 
 
 def test_own_settings_key_masked_and_never_leaked(client, caplog):
@@ -76,3 +77,75 @@ def test_answers_carry_the_first_calls_tokens(client, tiny_video):
 
     with session_scope() as db:
         assert db.get(Job, job["id"]).payload["usage"] == usage
+
+
+def test_vision_is_off_by_default_and_round_trips(client, monkeypatch):
+    s = client.get("/api/ai/settings").json()
+    assert s["vision"] is False and s["effective"]["vision"] is False
+
+    monkeypatch.setenv("AI_VISION", "1")
+    monkeypatch.setenv("AI_PROVIDER", "ollama")
+    from golf_api import config
+
+    config.settings.cache_clear()
+    assert client.get("/api/ai/settings").json()["effective"]["vision"] is True
+
+    # Saving without the field keeps the server's default; then the user's own choice wins.
+    r = client.put("/api/ai/settings", json={"provider": "anthropic", "apiKey": KEY, "maxTokens": 9000})
+    assert r.json()["vision"] is True
+    r = client.put("/api/ai/settings", json={"provider": "anthropic", "maxTokens": 9000, "vision": False})
+    assert r.json()["vision"] is False and r.json()["effective"]["vision"] is False
+    r = client.put("/api/ai/settings", json={"provider": "server", "maxTokens": 9000, "vision": True})
+    assert r.json()["effective"] | {"keyMasked": ""} == {"provider": "ollama", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1",
+                                                         "source": "server", "keyMasked": "", "maxTokens": 8000, "cloud": False,
+                                                         "vision": True}
+
+    job = client.post("/api/ai/test").json()
+    cfg = client.get(f"/api/internal/jobs/{job['id']}/ai", headers=_internal()).json()
+    assert cfg["vision"] is True
+    # No provider: nothing can look, whatever the switch says.
+    r = client.put("/api/ai/settings", json={"provider": "none", "maxTokens": 9000, "vision": True})
+    assert r.json()["effective"]["vision"] is False
+    assert client.put("/api/ai/settings", json={"provider": "none", "vision": "maybe"}).status_code == 422
+
+
+def test_answers_carry_what_the_ai_saw(client, tiny_video):
+    from testkit import upload
+
+    p = client.post("/api/projects", json={"name": "R"}).json()
+    upload(client, tiny_video, project_id=p["id"])
+    job = client.post("/api/autovideo", json={"projectId": p["id"]}).json()
+    vision = {"answers": {"putts:7": "2", "holed:7": "yes"}, "notes": ["AI'en talte 2 putts på hul 7 ud fra billeder."]}
+    client.post(f"/api/internal/jobs/{job['id']}/await", json={"result": {"plan": {"title": "x"}, "questions": [], "vision": vision}},
+                headers=_internal())
+    client.post(f"/api/jobs/{job['id']}/answers", json={"answers": {"shot:s1": "keep"}})
+    from golf_api.db import session_scope
+    from golf_api.models import Job
+
+    with session_scope() as db:
+        j = db.get(Job, job["id"])
+        assert j is not None
+        assert j.payload["vision"] == vision and j.payload["answers"] == {"shot:s1": "keep"}
+
+
+def test_migration_0003_adds_vision_to_existing_settings(env):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect, text
+
+    from golf_api.config import API_DIR
+    from golf_api.db import engine
+
+    cfg = Config(str(API_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(API_DIR / "alembic"))
+    command.upgrade(cfg, "0002")
+    with engine().begin() as c:
+        c.execute(text("INSERT INTO users (id, locale, units, onboarding_done, created_at) VALUES ('u1', 'da', 'm', 1, '2026-01-01 00:00:00')"))
+        c.execute(text("INSERT INTO ai_settings (user_id, provider, model, base_url, api_key, max_tokens, updated_at) "
+                       "VALUES ('u1', 'ollama', '', '', '', 8000, '2026-01-01 00:00:00')"))
+    command.upgrade(cfg, "head")
+    assert "vision" in {col["name"] for col in inspect(engine()).get_columns("ai_settings")}
+    with engine().connect() as c:
+        assert c.execute(text("SELECT vision FROM ai_settings WHERE user_id = 'u1'")).scalar() in (0, False)
+    command.downgrade(cfg, "0002")
+    assert "vision" not in {col["name"] for col in inspect(engine()).get_columns("ai_settings")}

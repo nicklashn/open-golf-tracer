@@ -264,13 +264,15 @@ def _place(m: Media, src: Path) -> dict | None:
     no GPS, no network or an unmapped course just means no place."""
     try:
         from golf_api.probe import probe_file
-        from golf_api.routes.geo import place_at
+        from golf_api.routes.geo import green_distance, place_at
 
         geo = (m.probe or {}).get("geo") or probe_file(src).get("geo")   # uploads from before GPS was read
         if not geo:
             return None
         found = place_at(float(geo["lat"]), float(geo["lon"]))
-        return {**found, "geo": geo} if found else {"geo": geo}
+        if not found:
+            return {"geo": geo}
+        return {**found, "geo": geo, "greenM": green_distance(float(geo["lat"]), float(geo["lon"]))}
     except Exception as exc:  # noqa: BLE001
         log.warning("place for %s could not be found: %s", m.id, exc)
         return None
@@ -366,8 +368,11 @@ def analyze(job: dict, report: Report) -> dict:
     if place and place.get("alternatives"):
         place = _resolve_tee(project_id, m, place)
     to_green = (place or {}).get("toGreen")
-    opt = Options(to_green=float(to_green) if to_green is not None else None)
+    green_m = (place or {}).pop("greenM", None)   # only steers the analysis (putting)
+    opt = Options(to_green=float(to_green) if to_green is not None else None, green_m=float(green_m) if green_m is not None else None)
     res = run_analysis(src, opt, progress=progress, on_shot=on_shot)
+    # The final list, not the streamed one: putts found later can settle earlier ones.
+    found = [clean_shot(s, m.id) for s in res["shots"]]
     _store_analysis(project_id, m.id, found, "done", res.get("warnings"), place)
     _resolve_round(project_id)
     return {"media_id": m.id, "shots": len(found), "seconds": res.get("seconds"), "media": res.get("media")}
