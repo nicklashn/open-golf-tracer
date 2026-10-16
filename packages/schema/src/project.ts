@@ -100,6 +100,7 @@ export const WarningCode = z.enum([
   'default_path',
   'manual',
   'hole_limit',
+  'putt_count_unsure',
 ]);
 export type WarningCode = z.infer<typeof WarningCode>;
 

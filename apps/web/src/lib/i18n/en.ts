@@ -298,6 +298,7 @@ const en: Dict = {
       default_path: 'Default path – fix it with the handles.',
       hole_limit: 'The estimate was longer than the hole allows, so the flight follows the distance to the green. Measure it on the map to be sure.',
       manual: 'Added manually.',
+      putt_count_unsure: 'We are not sure how many putts there were, or whether the last one dropped. Check the putts on this green.',
     },
   },
   map: {

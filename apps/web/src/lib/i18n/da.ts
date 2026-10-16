@@ -296,6 +296,7 @@ const da = {
       default_path: 'Standardbane – ret den med håndtagene.',
       hole_limit: 'Estimatet var længere end hullet tillader, så banen er lagt efter afstanden til green. Mål gerne på kortet.',
       manual: 'Tilføjet manuelt.',
+      putt_count_unsure: 'Vi er ikke sikre på, hvor mange putts der var, eller om det sidste gik i hul. Tjek puttene på denne green.',
     },
   },
   map: {

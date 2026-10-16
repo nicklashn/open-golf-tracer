@@ -486,7 +486,8 @@
                     "short_shot",
                     "default_path",
                     "manual",
-                    "hole_limit"
+                    "hole_limit",
+                    "putt_count_unsure"
                   ]
                 },
                 "detail": {
