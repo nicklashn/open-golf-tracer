@@ -167,13 +167,24 @@ function ShotRow({ shot, n, selected, units, retracking }: { shot: Shot; n: numb
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-[13px] font-medium">{shot.label || f(t.shots.shot, { n })}</span>
+            <span className="truncate text-[13px] font-medium">{shot.label || (shot.kind === 'putt' ? t.shots.putt : f(t.shots.shot, { n }))}</span>
             {shot.kind === 'short' ? <Badge>{t.shots.shortShot}</Badge> : null}
+            {shot.kind === 'putt' && shot.putt?.holed ? <Badge>{t.shots.puttHoled}</Badge> : null}
             {shot.source === 'manual' ? <Badge>{t.shots.warnings.manual.replace('.', '')}</Badge> : null}
           </div>
           <p className="tabular text-[12px] text-fg-muted">
-            {carry}
-            {shot.constraints.carry == null ? <span className="text-fg-subtle"> · {t.tracer.estimate.toLowerCase()}</span> : null}
+            {shot.kind === 'putt' ? (
+              shot.putt ? (
+                f(t.shots.puttRoll, { s: Math.max(0, shot.putt.end - shot.impactTime).toFixed(1) })
+              ) : (
+                t.shots.putt
+              )
+            ) : (
+              <>
+                {carry}
+                {shot.constraints.carry == null ? <span className="text-fg-subtle"> · {t.tracer.estimate.toLowerCase()}</span> : null}
+              </>
+            )}
             {hole ? <span className="text-fg-subtle"> · {hole}</span> : null}
             {retracking ? ` · ${t.shots.retracking}` : ''}
           </p>

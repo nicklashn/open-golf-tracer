@@ -97,7 +97,7 @@ export function Inspector({ onRetrack }: { onRetrack: (shot: Shot) => void }) {
   const doc = useLiveDoc();
   if (selection?.kind === 'shot') {
     const shot = doc.shots.find((s) => s.id === selection.id);
-    if (shot) return <ShotInspector shot={shot} onRetrack={onRetrack} />;
+    if (shot) return shot.kind === 'putt' ? <PuttInspector shot={shot} /> : <ShotInspector shot={shot} onRetrack={onRetrack} />;
   }
   if (selection?.kind === 'layer') {
     const ls = doc.layers.filter((l) => selection.ids.includes(l.id));
@@ -117,6 +117,39 @@ export function Inspector({ onRetrack }: { onRetrack: (shot: Shot) => void }) {
 
 // ---------------------------------------------------------------------------------------------
 // Shot / tracer
+
+function PuttInspector({ shot }: { shot: Shot }) {
+  const { t, f } = useI18n();
+  const holed = shot.putt?.holed ?? null;
+  const value = holed === null ? 'unknown' : holed ? 'yes' : 'no';
+  return (
+    <div className="flex flex-col">
+      <Section title={t.shots.putt}>
+        <p className="text-[12px] text-fg-muted">{t.shots.puttLead}</p>
+        {shot.putt ? (
+          <p className="tabular text-[12px] text-fg-muted">{f(t.shots.puttRoll, { s: Math.max(0, shot.putt.end - shot.impactTime).toFixed(1) })}</p>
+        ) : null}
+        <p className="text-[12px] font-medium">{t.shots.puttHoledLabel}</p>
+        <Segmented
+          label={t.shots.puttHoledLabel}
+          value={value}
+          onChange={(v) => ops.setPuttHoled(shot.id, v === 'unknown' ? null : v === 'yes')}
+          options={[
+            { value: 'yes', label: t.shots.puttHoledYes },
+            { value: 'no', label: t.shots.puttHoledNo },
+            { value: 'unknown', label: t.shots.puttHoledUnknown },
+          ]}
+        />
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="ghost" className="text-accent-fg" onClick={() => ops.deleteShot(shot.id)}>
+            <Trash2 />
+            {t.shots.delete}
+          </Button>
+        </div>
+      </Section>
+    </div>
+  );
+}
 
 const CLUB_OPTIONS: Club[] = ['auto', 'driver', 'wood', 'longIron', 'midIron', 'shortIron', 'wedge'];
 

@@ -151,6 +151,13 @@ describe('the score of a hole', () => {
     expect(texts(en)).toContain('Hole 7 · Par 4 · Par');
   });
 
+  it('keeps the score title on screen for at least 2.5 s, also when the hole ends the video', () => {
+    for (const v of [youtubeVideo(fullHole(), 'da', 'YT')]) {
+      const title = v.layers.find((l) => l.type === 'lowerThird' && l.props.title.startsWith('Hul 7'))!;
+      expect(title.end - title.start).toBeGreaterThanOrEqual(2.5);
+    }
+  });
+
   it('is never guessed: not holed, a missing stroke or not from the tee leave it open', () => {
     const open = (doc: Project) => summarize(doc).holes[0];
     expect(open(fullHole(false))).toMatchObject({ strokes: null, why: ['not_holed'] });

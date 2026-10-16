@@ -76,9 +76,9 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
   // ------------------------------------------------------------------------------------------
   // Shots on screen and their handles
 
-  const shotsHere = useMemo(() => (st ? doc.shots.filter((s) => s.mediaId === st.mediaId && s.visible) : []), [doc.shots, st]);
+  const shotsHere = useMemo(() => (st ? doc.shots.filter((s) => s.mediaId === st.mediaId && s.visible && s.kind !== 'putt') : []), [doc.shots, st]);
   const selectedShot = selection?.kind === 'shot' ? (doc.shots.find((s) => s.id === selection.id) ?? null) : null;
-  const activeShot: Shot | null = selectedShot && st && selectedShot.mediaId === st.mediaId ? selectedShot : null;
+  const activeShot: Shot | null = selectedShot && st && selectedShot.mediaId === st.mediaId && selectedShot.kind !== 'putt' ? selectedShot : null;
   const handles = activeShot ? ops.handlesFor(activeShot) : null;
 
   const paths = useMemo(() => {

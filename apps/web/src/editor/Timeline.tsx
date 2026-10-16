@@ -144,7 +144,8 @@ export function Timeline() {
           const launch = ops.shotLaunchTime(doc, s);
           if (launch == null) return null;
           const st = shotStats(s);
-          const len = ((st?.flightTimeS ?? 4) / s.timing.speed) * s.slowmo;
+          const len =
+            s.kind === 'putt' ? Math.max(0.5, (s.putt?.end ?? s.impactTime + 4) - s.impactTime) : ((st?.flightTimeS ?? 4) / s.timing.speed) * s.slowmo;
           return { s, start: launch, end: launch + len };
         })
         .filter((x): x is { s: Shot; start: number; end: number } => !!x),

@@ -290,7 +290,8 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
     // The score once the hole's last stroke is done.
     const score = scored.get(h);
     if (score && !at.slice(i + 1).some((x) => (doc.media[x.shot.mediaId].place?.hole ?? '') === h)) {
-      const start = Math.min(it.land + 0.3, cardStart - 0.5);
+      // At least 2.5 s on screen, also when the hole ends right where the scorecard starts.
+      const start = Math.max(it.launch, Math.min(it.land + 0.3, cardStart - 2.5));
       layers.push(
         layer(
           'lowerThird',
