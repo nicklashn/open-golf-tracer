@@ -8,14 +8,15 @@
  * - doubts are found by the rules – the model may reword the questions, not add or remove them;
  * - invalid output gets one retry with the validation error, then the rule plan is used.
  *
- * Two adapters on plain fetch: OpenAI-compatible (Ollama, LM Studio, OpenAI, OpenRouter) and
- * the Anthropic Messages API.
+ * Three adapters on plain fetch: OpenAI-compatible (Ollama, LM Studio, OpenAI, OpenRouter), the
+ * Anthropic Messages API, and "chatgpt": the OpenAI Responses API with a Sign in with ChatGPT
+ * access token, billed to the user's ChatGPT plan (the API refreshes the token).
  */
 import { z } from 'zod';
 import { PLAN_KINDS, PUTT_MODES, VideoPlan, type PlanAnswers } from './plan';
 import { summaryText, type RoundSummary } from './summary';
 
-export const AI_PROVIDERS = ['none', 'ollama', 'openai-compatible', 'anthropic'] as const;
+export const AI_PROVIDERS = ['none', 'ollama', 'openai-compatible', 'anthropic', 'chatgpt'] as const;
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
 export interface AiConfig {
@@ -27,13 +28,19 @@ export interface AiConfig {
   maxTokens: number;
   /** Per request (ms). */
   timeoutMs?: number;
+  /** Why there is no usable key (chatgpt: not signed in, or the sign-in could not be renewed). */
+  error?: string;
 }
 
 export const AI_DEFAULTS: Record<Exclude<AiProvider, 'none'>, { baseUrl: string; model: string }> = {
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' },
   'openai-compatible': { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   anthropic: { baseUrl: 'https://api.anthropic.com', model: 'claude-opus-5-5' },
+  // The model is picked from the signed-in account's list.
+  chatgpt: { baseUrl: 'https://api.openai.com/v1', model: '' },
 };
+/** Where users review and change what this app may use of their ChatGPT plan. */
+export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage';
 export const DEFAULT_AI_MAX_TOKENS = 8000;
 /** Output budget per call: the plan is small (target ≤ 800 tokens); reasoning models need room to think. */
 const OUTPUT_TOKENS = 2000;
@@ -59,7 +66,7 @@ const add = addUsage;
 export class AiError extends Error {
   constructor(
     message: string,
-    readonly code: 'config' | 'network' | 'auth' | 'model' | 'refused' | 'budget' | 'http' | 'invalid' | 'vision',
+    readonly code: 'config' | 'network' | 'auth' | 'model' | 'refused' | 'budget' | 'http' | 'invalid' | 'vision' | 'limit',
   ) {
     super(message);
   }
@@ -274,15 +281,17 @@ async function httpError(r: Response, cfg: AiConfig, what: string): Promise<AiEr
 const providerName = (cfg: AiConfig) =>
   cfg.provider === 'anthropic'
     ? 'Anthropic'
-    : cfg.provider === 'ollama'
-      ? 'Ollama'
-      : (() => {
-          try {
-            return new URL(cfg.baseUrl).host;
-          } catch {
-            return 'The AI provider';
-          }
-        })();
+    : cfg.provider === 'chatgpt'
+      ? 'ChatGPT'
+      : cfg.provider === 'ollama'
+        ? 'Ollama'
+        : (() => {
+            try {
+              return new URL(cfg.baseUrl).host;
+            } catch {
+              return 'The AI provider';
+            }
+          })();
 
 /** OpenAI-compatible chat completions: Ollama, LM Studio, OpenAI, OpenRouter. */
 async function openAiComplete(cfg: AiConfig, system: string, user: UserContent, doFetch: Fetch, schema: object, maxOut: number): Promise<Completion> {
@@ -396,6 +405,173 @@ async function anthropicComplete(cfg: AiConfig, system: string, user: UserConten
   };
 }
 
+// Sign in with ChatGPT: the Responses API, always streamed, on the user's ChatGPT plan.
+
+interface ResponsesError {
+  code?: string | null;
+  message?: string;
+  param?: string | null;
+}
+interface ResponseObject {
+  error?: ResponsesError | null;
+  incomplete_details?: { reason?: string } | null;
+  usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
+  output?: { type?: string; content?: { type?: string; text?: string; refusal?: string }[] }[];
+}
+
+const SIGN_IN = 'Sign in with ChatGPT under Settings → AI to use your ChatGPT plan.';
+
+const responsesUsage = (r: ResponseObject | undefined): AiUsage => ({
+  calls: 1,
+  inputTokens: r?.usage?.input_tokens ?? 0,
+  outputTokens: r?.usage?.output_tokens ?? 0,
+  cacheReadTokens: r?.usage?.input_tokens_details?.cached_tokens ?? 0,
+  cacheWriteTokens: 0,
+});
+
+/** What to tell the user about a ChatGPT plan error (codes from OpenAI's "Errors and recovery"). */
+function chatgptError(status: number, err: ResponsesError | null | undefined, detail: string, cfg: AiConfig): AiError {
+  const code = err?.code ?? '';
+  const msg = (err?.message || detail).replaceAll(cfg.apiKey || '\u0000', '***').slice(0, 300);
+  const said = msg ? `: ${msg}` : '';
+  const what = [status || '', code].filter(Boolean).join(', ');
+  if (code === 'subscription_sharing_usage_limit_exceeded' || status === 429)
+    return new AiError(
+      `The usage limit for your ChatGPT plan or for this app is reached. Review it in ChatGPT under Settings → Usage (${CHATGPT_USAGE_URL}).`,
+      'limit',
+    );
+  if (code === 'subscription_sharing_user_not_eligible') return new AiError('Using a ChatGPT plan is not available for this account or workspace.', 'auth');
+  if (status === 401 || code === 'subscription_sharing_invalid_user')
+    return new AiError(`ChatGPT did not accept the sign-in (${what}). Sign in with ChatGPT again under Settings → AI.`, 'auth');
+  if (code === 'subscription_sharing_usage_unavailable' || code === 'subscription_sharing_user_unavailable' || status === 503)
+    return new AiError(`Your ChatGPT plan cannot be used right now (${what}). Try again in a while.`, 'http');
+  if (code === 'subscription_sharing_unsupported_capability')
+    return new AiError(`ChatGPT does not support part of the request${err?.param ? ` (${err.param})` : ''}${said}.`, 'http');
+  if (status === 404 || code === 'model_not_found') return new AiError(`ChatGPT does not offer the model "${cfg.model}" to this account${said}.`, 'model');
+  if (status === 403) return new AiError(`ChatGPT refused the request (${what})${said}.`, 'auth');
+  return new AiError(`ChatGPT answered with an error${what ? ` (${what})` : ''}${said}.`, 'http');
+}
+
+async function chatgptHttpError(r: Response, cfg: AiConfig): Promise<AiError> {
+  let err: ResponsesError | undefined;
+  let detail = '';
+  try {
+    // Admission errors can be {"detail": "..."} instead of the usual error object.
+    const j = (await r.json()) as { error?: ResponsesError | string; detail?: unknown };
+    if (typeof j.error === 'string') detail = j.error;
+    else err = j.error;
+    if (typeof j.detail === 'string') detail = j.detail;
+  } catch {
+    /* not JSON */
+  }
+  return chatgptError(r.status, err, detail, cfg);
+}
+
+/** The `data:` objects of a server-sent event stream, in order. */
+async function* sseEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<Record<string, unknown>> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buf += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      for (let m = /\r?\n\r?\n/.exec(buf); m || (done && buf.trim()); m = /\r?\n\r?\n/.exec(buf)) {
+        const block = m ? buf.slice(0, m.index) : buf;
+        buf = m ? buf.slice(m.index + m[0].length) : '';
+        const data = block
+          .split(/\r?\n/)
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).replace(/^ /, ''))
+          .join('\n');
+        if (!data || data === '[DONE]') continue;
+        try {
+          yield JSON.parse(data) as Record<string, unknown>;
+        } catch {
+          /* not JSON: skip */
+        }
+      }
+      if (done) return;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * POST /responses with the access token: store false, stream true, the prompt as `instructions`,
+ * no output limit or temperature (not accepted on this route). Done only at response.completed.
+ */
+async function chatgptComplete(cfg: AiConfig, system: string, user: UserContent, doFetch: Fetch, schema: object): Promise<Completion> {
+  const url = `${(cfg.baseUrl || AI_DEFAULTS.chatgpt.baseUrl).replace(/\/$/, '')}/responses`;
+  const images = imagesOf(user);
+  const input = [
+    {
+      role: 'user',
+      content: [{ type: 'input_text', text: textOf(user) }, ...images.map((data) => ({ type: 'input_image', image_url: `data:image/jpeg;base64,${data}` }))],
+    },
+  ];
+  const body = (structured: boolean) =>
+    JSON.stringify({
+      model: cfg.model,
+      instructions: system,
+      input,
+      store: false,
+      stream: true,
+      ...(structured ? { text: { format: { type: 'json_schema', name: 'answer', strict: true, schema } } } : {}),
+    });
+  const headers = { 'content-type': 'application/json', accept: 'text/event-stream', authorization: `Bearer ${cfg.apiKey}` };
+  const timeoutMs = cfg.timeoutMs ?? 120_000;
+  let r = await post(url, { method: 'POST', headers, body: body(true) }, timeoutMs, doFetch, 'ChatGPT');
+  // Structured output not accepted: the prompt asks for JSON anyway, and the answer is validated.
+  if (r.status === 400) r = await post(url, { method: 'POST', headers, body: body(false) }, timeoutMs, doFetch, 'ChatGPT');
+  if (!r.ok) {
+    const e = await chatgptHttpError(r, cfg);
+    if (images.length && r.status === 400 && e.code === 'http') throw visionError(cfg, 'ChatGPT', r.status);
+    throw e;
+  }
+  if (!r.body) throw new AiError('ChatGPT sent an empty answer.', 'http');
+  let text = '';
+  let done: ResponseObject | undefined;
+  try {
+    for await (const ev of sseEvents(r.body)) {
+      if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') text += ev.delta;
+      else if (ev.type === 'response.completed') {
+        done = (ev.response ?? {}) as ResponseObject;
+        break;
+      } else if (ev.type === 'response.failed') {
+        const resp = ev.response as ResponseObject | undefined;
+        throw Object.assign(chatgptError(0, resp?.error, '', cfg), { usage: responsesUsage(resp) });
+      } else if (ev.type === 'response.incomplete') {
+        const resp = ev.response as ResponseObject | undefined;
+        const why = resp?.incomplete_details?.reason ?? 'incomplete';
+        throw Object.assign(new AiError(`ChatGPT stopped before the answer was complete (${why}).`, 'http'), { usage: responsesUsage(resp) });
+      } else if (ev.type === 'error') throw chatgptError(0, ev as ResponsesError, '', cfg);
+    }
+  } catch (e) {
+    if (e instanceof AiError) throw e;
+    const timeout = e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError');
+    throw new AiError(
+      timeout ? `ChatGPT did not answer within ${Math.round(timeoutMs / 1000)} s.` : 'The connection to ChatGPT broke off before the answer was complete.',
+      'network',
+    );
+  }
+  if (!done) throw new AiError('The answer from ChatGPT ended before it was complete.', 'network');
+  const usage = responsesUsage(done);
+  const parts = (done.output ?? []).flatMap((o) => o.content ?? []);
+  const refusal = parts.find((c) => c.type === 'refusal');
+  if (refusal && !text) throw Object.assign(new AiError(`ChatGPT declined: ${(refusal.refusal ?? '').slice(0, 200)}`, 'refused'), { usage });
+  return {
+    text:
+      text ||
+      parts
+        .filter((c) => c.type === 'output_text')
+        .map((c) => c.text ?? '')
+        .join(''),
+    usage,
+  };
+}
+
 export function complete(
   cfg: AiConfig,
   system: string,
@@ -405,6 +581,11 @@ export function complete(
   maxOut = OUTPUT_TOKENS,
 ): Promise<Completion> {
   if (cfg.provider === 'none') throw new AiError('No AI provider is set.', 'config');
+  if (cfg.provider === 'chatgpt') {
+    if (!cfg.apiKey) throw new AiError(cfg.error || SIGN_IN, 'auth');
+    if (!cfg.model) throw new AiError('Pick a ChatGPT model under Settings → AI.', 'config');
+    return chatgptComplete(cfg, system, user, doFetch, schema);
+  }
   if (!cfg.model) throw new AiError('No AI model is set (AI_MODEL or Settings → AI).', 'config');
   return cfg.provider === 'anthropic'
     ? anthropicComplete(cfg, system, user, doFetch, schema, maxOut)

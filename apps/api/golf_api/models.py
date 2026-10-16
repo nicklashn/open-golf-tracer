@@ -151,3 +151,23 @@ class AiSettings(Base):
     # Still frames from the green may be sent when the putt count is unsure (off by default).
     vision: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class ChatGptAccount(Base):
+    """"Sign in with ChatGPT": the registration (issued client id) and its tokens. Secrets like
+    AiSettings.api_key: only the exporter gets a fresh access token, never a browser or an export.
+    Signing out clears the tokens and keeps the registration for the next sign-in."""
+    __tablename__ = "chatgpt_accounts"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(200), default="")
+    subject: Mapped[str] = mapped_column(String(200), default="")
+    email: Mapped[str] = mapped_column(String(320), default="")
+    name: Mapped[str] = mapped_column(String(200), default="")
+    access_token: Mapped[str] = mapped_column(Text, default="")
+    refresh_token: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # Space separated, as granted by the token endpoint.
+    scopes: Mapped[str] = mapped_column(Text, default="")
+    # Why the tokens can't be used ("" = fine): "sign_in_again", "no_plan".
+    problem: Mapped[str] = mapped_column(String(40), default="")
+    updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)

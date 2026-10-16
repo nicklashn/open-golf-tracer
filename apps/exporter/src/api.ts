@@ -49,10 +49,10 @@ export class InternalApi {
   jobProject(id: string) {
     return this.call<{ id: string; name: string; document: unknown; pending: number }>('GET', `/jobs/${id}/project`);
   }
-  /** The AI model the job's user has chosen, key included. Never log it. */
+  /** The AI model the job's user has chosen, key included (chatgpt: a fresh access token). Never log it. */
   jobAi(id: string) {
     return this.call<{
-      provider: 'none' | 'ollama' | 'openai-compatible' | 'anthropic';
+      provider: 'none' | 'ollama' | 'openai-compatible' | 'anthropic' | 'chatgpt';
       model: string;
       baseUrl: string;
       apiKey: string;
@@ -60,6 +60,8 @@ export class InternalApi {
       /** May send still frames from the green when the putt count is unsure. */
       vision: boolean;
       source: string;
+      /** chatgpt without a token: why (not signed in, or the sign-in could not be renewed). */
+      error?: string;
     }>('GET', `/jobs/${id}/ai`);
   }
   defer(id: string, seconds: number, message: string) {

@@ -25,7 +25,8 @@ Uninstall it under *Settings → Apps*; you are asked whether your projects shou
 
 **Make video for me** works out of the box without AI. To let an AI model help (optional), open
 **Settings → AI** in the app, pick Ollama (runs on your own PC), an OpenAI-compatible service or
-Anthropic, paste a key if the service needs one, and click **Test connection**.
+Anthropic, paste a key if the service needs one, and click **Test connection** – or pick
+**ChatGPT (your plan)** and **Continue with ChatGPT** to use your ChatGPT Plus/Pro plan without a key.
 
 To build the installer yourself: `powershell -ExecutionPolicy Bypass -File installer\build.ps1`
 (needs Git and [Inno Setup 6](https://jrsoftware.org/isinfo.php): `winget install JRSoftware.InnoSetup`).
@@ -119,7 +120,7 @@ you turn that on (`AI_VISION`, below).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AI_PROVIDER` | `none` | `none` (fixed rules), `ollama` (local, nothing leaves the PC), `openai-compatible` (OpenAI, OpenRouter, LM Studio …) or `anthropic` |
+| `AI_PROVIDER` | `none` | `none` (fixed rules), `ollama` (local, nothing leaves the PC), `openai-compatible` (OpenAI, OpenRouter, LM Studio …) or `anthropic` (ChatGPT plan: in the app only, see below) |
 | `AI_MODEL` | provider default | e.g. `llama3.1`, `gpt-4o-mini`, `claude-opus-5-5` |
 | `AI_BASE_URL` | provider default | e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://openrouter.ai/api/v1` |
 | `AI_API_KEY` | – | Never sent to the browser, logged, or stored in projects or the data export |
@@ -128,6 +129,26 @@ you turn that on (`AI_VISION`, below).
 
 The same can be chosen in the app under **Settings → AI** (with "Test connection"); otherwise the
 `.env` defaults are used. Token usage is shown when the video is done.
+
+#### Use your ChatGPT plan (Sign in with ChatGPT, preview)
+
+Instead of an API key you can let "Make video for me" use your ChatGPT Plus/Pro plan, through
+OpenAI's [Sign in with ChatGPT for open-source apps](https://developers.openai.com/siwc/token-sharing-open-source)
+(a preview). It is chosen in the app only, not in `.env`.
+
+1. **Settings → AI → Provider: ChatGPT (your plan)**, then **Continue with ChatGPT**. A new tab opens at OpenAI.
+2. Sign in, name the app if asked, and allow it to use your ChatGPT plan.
+3. OpenAI sends you back to `http://127.0.0.1:8000/api/ai/chatgpt/callback`, which returns you to Settings.
+   This only works in a browser **on the PC that runs Open Golf Tracer** (also when you normally use it
+   from another device).
+4. Pick a model from your account's list, **Save**, and **Test connection**.
+
+What it sends: the round's text summary (and still frames from the green, only if you turned that on)
+goes to OpenAI and counts against your ChatGPT plan; `AI_MAX_TOKENS` still applies. Review or limit what
+the app may use under [ChatGPT settings → Usage](https://chatgpt.com/settings/usage); when a limit is
+reached the video stops with a message that links there. The tokens stay on the server (never in the
+browser, logs or the data export) and are renewed automatically; **Sign out** revokes them. If the sign-in
+expires or you disconnect the app in ChatGPT, sign in again.
 
 ## Features
 
