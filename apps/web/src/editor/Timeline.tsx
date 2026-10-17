@@ -29,6 +29,7 @@ import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
 import * as ops from './ops';
 import { snapTime, timelineRemap } from './ripple';
+import { onReveal } from './reveal';
 import { selectedClipIds, useEditor, type MediaInfo } from './store';
 
 const LABEL_W = 92;
@@ -658,9 +659,21 @@ function Playhead({ scroller }: { scroller: React.RefObject<HTMLDivElement | nul
     };
     const s0 = S();
     place(s0.time, s0.zoom, false);
-    return useEditor.subscribe((s, prev) => {
+    const unsub = useEditor.subscribe((s, prev) => {
       if (s.time !== prev.time || s.zoom !== prev.zoom) place(s.time, s.zoom, s.playing);
     });
+    // A jump from a list (a shot, a hole): centre the playhead when it is out of view.
+    const unreveal = onReveal((time) => {
+      const sc = scroller.current;
+      if (!sc) return;
+      const x = time * S().zoom;
+      const w = sc.clientWidth - LABEL_W;
+      if (x < sc.scrollLeft + 8 || x > sc.scrollLeft + w - 40) sc.scrollLeft = Math.max(0, x - w / 2);
+    });
+    return () => {
+      unsub();
+      unreveal();
+    };
   }, [scroller]);
   return (
     <div ref={ref} className="pointer-events-none absolute top-0 bottom-0 left-0 z-30 w-px bg-red-500 will-change-transform" data-testid="playhead">
@@ -876,6 +889,7 @@ const TracerTrack = memo(function TracerTrack({
             background: s.style.color2 ? `linear-gradient(90deg, ${s.style.color}, ${s.style.color2})` : s.style.color,
             color: s.style.color === '#ffffff' ? '#111113' : '#fff',
           }}
+          data-shot={s.id}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => ops.jumpToShot(s)}
         >

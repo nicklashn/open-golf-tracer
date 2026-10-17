@@ -3,9 +3,9 @@
  * a project – no video, no images, no project document – and it is what the rules read too.
  */
 import { shotStats } from '@golf/render';
-import { byTimeline, type GeoPoint, type MediaRef, type Project, type Shot, type WarningCode } from '@golf/schema';
+import { byTimeline, type GeoPoint, type HoleEdit, type MediaRef, type Project, type Shot, type WarningCode } from '@golf/schema';
 import { isoDate, isSure, roundMedia, roundOrder } from './chronology';
-import { annotateNext, holeScores, type HoleScore } from './score';
+import { annotateNext, holeScores, scoredHoles, type HoleScore } from './score';
 
 export interface ClipSummary {
   id: string;
@@ -114,6 +114,8 @@ export interface RoundSummary {
   putts: StrokeSummary[];
   /** The score of each hole filmed, in round order (see score.ts). */
   holes: HoleScore[];
+  /** The user's score corrections by hole (`Project.scoreEdits`). */
+  edits?: Record<string, HoleEdit>;
   /** How the clip order was found (see `roundOrder`): clip ids placed without a sure time, and two clips whose times contradict their holes. */
   order: { by: 'time' | 'hole' | 'mixed'; unsure: string[]; conflict: [string, string] | null };
 }
@@ -216,6 +218,7 @@ export function summarize(doc: Project): RoundSummary {
       .sort(byRound)
       .map(stroke),
     holes: [],
+    edits: doc.scoreEdits ?? {},
     order: { by: ordered.by, unsure: ordered.unsure, conflict: ordered.conflict && [ordered.conflict[0].id, ordered.conflict[1].id] },
   };
   annotateNext(summary);
@@ -237,8 +240,7 @@ export function tagHighlights(s: RoundSummary): void {
   const add = (x: { tags?: HighlightTag[] }, tag: HighlightTag) => {
     x.tags = [...new Set([...(x.tags ?? []), tag])];
   };
-  // Only with putts on video can a hole be complete.
-  for (const h of s.putts.length ? s.holes : []) {
+  for (const h of scoredHoles(s)) {
     if (h.strokes === null || h.par === null || h.strokes - h.par > -1) continue;
     const tag: HighlightTag = h.strokes - h.par <= -2 ? 'eagle' : 'birdie';
     for (const x of s.shots) if (x.hole === h.hole) add(x, tag);
@@ -285,14 +287,13 @@ export function summaryText(s: RoundSummary): string {
     );
   for (const p of s.putts)
     if (p.tags?.length) lines.push(`putt clip=${p.clip} t=${p.t} hole=${p.hole || '?'} holed=${p.holed ? 'y' : 'n'} tags=${p.tags.join(',')}`);
-  // Only with putts on video can a hole be complete.
-  const holes = s.putts.length ? s.holes : [];
+  const holes = scoredHoles(s);
   if (holes.length) {
     const done = holes.filter((h) => h.strokes !== null);
     const strokes = done.reduce((n, h) => n + h.strokes!, 0);
     const par = done.reduce((n, h) => n + h.par!, 0);
     lines.push(
-      `score (hole:strokes/par putts, ?=not every stroke filmed) ${holes.map((h) => `${h.hole}:${h.strokes ?? '?'}/${h.par ?? '?'} ${h.putts}p`).join(', ')}${done.length ? ` total ${strokes}/${par}` : ''}`,
+      `score (hole:strokes/par putts, ?=not every stroke filmed) ${holes.map((h) => `${h.hole}:${h.strokes ?? '?'}/${h.par ?? '?'} ${h.putts}p${h.edited.length ? ' (by user)' : ''}`).join(', ')}${done.length ? ` total ${strokes}/${par}` : ''}`,
     );
   }
   return lines.join('\n');

@@ -6,6 +6,7 @@
  */
 import type { VideoPlan } from './plan';
 import type { RoundSummary } from './summary';
+import { scoredHoles } from './score';
 
 const NUMBER = /\d+(?:[.,]\d+)?/g;
 
@@ -45,7 +46,7 @@ export function factNumbers(s: RoundSummary, ...texts: string[]): Set<number> {
     add(x.flightS);
     add(x.nextM);
   }
-  const done = s.putts.length ? s.holes.filter((h) => h.strokes !== null) : [];
+  const done = scoredHoles(s).filter((h) => h.strokes !== null);
   for (const h of done) {
     add(h.strokes);
     add(h.putts);
