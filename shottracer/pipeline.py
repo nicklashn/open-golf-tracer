@@ -444,8 +444,19 @@ def _putts(info: VideoInfo, det: BallDetector, addr: Address, opt: Options, tick
         conf = putt_mod.confidence(ro, prior, tick is not None)
         if conf < PUTT_SHOW_CONF:
             codes.insert(0, ("low_confidence", ""))
-        docs.append(_putt_doc(info, ro, t0, conf, codes, n0 + len(docs), opt, sx, sy, "roll + sound" if tick else "roll"))
+        doc = _putt_doc(info, ro, t0, conf, codes, n0 + len(docs), opt, sx, sy, "roll + sound" if tick else "roll")
+        path = putt_mod.roll_path(seen, ro)
+        _log(f"  roll line {ro.start:.1f} s: {'ok' if path.ok else path.why} (rms {path.rms:.2f} r, slips {path.slips}, gap {path.gap:.2f} s, "
+             f"wiggle {path.wiggle:.0f} deg, back {path.back:.2f} r, still {path.still:.2f} r)")
+        if path.ok:
+            doc["putt"]["path"] = _path_doc(path, info.width * sx, info.height * sy)
+        docs.append(doc)
     return docs, (t_ref, float(seen.t[-1]) if len(seen.t) else t_ref)
+
+
+def _path_doc(path: putt_mod.RollPath, w: float, h: float) -> list[dict]:
+    """The roll line's points: source-video seconds and fractions of the frame (any size, any crop)."""
+    return [{"t": round(float(t), 4), "x": round(float(u) / w, 5), "y": round(float(v) / h, 5)} for t, u, v in zip(path.t, path.u, path.v)]
 
 
 def _hidden_by_player(info: VideoInfo, det: BallDetector, ro: putt_mod.Roll, sx: float, sy: float) -> bool:

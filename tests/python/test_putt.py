@@ -141,6 +141,15 @@ def test_putts_become_putt_shots(tmp_path):
     assert abs(docs[0]["impactTime"] - 1.0) < 0.06 and abs(docs[1]["impactTime"] - 5.0) < 0.06
     assert all(d["visible"] and d["confidence"] > 0.6 for d in docs)
     assert span[0] < 1.0 and span[1] > 6.0
+    # The roll line: a smoothed path in source seconds and fractions of the frame, on the roll.
+    for d, (t0, _, a, _) in zip(docs, legs):
+        path = d["putt"]["path"]
+        assert "line" not in d["putt"]   # off until switched on
+        assert abs(path[0]["t"] - t0) < 0.06 and path[-1]["t"] <= d["putt"]["end"] + 1e-6
+        assert 10 <= len(path) / (path[-1]["t"] - path[0]["t"]) <= 14
+        assert abs(path[0]["x"] * W - a[0]) < R and abs(path[0]["y"] * H - a[1]) < R
+        assert all(0 <= p["x"] <= 1 and 0 <= p["y"] <= 1 for p in path)
+    assert abs(docs[0]["putt"]["path"][-1]["y"] * H - 150) < R
     doc = new_document("t")
     doc["shots"] = [clean_shot(d, "m1") for d in docs]
     assert not list(_validator().iter_errors(doc))

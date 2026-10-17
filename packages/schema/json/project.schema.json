@@ -456,6 +456,34 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "path": {
+                "maxItems": 600,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 86400
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "x",
+                    "y"
+                  ]
+                }
+              },
+              "line": {
+                "type": "boolean"
               }
             },
             "required": [
