@@ -102,11 +102,27 @@ def summary(db: Session, p: Project) -> dict:
     }
 
 
+def made_from(db: Session, user: User) -> dict[str, dict]:
+    """Which project each generated video came from: the "Make a video for me" job (compose) that
+    made it, its source project and what kind of video it made. Read from the jobs' results, so
+    projects made before this was shown are grouped too."""
+    out: dict[str, dict] = {}
+    rows = db.scalars(select(Job).where(Job.user_id == user.id, Job.kind == "compose", Job.status == "succeeded")
+                      .order_by(Job.created_at)).all()
+    for j in rows:
+        for made in (j.result or {}).get("projects") or []:
+            if isinstance(made, dict) and made.get("id"):
+                out[str(made["id"])] = {"sourceId": j.project_id, "runId": j.id, "runKind": (j.result or {}).get("kind")}
+    return out
+
+
 @router.get("")
 def list_projects(db: Session = Depends(get_db), user: User = Depends(current_user)):
     rows = db.scalars(select(Project).where(Project.user_id == user.id, Project.deleted_at.is_(None))
                       .order_by(Project.updated_at.desc())).all()
-    return {"projects": [summary(db, p) for p in rows]}
+    origin = made_from(db, user)
+    none = {"sourceId": None, "runId": None, "runKind": None}
+    return {"projects": [{**summary(db, p), **origin.get(p.id, none)} for p in rows]}
 
 
 @router.post("")
