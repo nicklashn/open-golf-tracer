@@ -3,12 +3,21 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyPuttVision,
+  countFromFrames,
+  DEFAULT_VISION_TOKENS,
   frameTimes,
   IMAGE_TOKENS,
+  planTokensUsed,
+  puttCrop,
+  puttFrames,
   puttSegment,
   resolvePuttsWithVision,
+  VISION_FRAMES,
+  VISION_MIN_CONFIDENCE,
   VISION_PROMPT,
   VideoPlan,
+  visionCallEstimate,
+  visionFits,
   type AiConfig,
   type PlanQuestion,
 } from '../src';
@@ -141,17 +150,115 @@ describe('vision: Anthropic', () => {
   });
 });
 
-describe('vision: token ceiling', () => {
-  it('sends nothing when the frames would pass AI_MAX_TOKENS (with the reserve kept free)', async () => {
+describe('vision: token allowance', () => {
+  it('sends nothing when the frames would pass their own allowance; the plan ceiling is not touched', async () => {
     const used = { calls: 1, inputTokens: 3000, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 };
-    const out = await resolvePuttsWithVision(openai({ maxTokens: 8000 }), HOLE, [...FRAMES, ...FRAMES], { used, reserve: 2500 });
+    const out = await resolvePuttsWithVision(openai({ maxTokens: 8000, visionMaxTokens: 5000 }), HOLE, [...FRAMES, ...FRAMES], { used });
     expect(out).toMatchObject({ result: null, skipped: 'budget', usage: used });
+    expect(out.error).toMatch(/allowance for pictures \(5000\)/);
     expect(seen).toHaveLength(0);
-    // Without the reserve the same call fits.
+    // Three frames fit; their tokens are counted as the pictures' own.
     replies.push(chat(JSON.stringify(answer)));
-    const ok = await resolvePuttsWithVision(openai({ maxTokens: 8000 }), HOLE, FRAMES, { used });
+    const ok = await resolvePuttsWithVision(openai({ maxTokens: 8000, visionMaxTokens: 5000 }), HOLE, FRAMES, { used });
     expect(ok.result).toEqual(answer);
-    expect(ok.usage.inputTokens).toBe(5500);
+    expect(ok.usage).toMatchObject({ inputTokens: 5500, visionTokens: 2530 });
+    expect(planTokensUsed(ok.usage)).toBe(3200);
+  });
+
+  it('runs at the default plan ceiling: pictures have room of their own, under a hard ceiling', () => {
+    const used = { calls: 1, inputTokens: 5000, outputTokens: 400, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const cfg = openai({ maxTokens: 8000 });
+    expect(DEFAULT_VISION_TOKENS).toBeGreaterThanOrEqual(4 * visionCallEstimate(VISION_FRAMES));
+    expect(visionFits(cfg, used, visionCallEstimate(VISION_FRAMES))).toBeNull();
+    // The hard ceiling: plan ceiling + allowance, whatever the split.
+    expect(visionFits(cfg, { ...used, inputTokens: 8000 + DEFAULT_VISION_TOKENS }, 100)).toMatch(/ceiling/);
+  });
+});
+
+describe('vision: frames at the putts, counted by the code', () => {
+  it('takes frames at each strike, each stop and 1 s after the last, within the cap and the clip', () => {
+    const f = puttFrames([
+      { t: 20, end: 24 },
+      { t: 31, end: 33.5 },
+    ]);
+    expect(f.times).toEqual([20, 24, 31, 33.5, 34.5]);
+    expect(f.roles).toEqual([
+      { putt: 1, at: 'strike' },
+      { putt: 1, at: 'end' },
+      { putt: 2, at: 'strike' },
+      { putt: 2, at: 'end' },
+      { putt: 2, at: 'after' },
+    ]);
+    // No stop known: strike + 3 s. Past the end of the file: just before it.
+    expect(puttFrames([{ t: 10, end: null }], 13.5).times).toEqual([10, 13, 13.45]);
+    // Many putts: the last "after" and every strike come first.
+    const many = puttFrames(
+      [1, 5, 9, 13, 17].map((t) => ({ t, end: t + 2 })),
+      Infinity,
+      8,
+    );
+    expect(many.times).toHaveLength(8);
+    expect(many.roles.filter((r) => r.at === 'strike')).toHaveLength(5);
+    expect(many.roles.some((r) => r.at === 'after')).toBe(true);
+  });
+
+  it('crops around ball, roll and player; null when there is nothing to go by', () => {
+    const putt = { anchor: { x: 500, y: 1400 }, track: { t: [0, 1], u: [500, 560], v: [1400, 1300] } };
+    const c = puttCrop([putt], 1080, 1920)!;
+    expect(c.x).toBeLessThanOrEqual(500);
+    expect(c.x + c.w).toBeGreaterThanOrEqual(560);
+    expect(c.y).toBeLessThan(1300 - 300); // room for the player above the ball
+    expect(c.y + c.h).toBeGreaterThanOrEqual(1400);
+    expect([c.x, c.y, c.w, c.h].every((v) => v % 2 === 0)).toBe(true);
+    expect(c.w * c.h).toBeLessThan(0.85 * 1080 * 1920);
+    expect(puttCrop([], 1080, 1920)).toBeNull();
+  });
+
+  const roles = puttFrames([
+    { t: 20, end: 24 },
+    { t: 31, end: 33.5 },
+  ]).roles;
+  const frame = (n: number, stroke: boolean | null, ballVisible: boolean | null, inCup: boolean | null) => ({ n, stroke, ballVisible, inCup });
+
+  it('counts the strokes and sees the ball drop itself', () => {
+    const frames = [
+      frame(1, true, true, false),
+      frame(2, false, true, false),
+      frame(3, true, true, false),
+      frame(4, false, true, true),
+      frame(5, false, false, true),
+    ];
+    expect(countFromFrames({ putts: 2, holed: true, confidence: 0.9, frames }, roles)).toEqual({ putts: 2, holed: true, confidence: 0.9 });
+    // One putt more in another clip of the hole.
+    expect(countFromFrames({ putts: 2, holed: true, confidence: 0.9, frames }, roles, 1).putts).toBe(3);
+  });
+
+  it('a found "putt" without a stroke is not counted; disagreeing with the model is not sure', () => {
+    const frames = [
+      frame(1, false, true, false),
+      frame(2, false, true, false),
+      frame(3, true, true, false),
+      frame(4, false, true, false),
+      frame(5, false, true, false),
+    ];
+    const out = countFromFrames({ putts: 2, holed: true, confidence: 0.9, frames }, roles);
+    expect(out.putts).toBe(1);
+    expect(out.holed).toBe(false); // the ball is still lying there
+    expect(out.confidence).toBeLessThan(VISION_MIN_CONFIDENCE);
+  });
+
+  it('frames it cannot judge leave the model its own count', () => {
+    const frames = [frame(1, null, null, null), frame(3, true, true, false)];
+    expect(countFromFrames({ putts: 2, holed: null, confidence: 0.8, frames }, roles)).toEqual({ putts: 2, holed: null, confidence: 0.8 });
+  });
+
+  it('labels each frame in the request', async () => {
+    replies.push(chat(JSON.stringify({ ...answer, frames: [] })));
+    const f = puttFrames([{ t: 10, end: 12 }]);
+    await resolvePuttsWithVision(openai(), { hole: '7', par: 4, ...f }, ['/9j/A', '/9j/B', '/9j/C']);
+    const text = JSON.stringify(seen[0].body);
+    expect(text).toContain('frame 1: 10.0 s, putt 1 strike');
+    expect(text).toContain('frame 3: 13.0 s, putt 1 after');
   });
 });
 

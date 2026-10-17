@@ -7,12 +7,24 @@
  * particular shots show each one as a card (a short loop around the strike) that can be kept or
  * removed on its own, or opened in the editor.
  */
-import { CHATGPT_USAGE_URL, clock, shotAnswerKey, type PlanItem, type PlanQuestion, type ShotChoice } from '@golf/compose';
-import { sourcePath } from '@golf/render';
-import type { Shot } from '@golf/schema';
+import {
+  CHATGPT_USAGE_URL,
+  clock,
+  explainPreference,
+  planFromRules,
+  shotAnswerKey,
+  summarize,
+  videoTokenEstimate,
+  type PlanItem,
+  type PlanQuestion,
+  type PreferenceChip,
+  type ShotChoice,
+} from '@golf/compose';
+import { sourcePath, TEMPLATES } from '@golf/render';
+import type { Project, Shot } from '@golf/schema';
 import { Check, Copy, ExternalLink, Loader2, Pause, Play, Sparkles, SquarePen } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/controls';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -135,6 +147,8 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
                   <Textarea {...p} value={preference} onChange={(e) => setPreference(e.target.value)} placeholder={T.placeholder} maxLength={1000} rows={3} />
                 )}
               </Field>
+              {ai && ai.effective.provider === 'none' ? <PreferenceChips text={preference} /> : null}
+              {ai && ai.effective.provider !== 'none' ? <TokenLine doc={doc} picked={picked} preference={preference} ai={ai.effective} /> : null}
               <p className="text-[12px] text-fg-muted" data-testid="auto-privacy">
                 {aiPrivacy(t, ai?.effective)}
               </p>
@@ -234,6 +248,82 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** What the rules understood of the wish (there is no AI to read the rest), as chips. */
+function PreferenceChips({ text }: { text: string }) {
+  const { t, f, locale } = useI18n();
+  const T = t.aiPlan;
+  const e = useMemo(() => explainPreference(text), [text]);
+  if (!text.trim()) return null;
+  const label = (c: PreferenceChip): string => {
+    switch (c.key) {
+      case 'kind':
+        return T.kind[c.value];
+      case 'goodOnly':
+        return T.goodOnly;
+      case 'best':
+        return T.best;
+      case 'template':
+        return f(T.template, { name: TEMPLATES.find((x) => x.id === c.value)?.name[locale] ?? c.value });
+      case 'putts':
+        return T.putts[c.value];
+      case 'title':
+        return f(T.title, { title: c.value });
+    }
+  };
+  const chip = 'rounded-full border px-2 py-0.5';
+  return (
+    <div className="-mt-2 flex flex-col gap-1.5 text-[12px]" data-testid="auto-understood" aria-live="polite">
+      <p className="flex flex-wrap items-center gap-1.5">
+        <span className="text-fg-muted">{e.understood.length ? T.understood : T.nothingUnderstood}</span>
+        {e.understood.map((c) => (
+          <span key={`${c.key}:${'value' in c ? c.value : ''}`} className={cn(chip, 'border-border-strong bg-surface-sunken')}>
+            {label(c)}
+          </span>
+        ))}
+      </p>
+      {e.unknown.length ? (
+        <p className="flex flex-wrap items-center gap-1.5" data-testid="auto-not-understood">
+          <span className="text-fg-muted">{T.notUnderstood}</span>
+          {e.unknown.map((w) => (
+            <span key={w} className={cn(chip, 'border-dashed border-border text-fg-muted')}>
+              {w}
+            </span>
+          ))}
+          <span className="text-fg-muted">{T.notUnderstoodHint}</span>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** About how many tokens the video will use with the AI, and a warning when the ceiling is too low. */
+function TokenLine({ doc, picked, preference, ai }: { doc: Project; picked: Set<string>; preference: string; ai: AiSettingsInfo['effective'] }) {
+  const { t, f, locale } = useI18n();
+  const wish = useDeferredValue(preference);
+  const e = useMemo(() => {
+    try {
+      const media = Object.fromEntries(Object.entries(doc.media).filter(([id, m]) => picked.has(id) || m.kind !== 'video'));
+      const sub = { ...doc, media, clips: doc.clips.filter((c) => picked.has(c.mediaId)), shots: doc.shots.filter((s) => picked.has(s.mediaId)) };
+      const s = summarize(sub);
+      return videoTokenEstimate(s, wish, planFromRules(s, wish, locale), { vision: ai.vision });
+    } catch {
+      return null;
+    }
+  }, [doc, picked, wish, locale, ai.vision]);
+  if (!e || !picked.size) return null;
+  const n = (v: number) => (Math.ceil(v / 100) * 100).toLocaleString(locale === 'da' ? 'da-DK' : 'en-GB');
+  return (
+    <div className="-mt-2 text-[12px]" data-testid="auto-tokens-estimate">
+      <p className="text-fg-muted">{f(t.aiPlan.dialogEstimate, { total: n(e.total) })}</p>
+      {e.needed > ai.maxTokens ? (
+        <p role="status" className="text-accent-fg">
+          {f(t.aiPlan.dialogTooLow, { max: n(ai.maxTokens) })}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -565,7 +655,15 @@ function Done({ result, onAgain }: { result: Result; onAgain: () => void }) {
       {result.notes?.length ? (
         <ul className="list-disc pl-5 text-[13px] text-fg-muted">
           {result.notes.map((n) => (
-            <li key={n}>{n}</li>
+            <li key={n}>
+              {n}
+              {n.includes(CHATGPT_USAGE_URL) ? (
+                <>
+                  {' '}
+                  <ManageUsage />
+                </>
+              ) : null}
+            </li>
           ))}
         </ul>
       ) : null}

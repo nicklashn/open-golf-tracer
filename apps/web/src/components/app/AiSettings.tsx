@@ -5,9 +5,9 @@
  * and never comes back – the page only ever sees it masked. "ChatGPT (your plan)" signs in with
  * ChatGPT instead (OpenAI's flow for local apps); the tokens stay on the server.
  */
-import { CHATGPT_USAGE_URL } from '@golf/compose';
+import { CHATGPT_USAGE_URL, typicalTokenEstimate } from '@golf/compose';
 import { ExternalLink, LogOut, PlugZap } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Select, Switch } from '@/components/ui/controls';
 import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
@@ -84,6 +84,26 @@ export function ManageUsage() {
       {t.ai.chatgpt.manageUsage}
       <ExternalLink className="size-3.5" aria-hidden />
     </a>
+  );
+}
+
+/** "≈ N tokens per video" for a full round with what is switched on, and a warning when the ceiling is too low. */
+function TokenBudget({ maxTokens, vision }: { maxTokens: number; vision: boolean }) {
+  const { t, f, locale } = useI18n();
+  const e = useMemo(() => typicalTokenEstimate({ vision }), [vision]);
+  const n = (v: number) => (Math.ceil(v / 100) * 100).toLocaleString(locale === 'da' ? 'da-DK' : 'en-GB');
+  return (
+    <div className="grid gap-1 text-[13px]" data-testid="ai-estimate">
+      <p className="text-fg-muted">
+        {f(t.aiPlan.estimate, { total: n(e.total), plan: n(e.plan) })}
+        {vision ? ` ${f(t.aiPlan.estimateVision, { n: n(e.vision) })}` : ''}
+      </p>
+      {maxTokens < e.needed ? (
+        <p role="status" className="text-accent-fg">
+          {f(t.aiPlan.tooLow, { needed: n(e.needed) })}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -215,7 +235,7 @@ function ChatGptPanel({ info, model, onModel, reload }: { info: AiSettingsInfo; 
 export function AiSettingsForm() {
   const { t, f } = useI18n();
   const [info, setInfo] = useState<AiSettingsInfo | null>(null);
-  const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: 8000, vision: false });
+  const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: 16000, vision: false });
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -340,7 +360,7 @@ export function AiSettingsForm() {
                 max={200000}
                 step={500}
                 value={form.maxTokens}
-                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 8000 })}
+                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 16000 })}
               />
             )}
           </Field>
@@ -388,7 +408,7 @@ export function AiSettingsForm() {
                 max={200000}
                 step={500}
                 value={form.maxTokens}
-                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 8000 })}
+                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 16000 })}
               />
             )}
           </Field>
@@ -401,7 +421,17 @@ export function AiSettingsForm() {
             <Switch checked={form.vision} onChange={(v) => setForm({ ...form, vision: v })} label={t.ai.vision} />
           </label>
           <p className="text-[13px] text-fg-muted">{t.ai.visionHint}</p>
+          {form.vision &&
+          (form.provider === 'ollama' || (form.provider === 'server' && info.server.provider === 'ollama')) &&
+          /^llama3\.1\b/.test(form.model || info.effective.model || 'llama3.1') ? (
+            <p className="text-[13px] text-accent-fg" data-testid="ai-vision-model">
+              {t.aiPlan.visionOllama}
+            </p>
+          ) : null}
         </div>
+      ) : null}
+      {form.provider !== 'none' && (form.provider !== 'server' || info.server.provider !== 'none') ? (
+        <TokenBudget maxTokens={form.provider === 'server' ? info.effective.maxTokens : form.maxTokens} vision={form.vision} />
       ) : null}
       <p className="text-[13px] text-fg-muted" data-testid="ai-privacy">
         {aiPrivacy(t, info.effective)}

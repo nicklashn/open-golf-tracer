@@ -4,14 +4,15 @@
  * video(s) as new projects.
  */
 import {
+  addUsage,
   AiError,
   applyPuttVision,
   compose,
-  frameTimes,
   noUsage,
-  planCallEstimate,
   planFromRules,
   planWithAI,
+  puttCrop,
+  puttFrames,
   puttSegment,
   puttsHoleOf,
   resolvePuttsWithVision,
@@ -21,7 +22,9 @@ import {
   VideoPlan,
   VISION_MAX_CALLS,
   visionCallEstimate,
+  visionFits,
   type AiConfig,
+  type Crop,
   type AiUsage,
   type LayerNames,
   type PlanAnswers,
@@ -57,8 +60,8 @@ interface VisionFound {
   notes: string[];
 }
 
-/** Base64 JPEGs of a clip at the given seconds (see frames.ts). */
-export type FrameGrabber = (mediaId: string, times: number[]) => Promise<string[]>;
+/** Base64 JPEGs of a clip at the given seconds, of the whole frame or a region of it (see frames.ts). */
+export type FrameGrabber = (mediaId: string, times: number[], crop?: Crop | null) => Promise<string[]>;
 
 /** How long a video waits between looks at the analysis. */
 const WAIT_S = 5;
@@ -87,39 +90,49 @@ const T = {
   da: {
     byModel: (m: string) => `Planen er lavet af AI-modellen ${m}.`,
     fellBack: 'AI-svaret kunne ikke bruges (to gange), så planen er lavet af faste regler.',
+    failed: (why: string) => `AI'en kunne ikke bruges (${why}), så planen er lavet af faste regler.`,
+    budget: (max: number) =>
+      `Runden er for stor til loftet på ${max} tokens, så planen er lavet af faste regler. Hæv loftet under Indstillinger → AI for at bruge AI'en.`,
+    failedAfter: (why: string) => `AI'en kunne ikke tilpasse planen efter dine svar (${why}), så svarene er brugt på planen, som den var.`,
+    overCeiling: (max: number) => `loftet på ${max} tokens ville blive overskredet`,
     none: 'Ingen slag blev tilbage, så der blev ikke lavet en video.',
-    visionBudget: "AI'en så ikke på billederne fra greenen: det ville bruge flere tokens end loftet.",
+    visionBudget: "AI'en så ikke på billederne fra greenen: det ville bruge flere tokens, end der er sat af til billeder.",
   },
   en: {
     byModel: (m: string) => `The plan was made by the AI model ${m}.`,
     fellBack: "The AI's answer could not be used (twice), so the plan was made by fixed rules.",
+    failed: (why: string) => `The AI could not be used (${why}), so the plan was made by fixed rules.`,
+    budget: (max: number) =>
+      `The round is too large for the ceiling of ${max} tokens, so the plan was made by fixed rules. Raise the ceiling under Settings → AI to use the AI.`,
+    failedAfter: (why: string) => `The AI could not adjust the plan to your answers (${why}), so your answers were applied to the plan as it was.`,
+    overCeiling: (max: number) => `the ceiling of ${max} tokens would be passed`,
     none: 'No shots were left, so no video was made.',
-    visionBudget: 'The AI did not look at frames from the green: it would use more tokens than the ceiling.',
+    visionBudget: 'The AI did not look at frames from the green: it would use more tokens than are set aside for pictures.',
   },
 };
 
 /** Frames from the media file the API points to. */
 const ffmpegFrames =
   (api: Api): FrameGrabber =>
-  async (mediaId, times) => {
+  async (mediaId, times, crop) => {
     if (!api.media) throw new Error('no media lookup');
     const m = await api.media(mediaId);
-    return grabFrames(m.path, times, { hdr: Boolean((m.probe as { hdr?: unknown }).hdr) });
+    return grabFrames(m.path, times, { hdr: Boolean((m.probe as { hdr?: unknown }).hdr), crop });
   };
 
 /**
  * Before asking about putts: the AI looks at a few frames of each unsure hole's putting (only
- * when the user turned it on). Sure answers are filled in and their questions dropped; anything
- * else stays a question. Never fails the video.
+ * when the user turned it on), taken at the putts found and cropped around the ball. Sure
+ * answers are filled in and their questions dropped; anything else stays a question. The
+ * frames have their own token allowance (vision.ts). Never fails the video.
  */
 async function lookAtPutts(
   ai: JobAiConfig,
   doc: Project,
   summary: RoundSummary,
-  preference: string,
   start: VideoPlan,
   usage: AiUsage,
-  ctx: { locale: Locale; yes: boolean; frames: FrameGrabber; log: Log; job: string; doFetch?: typeof fetch },
+  ctx: { locale: Locale; frames: FrameGrabber; log: Log; job: string; doFetch?: typeof fetch },
 ): Promise<{ plan: VideoPlan; usage: AiUsage; found: VisionFound }> {
   let plan = start;
   const found: VisionFound = { answers: {}, notes: [] };
@@ -131,29 +144,42 @@ async function lookAtPutts(
     if (hole === null || calls >= VISION_MAX_CALLS) continue;
     const seg = puttSegment(q, (id) => shots.get(id)?.putt?.end ?? null);
     if (!seg) continue;
-    const duration = doc.media[seg.mediaId]?.duration ?? 0;
-    const times = frameTimes(seg.from, duration > 0 ? Math.min(seg.to, duration - 0.05) : seg.to);
-    // Room for the plan call after the user's answers (this question may stay).
-    const reserve = ctx.yes ? 0 : planCallEstimate(summary, preference, plan, {});
+    const media = doc.media[seg.mediaId];
+    const inClip = (q.items ?? []).filter((it) => it.mediaId === seg.mediaId);
+    const { times, roles } = puttFrames(
+      inClip.map((it) => ({ t: it.t, end: shots.get(it.shotId)?.putt?.end ?? null })),
+      media?.duration ?? Infinity,
+    );
+    if (!times.length) continue;
     // No frames taken when the call would not fit anyway.
-    if (usage.inputTokens + usage.outputTokens + visionCallEstimate(times.length) + reserve > ai.maxTokens) {
+    if (visionFits(ai, usage, visionCallEstimate(times.length, ' '.repeat(400)))) {
       overBudget = true;
       continue;
     }
+    const putts = inClip.map((it) => shots.get(it.shotId)).filter((s): s is NonNullable<typeof s> => !!s);
+    const crop = media ? puttCrop(putts, media.width, media.height) : null;
     let frames: string[];
     try {
-      frames = await ctx.frames(seg.mediaId, times);
+      frames = await ctx.frames(seg.mediaId, times, crop);
     } catch (e) {
       ctx.log('ai vision frames failed', { job: ctx.job, hole, error: String(e instanceof Error ? e.message : e).slice(0, 200) });
       continue;
     }
+    // Frames past the end of the file are skipped by the grabber: keep times and roles in step.
+    const n = Math.min(frames.length, times.length);
     const clip = summary.clips.find((c) => c.id === seg.mediaId);
-    const out = await resolvePuttsWithVision(ai, { hole, par: clip?.par ?? null, times: times.slice(0, frames.length) }, frames, {
-      used: usage,
-      reserve,
-      fetch: ctx.doFetch,
-      log: (m, x) => ctx.log(m, { job: ctx.job, ...x }),
-    });
+    const out = await resolvePuttsWithVision(
+      ai,
+      {
+        hole,
+        par: clip?.par ?? null,
+        times: times.slice(0, n),
+        roles: frames.length === times.length ? roles : undefined,
+        otherPutts: (q.items ?? []).length - inClip.length,
+      },
+      frames.slice(0, n),
+      { used: usage, fetch: ctx.doFetch, log: (m, x) => ctx.log(m, { job: ctx.job, ...x }) },
+    );
     usage = out.usage;
     if (out.skipped === 'budget') {
       overBudget = true;
@@ -173,6 +199,13 @@ async function lookAtPutts(
     found.notes.push(note);
   }
   return { plan, usage, found };
+}
+
+/** Why the AI could not be used, in a few words for a note. */
+function aiReason(e: unknown, ai: AiConfig, locale: Locale): string {
+  if (e instanceof AiError && e.code === 'budget') return T[locale].overCeiling(ai.maxTokens);
+  const text = e instanceof AiError ? e.message : 'the AI provider failed';
+  return text.replace(/\.$/, '').slice(0, 180);
 }
 
 export async function handleCompose(
@@ -199,13 +232,25 @@ export async function handleCompose(
   let usage: AiUsage = p.usage ?? noUsage();
   // The rules' first note says "no AI"; with a model it says which one, or that its answer was unusable.
   const ruleNotes = rules.notes.slice(1);
+  // Never fails the video: when the AI cannot be used (key, network, token ceiling …) the plan
+  // is the rules' (first call) or the one the questions came from (after the answers), with a note.
   const withAi = async (base: VideoPlan, answers: PlanAnswers | null): Promise<VideoPlan> => {
-    const out = await planWithAI(ai, summary, p.preference ?? '', base, answers, {
-      allowedTemplates: templatesFor(),
-      used: usage,
-      fetch: doFetch,
-      log,
-    });
+    let out: Awaited<ReturnType<typeof planWithAI>>;
+    try {
+      out = await planWithAI(ai, summary, p.preference ?? '', base, answers, {
+        allowedTemplates: templatesFor(),
+        used: usage,
+        fetch: doFetch,
+        log,
+      });
+    } catch (e) {
+      const u = (e as { usage?: AiUsage }).usage;
+      if (u) usage = addUsage(usage, u);
+      log('ai failed', { job: job.id, provider: ai.provider, model: ai.model, code: e instanceof AiError ? e.code : 'unknown', error: aiReason(e, ai, 'en') });
+      const budget = e instanceof AiError && e.code === 'budget';
+      if (answers) return { ...base, notes: [...base.notes.slice(0, 9), T[locale].failedAfter(aiReason(e, ai, locale))] };
+      return { ...base, notes: [budget ? T[locale].budget(ai.maxTokens) : T[locale].failed(aiReason(e, ai, locale)), ...ruleNotes] };
+    }
     usage = out.usage;
     log('ai usage', { job: job.id, provider: ai.provider, model: ai.model, ...usage });
     return out.fellBack ? { ...base, notes: [T[locale].fellBack, ...ruleNotes] } : { ...out.plan, notes: [T[locale].byModel(ai.model), ...out.plan.notes] };
@@ -223,9 +268,8 @@ export async function handleCompose(
   } else {
     plan = useAi ? await withAi(rules, null) : rules;
     if (useAi && ai.vision) {
-      const v = await lookAtPutts(ai, doc, summary, p.preference ?? '', plan, usage, {
+      const v = await lookAtPutts(ai, doc, summary, plan, usage, {
         locale,
-        yes: !!p.yes,
         frames: frames ?? ffmpegFrames(api),
         log,
         job: job.id,

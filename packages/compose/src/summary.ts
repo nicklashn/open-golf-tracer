@@ -26,6 +26,8 @@ export interface ClipSummary {
   par: number | null;
   /** Metres from the tee along the hole (GPS), when known. */
   fromTee: number | null;
+  /** Metres from there to the green (GPS), when known. */
+  toGreen?: number | null;
   shots: number;
 }
 
@@ -60,7 +62,26 @@ export interface ShotSummary {
   nextOff?: boolean;
   /** No measured carry: `nextM` as a suggestion. */
   carrySuggestM?: number | null;
+  /** Golf highlights (see `tagHighlights`). */
+  tags?: HighlightTag[];
 }
+
+/**
+ * What makes a stroke worth showing, from facts only (never from a guess):
+ * - `eagle` / `birdie`: the strokes of a hole with a complete score (score.ts) under par;
+ * - `longest`: the longest measured carry of the round (a traced flight, at least LONGEST_MIN shots);
+ * - `close`: an approach followed by a putt filmed within CLOSE_M of the green (GPS), or by a
+ *   single short holed putt;
+ * - `long_putt`: a holed putt that rolled at least LONG_PUTT_S.
+ */
+export const HIGHLIGHT_TAGS = ['eagle', 'birdie', 'longest', 'close', 'long_putt'] as const;
+export type HighlightTag = (typeof HIGHLIGHT_TAGS)[number];
+/** Metres from the green where the first putt after a close approach was filmed (GPS). */
+export const CLOSE_M = 8;
+/** Seconds a holed putt rolls for it to count as long (a 2 m putt takes about 1.5 s, 10 m about 4–5 s). */
+export const LONG_PUTT_S = 3.5;
+/** Measured flights needed before one is "the longest of the round". */
+export const LONGEST_MIN = 3;
 
 /** A chip or a putt: never traced, but a stroke for the score. */
 export interface StrokeSummary {
@@ -77,6 +98,8 @@ export interface StrokeSummary {
   /** Putts: seconds into the clip when the ball stopped or dropped, and whether it was holed. */
   end: number | null;
   holed: boolean | null;
+  /** Golf highlights (see `tagHighlights`). */
+  tags?: HighlightTag[];
 }
 
 export interface RoundSummary {
@@ -156,6 +179,7 @@ export function summarize(doc: Project): RoundSummary {
       hole: m.place?.hole ?? '',
       par: m.place?.par ?? null,
       fromTee: m.place?.fromTee ?? null,
+      toGreen: m.place?.toGreen ?? null,
       shots: shots.filter((s) => s.mediaId === m.id).length,
     })),
     shots: shots.map((s, i) => {
@@ -196,23 +220,71 @@ export function summarize(doc: Project): RoundSummary {
   };
   annotateNext(summary);
   summary.holes = holeScores(summary);
+  tagHighlights(summary);
   return summary;
+}
+
+/** A flight that was measured, not guessed: tracked in the air, no default path, not doubtful. */
+const measured = (x: ShotSummary) =>
+  x.carryM !== null &&
+  !x.carrySuggestM &&
+  x.trackPts >= 5 &&
+  !x.nextOff &&
+  !x.flags.some((f) => f === 'no_track' || f === 'default_path' || f === 'implausible' || f === 'carry_mismatch');
+
+/** Sets `tags` on the shots and putts of the summary (see HIGHLIGHT_TAGS). */
+export function tagHighlights(s: RoundSummary): void {
+  const add = (x: { tags?: HighlightTag[] }, tag: HighlightTag) => {
+    x.tags = [...new Set([...(x.tags ?? []), tag])];
+  };
+  // Only with putts on video can a hole be complete.
+  for (const h of s.putts.length ? s.holes : []) {
+    if (h.strokes === null || h.par === null || h.strokes - h.par > -1) continue;
+    const tag: HighlightTag = h.strokes - h.par <= -2 ? 'eagle' : 'birdie';
+    for (const x of s.shots) if (x.hole === h.hole) add(x, tag);
+    const putts = s.putts.filter((p) => p.hole === h.hole);
+    if (putts.length) add(putts[putts.length - 1], tag);
+  }
+  const traced = s.shots.filter(measured);
+  if (traced.length >= LONGEST_MIN)
+    add(
+      traced.reduce((a, b) => (b.carryM! > a.carryM! ? b : a)),
+      'longest',
+    );
+  const clip = new Map(s.clips.map((c) => [c.id, c]));
+  const order = (a: { clip: number; t: number }, b: { clip: number; t: number }) => a.clip - b.clip || a.t - b.t;
+  for (const hole of new Set(s.shots.map((x) => x.hole).filter(Boolean))) {
+    const putts = s.putts.filter((p) => p.hole === hole);
+    const strokes = [...s.shots.filter((x) => x.hole === hole), ...s.chips.filter((x) => x.hole === hole), ...putts].sort(order);
+    strokes.forEach((x, i) => {
+      const next = strokes[i + 1];
+      if ('kind' in x || !next || !('kind' in next) || next.kind !== 'putt' || x.nextOff) return;
+      const near = (clip.get(next.clipId)?.toGreen ?? Infinity) <= CLOSE_M;
+      const onePutt = putts.length === 1 && next.holed === true && next.end !== null && next.end - next.t < LONG_PUTT_S;
+      if (near || onePutt) add(x, 'close');
+    });
+  }
+  for (const p of s.putts) if (p.holed === true && p.end !== null && p.end - p.t >= LONG_PUTT_S) add(p, 'long_putt');
 }
 
 /**
  * The summary as compact text for a language model: a header line, one line per clip and one
- * per shot. Small on purpose – a round of 80 shots stays well under 3 000 tokens.
+ * per shot. Small on purpose – a round of 80 shots stays well under 3 000 tokens. Clips are
+ * "clip n", never their file names (which can hold names, places or dates): the text may go to a
+ * cloud provider.
  */
 export function summaryText(s: RoundSummary): string {
   const lines = [`round "${s.name}" course "${s.course || '?'}" date ${s.date || '?'} clips ${s.clips.length} shots ${s.shots.length}`];
   for (const c of s.clips)
     lines.push(
-      `clip ${c.n} id=${c.id} "${c.name}" filmed=${c.recordedAt ?? '?'} ${c.seconds}s ${c.portrait ? 'portrait' : 'landscape'} gps=${c.gps ? 'y' : 'n'} hole=${c.hole || '?'} par=${c.par ?? '?'} shots=${c.shots}`,
+      `clip ${c.n} id=${c.id} filmed=${c.recordedAt ?? '?'} ${c.seconds}s ${c.portrait ? 'portrait' : 'landscape'} gps=${c.gps ? 'y' : 'n'} hole=${c.hole || '?'} par=${c.par ?? '?'} shots=${c.shots}`,
     );
   for (const x of s.shots)
     lines.push(
-      `shot ${x.n} id=${x.id} clip=${x.clip} t=${x.t} hole=${x.hole || '?'} par=${x.par ?? '?'} club=${x.club} carry=${x.carrySuggestM ? `~${x.carrySuggestM}` : (x.carryM ?? '?')} apex=${x.apexM ?? '?'} conf=${x.confidence} flags=${[...x.flags, ...(x.nextOff ? ['next_shot_distance'] : [])].join(',') || '-'}${x.nextM ? ` next=${x.nextM}` : ''}`,
+      `shot ${x.n} id=${x.id} clip=${x.clip} t=${x.t} hole=${x.hole || '?'} par=${x.par ?? '?'} club=${x.club} carry=${x.carrySuggestM ? `~${x.carrySuggestM}` : (x.carryM ?? '?')} apex=${x.apexM ?? '?'} conf=${x.confidence} flags=${[...x.flags, ...(x.nextOff ? ['next_shot_distance'] : [])].join(',') || '-'}${x.nextM ? ` next=${x.nextM}` : ''}${x.tags?.length ? ` tags=${x.tags.join(',')}` : ''}`,
     );
+  for (const p of s.putts)
+    if (p.tags?.length) lines.push(`putt clip=${p.clip} t=${p.t} hole=${p.hole || '?'} holed=${p.holed ? 'y' : 'n'} tags=${p.tags.join(',')}`);
   // Only with putts on video can a hole be complete.
   const holes = s.putts.length ? s.holes : [];
   if (holes.length) {

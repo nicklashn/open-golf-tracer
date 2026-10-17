@@ -14,6 +14,7 @@
  */
 import { z } from 'zod';
 import { PLAN_KINDS, PUTT_MODES, VideoPlan, type PlanAnswers } from './plan';
+import { guardFacts } from './facts';
 import { summaryText, type RoundSummary } from './summary';
 
 export const AI_PROVIDERS = ['none', 'ollama', 'openai-compatible', 'anthropic', 'chatgpt'] as const;
@@ -24,8 +25,10 @@ export interface AiConfig {
   model: string;
   baseUrl: string;
   apiKey: string;
-  /** Ceiling for all tokens (in + out) one video may use. */
+  /** Ceiling for the plan calls' tokens (in + out) of one video. */
   maxTokens: number;
+  /** A separate allowance for looking at still frames (vision.ts); default DEFAULT_VISION_TOKENS. */
+  visionMaxTokens?: number;
   /** Per request (ms). */
   timeoutMs?: number;
   /** Why there is no usable key (chatgpt: not signed in, or the sign-in could not be renewed). */
@@ -35,15 +38,15 @@ export interface AiConfig {
 export const AI_DEFAULTS: Record<Exclude<AiProvider, 'none'>, { baseUrl: string; model: string }> = {
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' },
   'openai-compatible': { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  anthropic: { baseUrl: 'https://api.anthropic.com', model: 'claude-opus-5-5' },
+  anthropic: { baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-5-5' },
   // The model is picked from the signed-in account's list.
   chatgpt: { baseUrl: 'https://api.openai.com/v1', model: '' },
 };
 /** Where users review and change what this app may use of their ChatGPT plan. */
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage';
-export const DEFAULT_AI_MAX_TOKENS = 8000;
+export const DEFAULT_AI_MAX_TOKENS = 16000;
 /** Output budget per call: the plan is small (target ≤ 800 tokens); reasoning models need room to think. */
-const OUTPUT_TOKENS = 2000;
+export const OUTPUT_TOKENS = 2000;
 
 export interface AiUsage {
   calls: number;
@@ -51,6 +54,8 @@ export interface AiUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Of the tokens above, those spent looking at still frames (their own allowance, see vision.ts). */
+  visionTokens?: number;
 }
 export const noUsage = (): AiUsage => ({ calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 export const addUsage = (a: AiUsage, b: AiUsage): AiUsage => ({
@@ -59,7 +64,10 @@ export const addUsage = (a: AiUsage, b: AiUsage): AiUsage => ({
   outputTokens: a.outputTokens + b.outputTokens,
   cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
   cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+  ...(a.visionTokens || b.visionTokens ? { visionTokens: (a.visionTokens ?? 0) + (b.visionTokens ?? 0) } : {}),
 });
+/** Tokens the plan calls have used (all minus those of the still frames). */
+export const planTokensUsed = (u: AiUsage) => u.inputTokens + u.outputTokens - (u.visionTokens ?? 0);
 const add = addUsage;
 
 /** A failure the user should see as it is (wrong key, Ollama not running, token ceiling). */
@@ -77,7 +85,7 @@ export class AiError extends Error {
 
 export const SYSTEM_PROMPT = `You plan golf videos for an editing app. The app has already analysed the clips and made a plan with fixed rules ("rule plan"). Your job is to adjust that plan to the user's wish. You never see video – only a summary with one line per clip and per shot.
 
-Summary fields: clip n, filmed time, hole/par from GPS, shots in the clip; shot n, clip, t (seconds into the clip), hole, par, club, carry/apex in metres ('?' = unknown), conf (0–1 confidence of the analysis), flags (analysis warnings: no_track, implausible, carry_mismatch, default_path, next_shot_distance = doubtful flight; short_shot, low_confidence, few_points, start_extrapolated, manual), next (metres by GPS to the next stroke; carry=~N is a guess from it). A last "score" line gives strokes/par and putts per hole ('?' = not every stroke was filmed: never guess a score).
+Summary fields: clip n, filmed time, hole/par from GPS, shots in the clip; shot n, clip, t (seconds into the clip), hole, par, club, carry/apex in metres ('?' = unknown), conf (0–1 confidence of the analysis), flags (analysis warnings: no_track, implausible, carry_mismatch, default_path, next_shot_distance = doubtful flight; short_shot, low_confidence, few_points, start_extrapolated, manual), next (metres by GPS to the next stroke; carry=~N is a guess from it, never a fact), tags (highlights found by the app: eagle, birdie, longest = longest measured carry, close = approach close to the next stroke, long_putt = long holed putt; "putt" lines list tagged putts). A last "score" line gives strokes/par and putts per hole ('?' = not every stroke was filmed: never guess a score).
 
 You may change:
 - kind: "youtube" (16:9 video of the round), "highlight" (one vertical short of all shots) or "shorts" (one vertical short per shot). Follow the user's wish; keep the rule plan's choice when the wish says nothing about format.
@@ -86,8 +94,8 @@ You may change:
 - putts: null (the app's default: each hole's putting in "youtube", only holed putts otherwise), "none", "holed" or "all". Putts are shown as plain video, never traced. Keep null unless the wish mentions putts.
 - order: shot ids in playing order, only when the user asks for another order; otherwise an empty list.
 - title: a short video title in the user's language.
-- shotTexts: at most one short line (≤ 60 characters) for a few notable shots, e.g. "Longest drive of the day". Use only facts from the summary. Empty when not useful.
-- description: 1–3 sentences for posting the video (YouTube/social), in the user's language, only facts from the summary.
+- shotTexts: at most one short line (≤ 60 characters) for a few notable shots, e.g. "Longest drive of the day" – prefer shots with tags. Use only facts from the summary; any number must be one of its values (no ~ guesses), or the text is dropped. Empty when not useful.
+- description: 1–3 sentences for posting the video (YouTube/social), in the user's language, only facts from the summary (same rule for numbers).
 - questions: the rule plan's questions with the SAME ids, option ids and number of questions. You may only rewrite "text" and option "label" to read better in the user's language, and pick a different "default" among the existing option ids when the wish clearly implies it (e.g. "only good shots" → leave doubtful shots out). Never add or remove questions or options.
 - notes: short notes for the user (assumptions you made). At most 3.
 
@@ -168,13 +176,19 @@ const AiAnswer = z.object({
 
 /** The model's own words in the user message: summary, wish, rule plan and (second call) answers. */
 export function userMessage(summary: RoundSummary, preference: string, rulePlan: VideoPlan, answers?: PlanAnswers | null): string {
+  const hide = withoutFileNames(summary);
   const plan = {
     kind: rulePlan.kind,
     template: rulePlan.template,
     putts: rulePlan.putts ?? null,
     includeShotIds: rulePlan.includeShotIds,
     title: rulePlan.title,
-    questions: rulePlan.questions.map((q) => ({ id: q.id, text: q.text, options: q.options, default: q.default })),
+    questions: rulePlan.questions.map((q) => ({
+      id: q.id,
+      text: hide(q.text),
+      options: q.options.map((o) => ({ ...o, label: hide(o.label) })),
+      default: q.default,
+    })),
   };
   return [
     'SUMMARY',
@@ -187,6 +201,19 @@ export function userMessage(summary: RoundSummary, preference: string, rulePlan:
     JSON.stringify(plan),
     ...(answers ? ['', 'ANSWERS (question id → chosen option id; shot:<shot id> → keep or drop for that one shot, which wins)', JSON.stringify(answers)] : []),
   ].join('\n');
+}
+
+/**
+ * Clip file names out of a text for the model (the rules' questions say "clip 3 (IMG_0042.MOV)"):
+ * "(name)" goes, a bare name becomes "clip n". Names too short to be told apart from words stay.
+ */
+export function withoutFileNames(summary: RoundSummary): (text: string) => string {
+  const names = summary.clips.filter((c) => c.name.trim().length >= 3).sort((a, b) => b.name.length - a.name.length);
+  return (text) => {
+    let t = text;
+    for (const c of names) t = t.split(` (${c.name})`).join('').split(c.name).join(`clip ${c.n}`);
+    return t;
+  };
 }
 
 /**
@@ -206,9 +233,11 @@ export function mergeAiPlan(rulePlan: VideoPlan, raw: unknown, allowedTemplates:
     return { ...q, text: m.text?.trim() || q.text, options, default: m.default && q.options.some((o) => o.id === m.default) ? m.default : q.default };
   });
   const template = a.template === undefined ? rulePlan.template : a.template && allowedTemplates.includes(a.template) ? a.template : rulePlan.template;
-  const shotTexts = Object.fromEntries(
-    (a.shotTexts ?? []).filter((t) => allowed.has(t.shotId) && t.text.trim()).map((t) => [t.shotId, t.text.trim().slice(0, 80)]),
-  );
+  // The rules' lines (highlights) stay for shots kept; the model's own win.
+  const shotTexts = {
+    ...Object.fromEntries(Object.entries(rulePlan.shotTexts ?? {}).filter(([id]) => include.includes(id))),
+    ...Object.fromEntries((a.shotTexts ?? []).filter((t) => allowed.has(t.shotId) && t.text.trim()).map((t) => [t.shotId, t.text.trim().slice(0, 80)])),
+  };
   return VideoPlan.parse({
     ...rulePlan,
     kind: a.kind ?? rulePlan.kind,
@@ -647,7 +676,7 @@ export async function planWithAI(
   let feedback = '';
   for (let attempt = 0; attempt < 2; attempt++) {
     const message = feedback ? `${user}\n\nYOUR PREVIOUS ANSWER WAS INVALID: ${feedback}\nAnswer again with a valid JSON object.` : user;
-    const spent = usage.inputTokens + usage.outputTokens;
+    const spent = planTokensUsed(usage);
     const next = estimateTokens(SYSTEM_PROMPT, message) + OUTPUT_TOKENS;
     if (spent + next > cfg.maxTokens)
       throw new AiError(`This video would use more than AI_MAX_TOKENS (${cfg.maxTokens}) tokens: ${spent} used, about ${next} more needed.`, 'budget');
@@ -668,11 +697,16 @@ export async function planWithAI(
       outputTokens: c.usage.outputTokens,
       cacheReadTokens: c.usage.cacheReadTokens,
     });
+    let merged: VideoPlan;
     try {
-      return { plan: mergeAiPlan(rulePlan, parseJson(c.text), opts.allowedTemplates), usage, fellBack: false };
+      merged = mergeAiPlan(rulePlan, parseJson(c.text), opts.allowedTemplates);
     } catch (e) {
       feedback = e instanceof z.ZodError ? z.prettifyError(e).slice(0, 600) : String(e instanceof Error ? e.message : e).slice(0, 600);
+      continue;
     }
+    const guarded = guardFacts(merged, summary, { preference, fallbackTitle: rulePlan.title });
+    if (guarded.dropped.length) opts.log?.('ai facts dropped', { provider: cfg.provider, model: cfg.model, dropped: guarded.dropped });
+    return { plan: guarded.plan, usage, fellBack: false };
   }
   return { plan: rulePlan, usage, fellBack: true };
 }
