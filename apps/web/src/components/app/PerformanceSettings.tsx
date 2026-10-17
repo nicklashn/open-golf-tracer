@@ -111,8 +111,8 @@ export function PerformanceSettings() {
   function does(p: Perf) {
     return (
       f(T.does, {
-        analyses: f(T.analyses, { n: p.analyses }),
-        ingests: f(T.ingests, { n: p.ingests }),
+        analyses: p.analyses === 1 ? T.analysesOne : f(T.analyses, { n: p.analyses }),
+        ingests: p.ingests === 1 ? T.ingestsOne : f(T.ingests, { n: p.ingests }),
         threads: p.threads ? f(T.someCores, { n: p.threads }) : T.allCores,
       }) + (hw.inference !== 'CPU' && p.sessions > 1 ? ` · ${f(T.sessions, { n: p.sessions })}` : '')
     );
