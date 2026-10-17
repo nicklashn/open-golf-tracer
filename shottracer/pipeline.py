@@ -11,7 +11,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 from . import audio as audio_mod
+from . import clean as clean_mod
 from . import putt as putt_mod
 from .detect import Ball, BallDetector, feet_roi, get_detector, pick_golfer
 from .impact import Impact, PresenceProbe, ball_left, choose_impact
@@ -229,11 +230,25 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
     green = auto and _by_green(opt)
     spans: list[tuple[float, float]] = []   # followed for putts
     ticks: list | None = None
+    # The motion around each strike (clean.py) is measured in the background, beside the detector.
+    motion_pool = ThreadPoolExecutor(max_workers=1)
 
-    def emit(doc: dict, t: float) -> None:
+    def motion(t0: float, t1: float, golfer) -> Future:
+        return motion_pool.submit(clean_mod.measure_span, info, t0, t1, golfer)
+
+    def emit(doc: dict, t: float, moved: Future | None = None, land: float | None = None) -> None:
         sound = audio_mod.signature(*aud, t) if aud else None
         if sound:
             doc["sound"] = sound
+        if moved is not None:
+            try:
+                clean = clean_mod.window(moved.result(), t, land if land is not None else t, opt.slowmo, doc["kind"] == "putt")
+            except Exception as exc:  # noqa: BLE001 - the window is a nicety: the shot stands without it
+                _log(f"clean window failed: {exc}")
+                clean = None
+            if clean:
+                doc["clean"] = clean
+                _log(f"clean {clean['from']:.1f}-{clean['to']:.1f} s around {t:.1f} s")
         shots.append(doc)
         if on_shot:
             on_shot(doc)
@@ -253,6 +268,7 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
         impact = _find_impact(info, addr, strikes, opt, stop=stop)
         if impact is not None and any(abs(impact.time - t) < MIN_SHOT_GAP for t in used):
             continue
+        moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo), addr.golfer) if impact is not None and not green else None
         sh, err = None, None
         if impact is not None and not green:
             try:
@@ -266,9 +282,10 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
             putts, span = _putts(info, det, addr, opt, ticks, len(shots))
             if putts:
                 spans.append(span)
-                for doc in putts:
+                moves = [motion(*clean_mod.scan_range(d["impactTime"], opt.slowmo, d["putt"]["end"]), addr.golfer) for d in putts]
+                for doc, mv in zip(putts, moves):
                     used.append(doc["impactTime"])
-                    emit(doc, doc["impactTime"])
+                    emit(doc, doc["impactTime"], mv, doc["putt"]["end"])
                 if impact is None or any(abs(d["impactTime"] - impact.time) < 1.0 for d in putts):
                     continue
         if impact is None:
@@ -282,7 +299,11 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
             warnings.append(err or "")
             continue
         used.append(impact.time)
-        emit(_shot_doc(info, sh, len(shots), opt), impact.time)
+        if moved is None:
+            moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo), addr.golfer)
+        flight_s = float(sh.stats.get("flight_time_s") or 4.0) if sh.stats else 4.0
+        emit(_shot_doc(info, sh, len(shots), opt), impact.time, moved, impact.time + (sh.flight.t_offset + flight_s) * opt.slowmo)
+    motion_pool.shutdown(cancel_futures=True)   # on an error it winds down once collected
     _settle_putts(shots, info.diag)
     shots.sort(key=lambda s: s["impactTime"])
     report(1.0, "done")

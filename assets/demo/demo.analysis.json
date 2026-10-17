@@ -409,7 +409,11 @@
         "camera_height_m": 1.36,
         "camera_pitch_deg": 6.0
       },
-      "impactMethod": "bold forsvinder + lyd"
+      "impactMethod": "bold forsvinder + lyd",
+      "clean": {
+        "from": 0.0,
+        "to": 13.8
+      }
     },
     {
       "id": "shot2_12599",
@@ -608,7 +612,11 @@
         "camera_height_m": 1.33,
         "camera_pitch_deg": 3.2
       },
-      "impactMethod": "bold forsvinder + lyd"
+      "impactMethod": "bold forsvinder + lyd",
+      "clean": {
+        "from": 9.967,
+        "to": 19.867
+      }
     }
   ],
   "warnings": [],

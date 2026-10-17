@@ -140,6 +140,10 @@ export const Shot = z.object({
   /** Putts only: source-video seconds when the ball came to rest or dropped, and whether it was
    *  holed (null = unknown). Several putts on one green are separate shots in order. */
   putt: z.object({ end: seconds, holed: z.boolean().nullable().default(null) }).optional(),
+  /** Source-video seconds between which the picture around the shot is clean (shottracer/clean.py):
+   *  from when the golfer stands set up at address, until someone walks toward the camera, enters
+   *  from the edge or the camera is moved. Generated videos cut inside it. Absent in older projects. */
+  clean: z.object({ from: seconds, to: seconds }).optional(),
   confidence: unit.default(1),
   warnings: z.array(ShotWarning).default([]),
   camera: z.object({ cx: finite, cy: finite }),
