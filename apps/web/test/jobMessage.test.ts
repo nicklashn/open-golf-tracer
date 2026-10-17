@@ -18,6 +18,16 @@ describe('job progress messages', () => {
     expect(jobMessage(null, en)).toBe('');
   });
 
+  it('translates the exporter’s steps and errors, and hides ffmpeg’s own text', () => {
+    expect(jobMessage('Preparing graphics', da)).toBe('Forbereder grafikken');
+    expect(jobMessage('Exporting', da)).toBe('Laver videoen');
+    expect(jobMessage('Mixing the sound', da)).toBe('Mixer lyden');
+    expect(jobMessage('Finishing the video', en)).toBe('Finishing the video');
+    expect(jobMessage('Canceled by the user', da)).toBe('Annulleret');
+    expect(jobMessage('Clip 3 is missing its video', da)).toBe(da.jobs.messages.missingVideo);
+    expect(jobMessage('ffmpeg failed (1): Invalid data found when processing input', da)).toBe(da.jobs.messages.exportFailed);
+  });
+
   it('reads well in English too', () => {
     expect(jobMessage('Queued', en)).toBe('Queued – starts when there is room');
     expect(jobMessage('2 shots found', en)).toBe('2 shots found so far');

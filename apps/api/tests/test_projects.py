@@ -178,3 +178,21 @@ def test_finished_export_can_be_watched_as_well_as_downloaded(client, tiny_video
         row.status, row.storage_key = "succeeded", "x/exports/e.mp4"
     done = client.get(f"/api/exports/{e['id']}").json()
     assert done["url"] and done["previewUrl"] and done["url"] != done["previewUrl"]
+
+
+def test_export_job_carries_the_ui_language(client, tiny_video):
+    """The exporter draws stat cards and dates in the language the user asked for the export in."""
+    from golf_api.db import session_scope
+    from golf_api.models import Export, Job
+
+    pid = upload(client, tiny_video)["projectId"]
+    e = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}, "locale": "da"}).json()
+    plain = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}}).json()
+    odd = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}, "locale": "xx"}).json()
+    with session_scope() as db:
+        def payload(x):
+            return db.get(Job, db.get(Export, x["id"]).job_id).payload
+
+        assert payload(e)["locale"] == "da"
+        # Without one (older web apps) the account's language is used.
+        assert payload(plain)["locale"] in ("da", "en") and payload(odd)["locale"] in ("da", "en")
