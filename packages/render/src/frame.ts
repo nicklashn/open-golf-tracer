@@ -8,6 +8,7 @@ import { clipAt, cropAt, flightTimeAt, type Crop, type Project, type Shot } from
 import type { Locale } from './i18n';
 import { drawLayer, placeLayer, placementBounds, type LayerEnv } from './layers';
 import { Painter, type ImageData8 } from './painter';
+import { hasRollLine, renderRollLine, rollGeometry, rollLineBounds, type RollGeometry } from './rollLine';
 import { geometry, renderTracer, shotKey, sourcePath, tracerBounds, type Affine, type Geometry } from './tracer';
 import { Surface, type Rect } from './vector';
 
@@ -55,6 +56,8 @@ export interface ShotOnScreen {
   /** Flight seconds since launch. */
   s: number;
   tf: Affine;
+  /** Source-video second on screen (putts' roll lines run on it). */
+  sourceTime: number;
 }
 
 export function shotsOnScreen(oc: Pick<OverlayContext, 'project' | 'width'>, t: number): ShotOnScreen[] {
@@ -64,8 +67,8 @@ export function shotsOnScreen(oc: Pick<OverlayContext, 'project' | 'width'>, t: 
   for (const shot of oc.project.shots) {
     if (!shot.visible || shot.mediaId !== st.mediaId) continue;
     const s = flightTimeAt(shot, st.tracerTime);
-    if (s < 0) continue;
-    out.push({ shot, s, tf: st.tf });
+    if (s < 0 && shot.kind !== 'putt') continue;
+    out.push({ shot, s, tf: st.tf, sourceTime: st.sourceTime });
   }
   return out.sort((a, b) => a.shot.impactTime - b.shot.impactTime);
 }
@@ -79,6 +82,21 @@ export function shotGeometry(shot: Shot, tf: Affine): Geometry | null {
   const g = sp ? geometry(sp, shot.style, tf, shot.constraints.start ?? shot.anchor) : null;
   if (geomCache.size > 64) geomCache.delete(geomCache.keys().next().value!);
   geomCache.set(key, g);
+  return g;
+}
+
+const rollCache = new Map<string, RollGeometry | null>();
+
+/** A putt's roll line in output pixels (null when it has none or it is switched off). */
+export function shotRollGeometry(project: Pick<Project, 'media'>, shot: Shot, tf: Affine): RollGeometry | null {
+  const media = project.media[shot.mediaId];
+  if (!media || !hasRollLine(shot)) return null;
+  const p = shot.putt!.path!;
+  const key = `${shot.id}|${p.length}|${p[0].t},${p[p.length - 1].t},${p[p.length - 1].x},${p[p.length - 1].y}|${shot.putt!.holed}|${shot.style.width}|${media.width}x${media.height}|${tf.ox.toFixed(3)},${tf.oy.toFixed(3)},${tf.scale.toFixed(6)}`;
+  if (rollCache.has(key)) return rollCache.get(key)!;
+  const g = rollGeometry(shot, media, tf);
+  if (rollCache.size > 64) rollCache.delete(rollCache.keys().next().value!);
+  rollCache.set(key, g);
   return g;
 }
 
@@ -119,10 +137,18 @@ export function layerEnv(oc: OverlayContext, t: number): LayerEnv {
 
 /** Draws the complete overlay for timeline time t. The caller clears the surface first. */
 export function renderOverlay(surface: Surface, oc: OverlayContext, t: number): Rect | null {
+  const size = { width: oc.width, height: oc.height };
   for (const it of shotsOnScreen(oc, t)) {
+    // Putts are never traced; they may have a roll line on the green instead.
+    if (it.shot.kind === 'putt') {
+      const rg = shotRollGeometry(oc.project, it.shot, it.tf);
+      const r = rg ? renderRollLine(rg, it.shot.style, it.sourceTime, size) : null;
+      if (r) surface.blitRGBA(r.x, r.y, r.w, r.h, r.data);
+      continue;
+    }
     const g = shotGeometry(it.shot, it.tf);
     if (!g) continue;
-    const r = renderTracer(g, it.shot.style, it.s, { width: oc.width, height: oc.height });
+    const r = renderTracer(g, it.shot.style, it.s, size);
     if (r) surface.blitRGBA(r.x, r.y, r.w, r.h, r.data);
   }
   const p = new Painter(surface);
@@ -155,6 +181,11 @@ function clamp(r: Rect | null, W: number, H: number): Rect | null {
 export function frameBounds(oc: OverlayContext, t: number): Rect | null {
   let r: Rect | null = null;
   for (const it of shotsOnScreen(oc, t)) {
+    if (it.shot.kind === 'putt') {
+      const rg = shotRollGeometry(oc.project, it.shot, it.tf);
+      if (rg) r = union(r, rollLineBounds(rg, it.sourceTime, { width: oc.width, height: oc.height }));
+      continue;
+    }
     const g = shotGeometry(it.shot, it.tf);
     if (g) r = union(r, tracerBounds(g, it.shot.style, it.s, { width: oc.width, height: oc.height }));
   }

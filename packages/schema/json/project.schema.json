@@ -456,6 +456,34 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "path": {
+                "maxItems": 600,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 86400
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "x",
+                    "y"
+                  ]
+                }
+              },
+              "line": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -3102,6 +3130,34 @@
         "muted": {
           "default": false,
           "type": "boolean"
+        }
+      }
+    },
+    "scoreEdits": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "par": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 7
+          },
+          "strokes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "putts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          }
         }
       }
     }

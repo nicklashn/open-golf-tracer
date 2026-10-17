@@ -213,7 +213,7 @@ til ONNX Runtime, OpenCV og ffmpeg-afkodning).
 |---|---|---|---|
 | Skånsom | 1 / 1 | 1 session | halvdelen af kernerne |
 | Balanceret (standard) | 1 / 2 (1 ved ≤ 4 kerner) | 1 session | alle |
-| Maks | GPU: 3 ved ≥ 10 GB VRAM, 2 ved ≥ 6 GB, ellers 1; CPU: 2 ved ≥ 12 kerner / op til 4 | lige så mange sessioner som analyser (GPU) | alle |
+| Maks | GPU: 3 ved ≥ 10 GB VRAM, 2 ved ≥ 6 GB, ellers 1; CPU: 2 ved ≥ 12 kerner / op til 4 | CUDA: lige så mange sessioner som analyser; DirectML: 1 delt | alle |
 | Tilpasset denne pc | målt af Optimér | målt | målt |
 
 RAM begrænser altid: ≈ 3 GB pr. analyse (sekunder af full-HD-billeder), 1 GB pr. ingest.
@@ -221,10 +221,21 @@ RAM begrænser altid: ≈ 3 GB pr. analyse (sekunder af full-HD-billeder), 1 GB 
 **Optimér** er jobbet `tune` (`golf_worker/tuner.py`, 30–60 s): finder CPU-kerner, RAM
 (`GlobalMemoryStatusEx` / `/proc/meminfo`), GPU og VRAM (`nvidia-smi`) og ONNX Runtimes providers, og kører
 så detektoren på billeder fra demo-klippet – først flere billeder pr. kald (kun hvis modellen har en dynamisk
-batch-dimension; den udgivne er fast 1), så flere sessioner side om side (kun på GPU; på CPU deler de bare
-kernerne). Den stopper ved første af: fejl (fx fuld VRAM), VRAM over 80 % (også *før* et trin, der ud fra
-sidste trins forbrug ikke ville passe), under 5 % gevinst, eller tidsgrænsen. Bedste sikre trin gemmes som
-"Tilpasset denne pc" med målt hastighed i forhold til Balanceret.
+batch-dimension; den udgivne er fast 1), så flere sessioner side om side (kun CUDA; på CPU deler de bare
+kernerne), så flere kaldere på samme session (som analyser side om side). Hver dimension stopper ved: fejl
+(fx fuld VRAM), VRAM over 80 % (også *før* et trin, der ud fra sidste trins forbrug ikke ville passe) eller
+under 5 % gevinst – og den næste prøves stadig; tidsgrænsen stopper det hele. På en GPU måles til sidst
+afkodning af 1, 2, … videoer side om side, for når detektoren kører på GPU'en, er den en lille del af en
+analyse (3 min 1080p60 med 18 slag: ~100 detektorkald, ~10.000 afkodede billeder); det bestemmer antal
+analyser ad gangen. Bedste sikre trin gemmes som "Tilpasset denne pc" med målt hastighed i forhold til
+Balanceret; hvert trin (med fejltekst) vises under "Detaljer om testen".
+
+Optimér har analysebanen for sig selv: venter den, startes ingen nye analyser, og den starter først, når de
+kørende er færdige (`golf_worker/main.claimable`). Den kan stoppes fra siden.
+
+**DirectML:** to sessioner, der kører samtidig, fejlede på et RTX 5070 (`DmlFusedNode … DmlGraphFusionHelper`),
+selvom ORT's dokumentation tillader det. Derfor én session og ét `Run`-kald ad gangen i processen (en lås i
+`shottracer/detect.py`), mens næste billede forberedes på CPU'en (`parallel` = sessioner + 1 på en GPU).
 
 **Nødbremse:** fejler en analyse med out-of-memory eller en mistet GPU (DirectML `887A0005` m.fl.,
 `performance.is_device_error`), sænkes den gemte profil ét trin (Tilpasset/Maks → Balanceret → Skånsom →

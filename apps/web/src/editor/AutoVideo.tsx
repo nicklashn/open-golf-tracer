@@ -221,6 +221,23 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
                         })
                       }
                     />
+                    {!q.items?.length && q.clipIds.length ? (
+                      // A question about clips (no GPS, no shots, the order): look at the first one.
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="mt-1.5"
+                        data-testid="auto-show-clip"
+                        onClick={() => {
+                          onOpenChange(false);
+                          ops.jumpToMedia(q.clipIds[0]);
+                        }}
+                      >
+                        <MonitorPlay aria-hidden />
+                        {T.showInEditor}
+                      </Button>
+                    ) : null}
                     {q.items?.length ? (
                       <ShotCards
                         q={q}

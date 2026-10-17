@@ -119,10 +119,12 @@ from the next job:
 - **Gentle** – half the CPU cores, one analysis and one video at a time: the PC stays usable.
 - **Balanced** (default) – all cores for one analysis at a time.
 - **Max** – several analyses and videos at once (on a GPU: 3 with ≥ 10 GB graphics memory, 2 with ≥ 6 GB).
-- **Tuned for this PC** – made by **Optimise**, a 30–60 s benchmark of the ball detector that tries more
-  detector sessions side by side and stops at the first error, at 80 % of the graphics memory, or when it
-  gets no faster. It shows the result, e.g. "≈ 2.4× faster ball finding than Balanced; GPU: RTX 5070 –
-  use up to 3 analyses at once".
+- **Tuned for this PC** – made by **Optimise**, a 30–60 s benchmark of the ball detector (frames per call,
+  sessions on CUDA, analyses sharing it) and, on a GPU, of decoding videos side by side – most of an
+  analysis once the detector runs on the GPU. Each step stops at an error, at 80 % of the graphics memory,
+  or when it gets no faster. It shows the result, e.g. "≈ 1.6× faster ball finding than Balanced; GPU:
+  RTX 5070 – use up to 3 analyses at once", and every step it tried under "Details". It waits for running
+  analyses and can be stopped.
 
 If an analysis runs out of memory or loses the GPU, it is retried once with the next lower profile, which
 is then kept (shown in the same place). Stored in `data/performance.json`.

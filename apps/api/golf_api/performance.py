@@ -172,7 +172,8 @@ def for_profile(name: str, hw: dict[str, Any], tuned: dict[str, Any] | None = No
             n = 2 if cores >= 12 else 1
         n = min(n, _ram_cap(hw, RAM_PER_ANALYSIS_MB))
         ingests = min(MAX_INGESTS, max(2, cores // 4), _ram_cap(hw, RAM_PER_INGEST_MB))
-        return Perf(analyses=n, ingests=ingests, sessions=n if gpu else 1, batch=4, threads=0)
+        # DirectML runs one detector call at a time (shottracer.detect), so more sessions only cost memory.
+        return Perf(analyses=n, ingests=ingests, sessions=n if hw.get("inference") == "CUDA" else 1, batch=4, threads=0)
     if name == "tuned" and tuned:
         return Perf.from_dict(tuned)
     return Perf(analyses=1, ingests=ingest_default, sessions=1, batch=1, threads=0)
@@ -203,11 +204,20 @@ def load() -> dict[str, Any]:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError
-    except (OSError, ValueError):
+    except OSError:   # e.g. Windows: the file is being replaced right now; the next read sees it
+        return {"profile": "balanced", "rev": 0}
+    except ValueError:
         data = {}
+    # A file from an older version or edited by hand must not stop the worker.
+    for key in ("tuned", "fallback"):
+        if not isinstance(data.get(key), dict):
+            data.pop(key, None)
     if data.get("profile") not in PROFILES or (data.get("profile") == "tuned" and not data.get("tuned")):
         data["profile"] = "balanced"
-    data.setdefault("rev", 0)
+    try:
+        data["rev"] = int(data.get("rev", 0))
+    except (TypeError, ValueError):
+        data["rev"] = 0
     _cache.update(path=p, mtime=mtime, data=data)
     return json.loads(json.dumps(data))
 
@@ -216,9 +226,16 @@ def _save(data: dict[str, Any]) -> dict[str, Any]:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     data["rev"] = int(data.get("rev", 0)) + 1
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")   # the API and the worker both write it
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    for attempt in range(20):
+        try:
+            tmp.replace(p)
+            break
+        except PermissionError:   # Windows: another process is reading the file this instant
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
     _cache.clear()
     return data
 

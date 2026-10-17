@@ -10,6 +10,7 @@ import functools
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -301,12 +302,15 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
 
     `Runtime.sessions` sessions may run at once (each costs GPU memory); a model exported with a
     dynamic batch dimension takes up to `Runtime.batch` frames per call (the published one is
-    fixed at 1)."""
+    fixed at 1). With DirectML there is one session and one Run call at a time in the process:
+    two sessions running side by side failed on an RTX 5070 ("DmlFusedNode ... DmlGraphFusionHelper"),
+    though the ORT docs allow it. The GPU stays busy by preparing the next frames meanwhile."""
 
     name = "rf-detr-onnx"
     RESOLUTION = 704
     MEAN = np.array([0.485, 0.456, 0.406], np.float32)
     STD = np.array([0.229, 0.224, 0.225], np.float32)
+    _SUB, _MUL = MEAN * 255, 1 / (STD * 255)   # the normalisation on 0-255 values
     NUM_SELECT = 300
     CACHE: int = 8   # the last few images: people() and ball() on the same frame run the network once
 
@@ -319,7 +323,7 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
         path = model or ensure_onnx_model()
         available = ort.get_available_providers()
         providers = [p for p in ("DmlExecutionProvider", "CUDAExecutionProvider") if p in available and rt.gpu]
-        n = max(1, rt.sessions)
+        n = 1 if "DmlExecutionProvider" in providers else max(1, rt.sessions)
 
         def options(gpu: bool):
             opts = ort.SessionOptions()
@@ -333,13 +337,16 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
             return opts
 
         sessions = []
+        error = None
         try:
             for _ in range(n):
                 sessions.append(ort.InferenceSession(str(path), options(True), providers=[*providers, "CPUExecutionProvider"]))
-        except Exception:  # a broken GPU driver must not stop the analysis; a full GPU keeps the sessions it has
+        except Exception as exc:  # a broken GPU driver must not stop the analysis; a full GPU keeps the sessions it has
+            error = f"{type(exc).__name__}: {exc}"
             if not sessions:
                 sessions = [ort.InferenceSession(str(path), options(False), providers=["CPUExecutionProvider"])]
         self._init(sessions, rt.batch)
+        self.session_error = error   # why fewer sessions (or the CPU) were used; Optimise shows it
 
     def _init(self, sessions: list, batch: int = 1) -> None:
         self.provider = sessions[0].get_providers()[0] if hasattr(sessions[0], "get_providers") else "CPUExecutionProvider"
@@ -349,6 +356,7 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
         self.batch = max(1, batch) if not isinstance(dim, int) else max(1, dim)
         self.fixed_batch = dim if isinstance(dim, int) else None
         self.sessions = len(sessions)
+        self.session_error: str | None = None
         self._free: queue.SimpleQueue = queue.SimpleQueue()   # one Run call per session at a time (DirectML)
         for s in sessions:
             self._free.put(s)
@@ -359,18 +367,23 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
 
     @property
     def parallel(self) -> int:
-        return self.sessions
+        """Callers worth having at once: on a GPU one more than the sessions, so a frame is
+        prepared on the CPU while the network runs on another."""
+        return self.sessions + (self.provider != "CPUExecutionProvider")
 
     def _prep(self, img: np.ndarray) -> np.ndarray:
         # rfdetr: RGB in [0, 1], bilinear resize without antialiasing, ImageNet normalisation.
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
-        x = cv2.resize(rgb, (self.RESOLUTION, self.RESOLUTION), interpolation=cv2.INTER_LINEAR)
-        return np.ascontiguousarray(((x - self.MEAN) / self.STD).transpose(2, 0, 1), np.float32)
+        # Resize and channel order commute with the per-pixel scaling, so they come first and the
+        # arithmetic runs on 704x704 values, not a full-HD frame's (the same result, 39 -> 19 ms on 4 cores).
+        x = cv2.resize(img.astype(np.float32), (self.RESOLUTION, self.RESOLUTION), interpolation=cv2.INTER_LINEAR)
+        x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+        return np.ascontiguousarray(((x - self._SUB) * self._MUL).transpose(2, 0, 1))
 
     def _run(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         s = self._free.get()
         try:
-            boxes, logits = s.run(None, {self.input: x})
+            with _DML_RUN if self.provider == "DmlExecutionProvider" else nullcontext():
+                boxes, logits = s.run(None, {self.input: x})
         finally:
             self._free.put(s)
         return boxes, logits
@@ -382,16 +395,22 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
         todo = [i for i, r in enumerate(out) if r is None]
         chunks = [todo[j:j + self.batch] for j in range(0, len(todo), self.batch)]
 
-        def run(chunk: list[int]):
+        def prep(chunk: list[int]) -> np.ndarray:
             x = np.stack([self._prep(imgs[i]) for i in chunk])
             if self.fixed_batch and len(x) < self.fixed_batch:
                 x = np.concatenate([x, np.zeros((self.fixed_batch - len(x), *x.shape[1:]), np.float32)])
-            boxes, logits = self._run(x)
+            return x
+
+        def run(chunk: list[int], x: np.ndarray | None = None):
+            boxes, logits = self._run(prep(chunk) if x is None else x)
             return [(boxes[j:j + 1], logits[j:j + 1]) for j in range(len(chunk))]
 
         if len(chunks) > 1 and self.sessions > 1:
             with ThreadPoolExecutor(max_workers=min(self.sessions, len(chunks))) as ex:
                 results = list(ex.map(run, chunks))
+        elif len(chunks) > 1:   # one session: the next frames are prepared while the network runs
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                results = [run(c, x) for c, x in zip(chunks, ex.map(prep, chunks))]
         else:
             results = [run(c) for c in chunks]
         with self._cache_lock:
@@ -440,6 +459,7 @@ class BlobBallDetector(BallDetector):
 
 
 _detector_lock = threading.Lock()
+_DML_RUN = threading.Lock()   # one DirectML Run call at a time in the process (see OnnxRfDetrBallDetector)
 _loaded: dict[tuple, BallDetector] = {}
 
 

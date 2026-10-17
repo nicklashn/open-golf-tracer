@@ -165,6 +165,7 @@ function ShotRow({ shot, n, selected, units, retracking }: { shot: Shot; n: numb
         role="button"
         tabIndex={0}
         aria-pressed={selected}
+        data-shot={shot.id}
         onClick={() => ops.jumpToShot(shot)}
         onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), ops.jumpToShot(shot))}
         className={cn(

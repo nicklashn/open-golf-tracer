@@ -129,6 +129,9 @@ export const ShotConstraints = z.object({
 });
 export type ShotConstraints = z.infer<typeof ShotConstraints>;
 
+export const RollPoint = z.object({ t: seconds, x: finite, y: finite });
+export type RollPoint = z.infer<typeof RollPoint>;
+
 export const Shot = z.object({
   id,
   mediaId: id,
@@ -139,7 +142,18 @@ export const Shot = z.object({
   impactTime: seconds,
   /** Putts only: source-video seconds when the ball came to rest or dropped, and whether it was
    *  holed (null = unknown). Several putts on one green are separate shots in order. */
-  putt: z.object({ end: seconds, holed: z.boolean().nullable().default(null) }).optional(),
+  putt: z
+    .object({
+      end: seconds,
+      holed: z.boolean().nullable().default(null),
+      /** The path the ball rolled (smoothed, ~12 points/s): source-video seconds and fractions of
+       *  the source frame. Only putts whose tracked path passed the analysis' reliability gate
+       *  (shottracer/putt.py `roll_path`) have one; absent in older projects. */
+      path: RollPoint.array().max(600).optional(),
+      /** Draw the roll line along `path` (off unless switched on). */
+      line: z.boolean().optional(),
+    })
+    .optional(),
   /** Source-video seconds between which the picture around the shot is clean (shottracer/clean.py):
    *  from when the golfer stands set up at address, until someone walks toward the camera, enters
    *  from the edge or the camera is moved. Generated videos cut inside it. Absent in older projects. */
@@ -411,6 +425,22 @@ export type HoleInfoProps = z.infer<typeof HoleInfoProps>;
 export type DistanceProps = z.infer<typeof DistanceProps>;
 
 // ---------------------------------------------------------------------------------------------
+// Score corrections
+
+/**
+ * What the user knows better than the clips about one hole: its par, the strokes it took
+ * (all of them, putts included) and the putts. A field left out keeps what the analysis found.
+ * Putts settle the hole's putts question (the last one went in); strokes give the hole a score
+ * even when not every stroke was filmed.
+ */
+export const HoleEdit = z.object({
+  par: z.number().int().min(2).max(7).optional(),
+  strokes: z.number().int().min(1).max(20).optional(),
+  putts: z.number().int().min(0).max(10).optional(),
+});
+export type HoleEdit = z.infer<typeof HoleEdit>;
+
+// ---------------------------------------------------------------------------------------------
 // Project
 
 export const Project = z.object({
@@ -441,6 +471,8 @@ export const Project = z.object({
   layers: z.array(Layer).max(300).default([]),
   audioTracks: z.array(AudioClip).max(20).default([]),
   audio: z.object({ originalVolume: z.number().min(0).max(2).default(1), muted: z.boolean().default(false) }).default({ originalVolume: 1, muted: false }),
+  /** The user's corrections to the score, by hole ('7'), see `HoleEdit`. Optional: older projects have none. */
+  scoreEdits: z.record(z.string().min(1).max(8), HoleEdit).optional(),
 });
 export type Project = z.infer<typeof Project>;
 export type ProjectInput = z.input<typeof Project>;

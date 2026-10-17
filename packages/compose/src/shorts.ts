@@ -108,8 +108,8 @@ export function puttEnd(putt: Shot): number {
   return Math.max(putt.impactTime, putt.putt?.end ?? putt.impactTime + PUTT_ROLL_S * putt.slowmo);
 }
 
-/** A short of one putt: vertical, from just before the stroke to a second after the ball stops, no tracer. */
-export function puttShort(doc: Project, putt: Shot, name: string): Project {
+/** A short of one putt: vertical, from just before the stroke to a second after the ball stops, no tracer (and no roll line unless `rollLine`). */
+export function puttShort(doc: Project, putt: Shot, name: string, opts: { rollLine?: boolean } = {}): Project {
   const media = doc.media[putt.mediaId];
   const { a, b } = cleanSpan(
     putt,
@@ -132,7 +132,9 @@ export function puttShort(doc: Project, putt: Shot, name: string): Project {
     ...doc,
     name,
     clips,
-    shots: [putt],
+    // The roll line is left out of shorts unless asked for: the crop pans with the ball and the
+    // narrow frame is busy with text already.
+    shots: [opts.rollLine || !putt.putt ? putt : { ...putt, putt: { ...putt.putt, line: false } }],
     format: { aspect: '9:16', reframe: { mode: 'auto', keyframes: keys } },
     layers: [],
   });

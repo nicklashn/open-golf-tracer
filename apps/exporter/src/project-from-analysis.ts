@@ -6,6 +6,7 @@ const SHOT_KEYS = new Set([
   'id',
   'source',
   'kind',
+  'putt',
   'impactTime',
   'confidence',
   'warnings',

@@ -7,7 +7,7 @@ import { byTimeline, migrateProject, newId, timelineDuration, type Clip, type La
 import { layerDefaults, type LayerNames } from './layers';
 import { defaultPutts, puttQuestionId, resolveAnswers, shotChoices, type PlanAnswers, type VideoPlan } from './plan';
 import { BROLL_S, shotScore } from './rules';
-import { holeScores } from './score';
+import { editedPuttAnswer, holeScores } from './score';
 import { puttShort, shortFor } from './shorts';
 import { byHole, roundMedia } from './chronology';
 import { clipOrder, summarize } from './summary';
@@ -31,7 +31,8 @@ export interface ComposeOptions {
  * Putts keep the analysis' visibility (unsure ones stay hidden); an answer to `putts:<hole>`
  * shows the last N found (all for "4+") and says whether the last went in. `uncut` lists the
  * holes with more putts than were found (their putting is not shortened), `settled` the holes
- * whose putts question was answered (by the user or the vision step; a default does not count).
+ * whose putts question was answered (by the user, on the scorecard or in the dialog, or by the
+ * vision step; a default does not count).
  */
 export function prepare(
   doc: Project,
@@ -67,10 +68,12 @@ export function prepare(
   const settled: string[] = [];
   for (const h of summary.holes) {
     const id = puttQuestionId(h.hole);
-    const choice = a[id];
+    // The putts the user set on the scorecard answer the question for good.
+    const edited = editedPuttAnswer(doc.scoreEdits?.[h.hole]);
+    const choice = edited ?? a[id];
     const ids = summary.putts.filter((p) => p.hole === h.hole).map((p) => p.id);
     if (!choice || !ids.length) continue;
-    const answered = answers?.[id] === choice;
+    const answered = edited !== null || answers?.[id] === choice;
     if (answered) settled.push(h.hole);
     if (choice === 'notHoled') putts.get(ids[ids.length - 1])!.holed = false;
     else {
@@ -118,7 +121,7 @@ export function prepare(
   const shots = doc.shots.map((s) => {
     if (byId.has(s.id)) return { ...s, visible: keep.has(s.id) };
     const p = putts.get(s.id);
-    return p ? { ...s, visible: p.visible, putt: { end: s.putt?.end ?? s.impactTime, holed: p.holed } } : s;
+    return p ? { ...s, visible: p.visible, putt: { ...s.putt, end: s.putt?.end ?? s.impactTime, holed: p.holed } } : s;
   });
   const broll = a.noShots === 'broll' ? (q('noShots')?.clipIds ?? []) : [];
   return { doc: migrateProject({ ...doc, media, clips, shots }), broll, uncut, settled };

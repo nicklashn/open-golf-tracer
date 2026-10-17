@@ -19,6 +19,8 @@ import time
 import traceback
 from pathlib import Path
 
+from sqlalchemy import select
+
 ROOT = Path(__file__).resolve().parents[3]
 for p in (ROOT, ROOT / "apps" / "api"):
     if str(p) not in sys.path:
@@ -38,6 +40,10 @@ log = logging.getLogger("golf.worker")
 LANES = {"media": ["ingest"], "analysis": ["analyze", "retrack", "tune"]}
 LANE_MAX = {"media": performance.MAX_INGESTS, "analysis": performance.MAX_ANALYSES}
 HEARTBEAT_S = 15
+ALONE = {"tune"}   # runs with nothing else in its lane: it measures the GPU, and must not fill it under an analysis
+
+_busy: dict[str, list[str]] = {}   # lane -> kinds of the jobs it runs now
+_busy_lock = threading.Lock()
 
 
 def lane_threads(lane: str) -> int:
@@ -103,16 +109,40 @@ def run_job(job_id: str) -> None:
         stop.set()
 
 
+def claimable(db, lane: str, kinds: list[str]) -> list[str]:
+    """The kinds a free thread of this lane may claim now (call with _busy_lock held). A waiting
+    Optimise gets the lane to itself: no new analyses start until it has run, the running ones
+    finish first."""
+    alone = [k for k in kinds if k in ALONE]
+    if not alone:
+        return kinds
+    busy = _busy.get(lane, [])
+    if any(k in ALONE for k in busy):
+        return []
+    waiting = db.scalars(select(Job.id).where(Job.status == "queued", Job.kind.in_(alone))).first()
+    if waiting:
+        return [] if busy else alone
+    return [k for k in kinds if k not in ALONE]
+
+
 def lane_loop(name: str, kinds: list[str], once: bool, worker_id: str, slot: int = 0, lane: str = "") -> None:
     idle = 0.5
+    lane = lane or name
     while True:
         jid = None
-        if slot < lane_threads(lane or name):
-            with session_scope() as db:
-                j = jobs.claim(db, kinds, f"{worker_id}:{name}")
-                jid = j.id if j else None
+        if slot < lane_threads(lane):
+            with session_scope() as db, _busy_lock:
+                now = claimable(db, lane, kinds)
+                j = jobs.claim(db, now, f"{worker_id}:{name}") if now else None
+                if j:
+                    jid, kind = j.id, j.kind
+                    _busy.setdefault(lane, []).append(kind)
         if jid:
-            run_job(jid)
+            try:
+                run_job(jid)
+            finally:
+                with _busy_lock:
+                    _busy[lane].remove(kind)
             idle = 0.5
             continue
         if once:

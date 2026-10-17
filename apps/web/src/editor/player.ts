@@ -127,6 +127,7 @@ export class PlayerEngine {
       });
       v.addEventListener('seeked', () => this.invalidate());
       v.dataset.variant = m.urls.proxy ? 'proxy' : 'original';
+      v.dataset.media = m.id;
     }
     return v;
   }

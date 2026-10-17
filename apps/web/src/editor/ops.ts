@@ -17,6 +17,7 @@ import {
   type Clip,
   type Club,
   type GeoPoint,
+  type HoleEdit,
   type Keyframe,
   type Layer,
   type Project,
@@ -27,6 +28,7 @@ import {
 import type { Draft } from 'immer';
 import { courseMapGeometry, haversine, type CourseData } from './course';
 import { refitter } from './refit';
+import { revealTime } from './reveal';
 import { rippleLinked, timelineRemap } from './ripple';
 import { useEditor, type MediaInfo, type Selection } from './store';
 
@@ -49,13 +51,89 @@ export function shotLaunchTime(doc: Project, shot: Shot): number | null {
   return t.length ? t[0] : null;
 }
 
-export function jumpToShot(shot: Shot): void {
-  const t = shotLaunchTime(E().doc, shot);
-  E().select({ kind: 'shot', id: shot.id });
-  if (t != null) {
-    E().setPlaying(false);
-    E().setTime(Math.max(0, t - 0.6));
+/** Seconds shown before a shot's launch when jumping to it. */
+export const SHOT_LEAD_S = 0.6;
+
+/**
+ * Where a jump to the shot lands: SHOT_LEAD_S before its launch, but never before the start of
+ * the clip that shows the launch – a lead-in reaching back into the previous clip would show
+ * another video (often another hole). Null when no clip on the timeline shows the launch.
+ */
+export function shotCueTime(doc: Project, shot: Shot): number | null {
+  const launch = Math.max(0, shot.impactTime + shot.timing.launchOffset);
+  let start = 0;
+  for (const c of doc.clips) {
+    if (c.mediaId === shot.mediaId && c.kind === 'video' && launch >= c.in - 1e-6 && launch <= c.out + 1e-6) {
+      const t = start + (launch - c.in) / c.speed;
+      return Math.max(start, t - SHOT_LEAD_S);
+    }
+    start += clipDuration(c);
   }
+  return null;
+}
+
+/** Called when a shot to show is not on the timeline (its clip was removed or trimmed away). */
+let onMissing: ((shot: Shot) => void) | null = null;
+export function onShotMissing(fn: ((shot: Shot) => void) | null): void {
+  onMissing = fn;
+}
+
+/**
+ * Shows a shot: selects it and moves the playhead (and the preview) to just before its launch,
+ * scrolling the timeline to it. Playback keeps going from there when it was playing. Returns
+ * false when the shot is not on the timeline (the editor then offers to put it back).
+ */
+export function jumpToShot(shot: Shot): boolean {
+  const s = E();
+  s.select({ kind: 'shot', id: shot.id });
+  const t = shotCueTime(s.doc, shot);
+  if (t == null) {
+    onMissing?.(shot);
+    return false;
+  }
+  seekTo(t);
+  return true;
+}
+
+/** Moves the playhead to `t` and the timeline to the playhead; playing goes on from there. */
+export function seekTo(t: number): void {
+  const s = E();
+  const playing = s.playing;
+  // The player follows `time` only while paused: stop, seek, and start again from there.
+  if (playing) s.setPlaying(false);
+  s.setTime(t);
+  revealTime(E().time);
+  if (playing) E().setPlaying(true);
+}
+
+/**
+ * Puts a shot that is not on the timeline back: its whole video as a clip when none of it is
+ * there (in round order), else the nearest clip of its video trimmed open to show it. One undo step.
+ */
+export function restoreShot(shot: Shot): boolean {
+  const doc = E().doc;
+  const m = E().media[shot.mediaId] ?? doc.media[shot.mediaId];
+  if (!m || m.kind !== 'video') return false;
+  const launch = Math.max(0, shot.impactTime + shot.timing.launchOffset);
+  const flight = (shotStats(shot)?.flightTimeS ?? 3) * shot.slowmo;
+  const end = shot.kind === 'putt' ? (shot.putt?.end ?? launch) : launch + flight;
+  const own = doc.clips.filter((c): c is Extract<Clip, { kind: 'video' }> => c.kind === 'video' && c.mediaId === shot.mediaId);
+  if (!own.length) {
+    editTimeline('Add clip', (d) => {
+      if (!d.media[m.id]) return;
+      d.clips.splice(clipSlot(d, m.id), 0, { id: newId('c_'), kind: 'video', mediaId: m.id, in: 0, out: m.duration, speed: 1, volume: 1, muted: false });
+    });
+  } else {
+    const dist = (c: { in: number; out: number }) => (launch < c.in ? c.in - launch : launch - c.out);
+    const c = own.reduce((a, b) => (dist(b) < dist(a) ? b : a));
+    editTimeline('Trim', (d) => {
+      const x = d.clips.find((y) => y.id === c.id);
+      if (!x || x.kind !== 'video') return;
+      if (launch < x.in) x.in = Math.max(0, launch - 1.5);
+      else x.out = Math.min(m.duration, Math.max(x.out, end + 1.5));
+    });
+  }
+  return shotCueTime(E().doc, shot) != null;
 }
 
 function updateShot(label: string, id: string, fn: (s: Draft<Shot>) => void, key?: string) {
@@ -78,6 +156,12 @@ export function setShotVisible(id: string, visible: boolean) {
 export function setPuttHoled(id: string, holed: boolean | null) {
   updateShot('Putt', id, (s) => {
     if (s.putt) s.putt.holed = holed;
+  });
+}
+
+export function setPuttLine(id: string, line: boolean) {
+  updateShot('Roll line', id, (s) => {
+    if (s.putt) s.putt.line = line;
   });
 }
 
@@ -918,4 +1002,49 @@ export function insertShot(shot: Shot) {
     },
     { select: { kind: 'shot', id: shot.id } },
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Score
+
+/**
+ * Corrects one hole on the scorecard: a number sets it, null goes back to what the clips say.
+ * Stored in `scoreEdits` (used by the scorecard, the made videos and the AI summary).
+ */
+export function setHoleEdit(hole: string, patch: Partial<Record<keyof HoleEdit, number | null>>) {
+  E().edit(
+    'Score',
+    (d) => {
+      const e: HoleEdit = { ...(d.scoreEdits?.[hole] ?? {}) };
+      for (const [k, v] of Object.entries(patch) as [keyof HoleEdit, number | null | undefined][]) {
+        if (v == null) delete e[k];
+        else e[k] = v;
+      }
+      const all = { ...(d.scoreEdits ?? {}) };
+      if (Object.keys(e).length) all[hole] = e;
+      else delete all[hole];
+      if (Object.keys(all).length) d.scoreEdits = all;
+      else delete d.scoreEdits;
+    },
+    { key: `score:${hole}:${Object.keys(patch).join()}` },
+  );
+}
+
+/** Sets the hole a clip was filmed on by hand (no GPS, or GPS off the course); '' clears it. */
+export function setClipHole(mediaId: string, hole: string) {
+  E().edit('Hole', (d) => {
+    const m = d.media[mediaId];
+    if (!m) return;
+    if (m.place) m.place.hole = hole;
+    else if (hole) m.place = { course: '', hole, par: null, fromTee: null, toGreen: null, line: [] };
+  });
+}
+
+/** Moves the playhead to where a video first appears on the timeline. */
+export function jumpToMedia(mediaId: string): boolean {
+  const doc = E().doc;
+  const i = doc.clips.findIndex((c) => c.mediaId === mediaId);
+  if (i < 0) return false;
+  seekTo(clipStarts(doc.clips)[i]);
+  return true;
 }
