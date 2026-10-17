@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,9 @@ router = APIRouter(tags=["exports"])
 class ExportIn(BaseModel):
     settings: dict
     document: dict | None = None      # the editor sends its current document (saved first)
+    # A made video's description and chapters for YouTube, as the export dialog showed them;
+    # kept with the export so "My videos" can copy it.
+    publishText: str | None = Field(None, max_length=8000)
 
 
 def public_export(db: Session, e: Export) -> dict:
@@ -47,7 +50,8 @@ def create_export(project_id: str, body: ExportIn, db: Session = Depends(get_db)
     missing = [mid for mid in doc.get("media", {}) if mid not in media]
     if missing:
         raise ApiError(422, "unknown_media", "The project refers to files that do not exist.")
-    e = Export(user_id=user.id, project_id=p.id, project_name=p.name, settings=s)
+    kept = {**s, "publishText": body.publishText.strip()} if body.publishText and body.publishText.strip() else s
+    e = Export(user_id=user.id, project_id=p.id, project_name=p.name, settings=kept)
     db.add(e)
     db.flush()
     job = jobs.enqueue(db, "export", {"export_id": e.id, "document": doc, "settings": s},

@@ -15,6 +15,8 @@ import { api, errorMessage } from '@/lib/api';
 import { relativeTime } from '@/lib/format';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
+import { publishText } from '@golf/compose';
+import { YoutubeText } from '@/components/app/YoutubeText';
 import { saveNow } from './autosave';
 import { useEditor } from './store';
 import { migrateProject } from '@golf/schema';
@@ -55,6 +57,9 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
   const aspect = preset === 'shorts' ? '9:16' : doc.format.aspect;
   const size = media ? outputSize(aspect, preset, media) : null;
   const hasSelection = inPoint != null && outPoint != null && outPoint > inPoint;
+  const part = range === 'selection' && hasSelection ? { start: inPoint, end: outPoint } : null;
+  // A made video's description and chapters, timed from the timeline as it is now (and the part exported).
+  const youtube = doc.publish ? publishText(doc, part) : '';
 
   async function start() {
     setBusy(true);
@@ -68,6 +73,7 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
           range: range === 'selection' && hasSelection ? { start: inPoint, end: outPoint } : null,
         },
         document: useEditor.getState().doc,
+        ...(youtube ? { publishText: youtube } : {}),
       };
       const e = await api<ExportRow>(`/projects/${useEditor.getState().projectId}/exports`, { body });
       onStarted(e);
@@ -145,6 +151,7 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
               />
             </div>
           </div>
+          {youtube ? <YoutubeText text={youtube} rows={5} /> : null}
           <div className="space-y-1 text-[13px] text-fg-muted">
             {size ? (
               <p className="tabular">

@@ -1,6 +1,7 @@
 import { migrateProject, type Project } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_AI_MAX_TOKENS,
   bestShots,
   explainPreference,
   factNumbers,
@@ -207,10 +208,11 @@ describe('the fact guard', () => {
 });
 
 describe('token estimates', () => {
-  it('a full round needs more than one call fits in the old 8 000 ceiling when it asks', () => {
+  it('a full round that asks needs room for both calls, within the default ceiling', () => {
     const e = typicalTokenEstimate();
     expect(e.plan).toBeGreaterThan(4000);
-    expect(e.needed).toBeGreaterThan(8000);
+    expect(e.needed).toBeGreaterThan(e.plan);
+    expect(e.needed).toBeLessThanOrEqual(DEFAULT_AI_MAX_TOKENS);
     expect(e.vision).toBe(0);
     const v = typicalTokenEstimate({ vision: true });
     expect(v.vision).toBeGreaterThan(0);

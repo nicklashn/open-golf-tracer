@@ -31,6 +31,8 @@ def _short_map(v: dict[str, str] | None, limit: int, max_len: int) -> dict[str, 
 
 class AutoVideoIn(BaseModel):
     projectId: str = Field(max_length=40)
+    # The format picked on a card; the free-text wish cannot change it. None = from the wish.
+    kind: str | None = Field(None, pattern="^(youtube|highlight|shorts)$")
     preference: str = Field("", max_length=1000)
     locale: str = Field("en", pattern="^(da|en)$")
     # Layer names as the user's layer panel shows them, so generated layers read the same.
@@ -70,6 +72,7 @@ def start(body: AutoVideoIn, db: Session = Depends(get_db), user: User = Depends
         raise ApiError(422, "unknown_media", "Some of the chosen clips are not in this project.")
     payload = {
         "project_id": p.id,
+        "kind": body.kind,
         "preference": body.preference.strip(),
         "locale": body.locale,
         "names": body.names,
@@ -107,7 +110,7 @@ class AiSettingsIn(BaseModel):
     baseUrl: str = Field("", max_length=300, pattern=r"^(|https?://\S+)$")
     # None keeps the stored key, "" removes it.
     apiKey: str | None = Field(None, max_length=400)
-    maxTokens: int = Field(16000, ge=500, le=200_000)
+    maxTokens: int = Field(20000, ge=500, le=200_000)
     # Still frames from the green when the putt count is unsure; None keeps the stored choice.
     vision: bool | None = None
 

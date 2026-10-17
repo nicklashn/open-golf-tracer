@@ -67,6 +67,10 @@ export class InternalApi {
   defer(id: string, seconds: number, message: string) {
     return this.call<{ status: string }>('POST', `/jobs/${id}/defer`, { seconds, message });
   }
+  /** Merges `data` into the job's payload, so a retry of the job starts from there. */
+  checkpoint(id: string, data: Record<string, unknown>) {
+    return this.call<{ ok: boolean }>('POST', `/jobs/${id}/checkpoint`, { data });
+  }
   awaitAnswers(id: string, result: Record<string, unknown>, message?: string) {
     return this.call<{ status: string }>('POST', `/jobs/${id}/await`, { result, message });
   }

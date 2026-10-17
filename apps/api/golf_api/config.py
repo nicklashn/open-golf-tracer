@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     ai_model: str = Field("", alias="AI_MODEL")
     ai_base_url: str = Field("", alias="AI_BASE_URL")
     ai_api_key: str = Field("", alias="AI_API_KEY")
-    ai_max_tokens: int = Field(16000, alias="AI_MAX_TOKENS")
+    ai_max_tokens: int = Field(20000, alias="AI_MAX_TOKENS")
     # Let the model look at a few still frames from the green when the putt count is unsure.
     ai_vision: bool = Field(False, alias="AI_VISION")
 

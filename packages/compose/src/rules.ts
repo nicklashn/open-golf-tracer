@@ -359,14 +359,18 @@ export function templatesFor(): string[] {
   return TEMPLATES.map((t) => t.id);
 }
 
-export function planFromRules(s: RoundSummary, preference: string, locale: Locale = 'en'): VideoPlan {
+/**
+ * The plan by fixed rules. `opts.kind` is the format the user picked (a card in the dialog): it
+ * wins over any format word in the wish, which can then only add to it ("only good shots" …).
+ */
+export function planFromRules(s: RoundSummary, preference: string, locale: Locale = 'en', opts: { kind?: PlanKind | null } = {}): VideoPlan {
   const T = L[locale];
   const pref = readPreference(preference);
   const questions: PlanQuestion[] = [];
   const notes: string[] = [T.noAi];
-  if (!pref.kind) notes.push(T.defaultKind);
+  if (!opts.kind && !pref.kind) notes.push(T.defaultKind);
   if (!s.shots.length) notes.push(T.noShotsAtAll);
-  const kind = pref.kind ?? 'youtube';
+  const kind = opts.kind ?? pref.kind ?? 'youtube';
   const clipName = (id: string) => {
     const c = s.clips.find((x) => x.id === id)!;
     return T.clip(c.n, c.name);

@@ -3164,6 +3164,39 @@
           }
         }
       }
+    },
+    "publish": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "default": "",
+          "type": "string",
+          "maxLength": 120
+        },
+        "description": {
+          "default": "",
+          "type": "string",
+          "maxLength": 5000
+        },
+        "intro": {
+          "default": "Intro",
+          "type": "string",
+          "maxLength": 100
+        },
+        "holes": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      }
     }
   },
   "required": [

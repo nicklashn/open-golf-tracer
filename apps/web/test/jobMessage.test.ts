@@ -6,6 +6,7 @@ import { jobMessage } from '../src/lib/jobMessage';
 describe('job progress messages', () => {
   it('puts the worker’s English progress text in Danish', () => {
     expect(jobMessage('Queued', da)).toBe(da.jobs.messages.queued);
+    expect(jobMessage('Retrying', da)).toBe('Noget gik galt – prøver igen om lidt');
     expect(jobMessage('Looking for the ball', da)).toBe('Leder efter bolden');
     expect(jobMessage('Analysing shot 3/5', da)).toBe('Analyserer slag 3/5');
     expect(jobMessage('4 shots found', da)).toBe('4 slag fundet indtil nu');

@@ -12,6 +12,7 @@ export function jobMessage(message: string | null | undefined, t: Dict): string 
   const T = t.jobs.messages;
   const fixed: Record<string, string> = {
     Queued: T.queued,
+    Retrying: T.retrying,
     Starter: T.starting,
     Starting: T.starting,
     'Reading the video': T.probe,

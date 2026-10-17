@@ -105,9 +105,20 @@ describe('vision: OpenAI-compatible (also Ollama /v1)', () => {
 
   it('counts the frames conservatively when the server reports no usage', async () => {
     replies.push(chat(JSON.stringify(answer), null));
-    const out = await resolvePuttsWithVision(openai({ provider: 'ollama', apiKey: '' }), HOLE, FRAMES);
+    const out = await resolvePuttsWithVision(openai({ apiKey: '' }), HOLE, FRAMES);
     expect(out.usage.inputTokens).toBeGreaterThanOrEqual(FRAMES.length * IMAGE_TOKENS);
     expect(out.usage.outputTokens).toBeGreaterThan(0);
+  });
+
+  it('Ollama gets the frames as plain base64 images on its own /api/chat, with room for them in the context', async () => {
+    replies.push({ status: 200, json: { message: { content: JSON.stringify(answer) }, prompt_eval_count: 3000, eval_count: 40 } });
+    const out = await resolvePuttsWithVision(openai({ provider: 'ollama', apiKey: '' }), HOLE, FRAMES);
+    expect(out.result).toEqual(answer);
+    const r = seen[0];
+    expect(r.url).toBe('/api/chat');
+    const messages = r.body.messages as { role: string; content: string; images?: string[] }[];
+    expect(messages[1].images).toEqual(FRAMES);
+    expect((r.body.options as { num_ctx: number }).num_ctx).toBeGreaterThanOrEqual(FRAMES.length * IMAGE_TOKENS);
   });
 
   it('a model without image support gives a clear error, never the key, and no result', async () => {

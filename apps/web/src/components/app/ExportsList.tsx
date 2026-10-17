@@ -1,6 +1,6 @@
 'use client';
 
-import { Download, Film, Play, Trash2 } from 'lucide-react';
+import { Check, Copy, Download, Film, Play, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
@@ -26,12 +26,14 @@ interface Row {
   duration: number;
   createdAt: string;
   jobId: string | null;
-  settings: { preset: 'shorts' | 'youtube1080' | 'youtube4k' | 'original' };
+  /** `publishText`: the made video's description and chapters, as exported. */
+  settings: { preset: 'shorts' | 'youtube1080' | 'youtube4k' | 'original'; publishText?: string };
 }
 
 export function ExportsList() {
   const { t, locale } = useI18n();
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const load = useCallback(
     () =>
       api<{ exports: Row[] }>('/exports').then(
@@ -105,6 +107,21 @@ export function ExportsList() {
                     <Play />
                     {t.exporter.play}
                   </a>
+                </Button>
+              ) : null}
+              {r.settings.publishText ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-testid="copy-youtube"
+                  title={t.youtube.hint}
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(r.settings.publishText ?? '').catch(() => {});
+                    setCopied(r.id);
+                  }}
+                >
+                  {copied === r.id ? <Check /> : <Copy />}
+                  {copied === r.id ? t.youtube.copied : t.youtube.copy}
                 </Button>
               ) : null}
               {r.url ? (

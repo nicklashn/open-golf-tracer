@@ -1,7 +1,24 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { AiError, planFromRules, planWithAI, SYSTEM_PROMPT, summarize, testConnection, type AiConfig } from '../src';
+import {
+  aiErrorJson,
+  AiError,
+  DEFAULT_AI_MAX_TOKENS,
+  estimateTokens,
+  largeRound,
+  ollamaContext,
+  parseAiError,
+  planFromRules,
+  planWithAI,
+  summarize,
+  summaryText,
+  SYSTEM_PROMPT,
+  testConnection,
+  userMessage,
+  videoTokenEstimate,
+  type AiConfig,
+} from '../src';
 import { roundProject } from './fixtures';
 
 /** A fake provider: records requests, answers from a queue. */
@@ -168,16 +185,171 @@ describe('OpenAI-compatible adapter (Ollama, LM Studio, OpenAI, OpenRouter)', ()
     expect(e3.message).toContain('Cannot reach Ollama');
   });
 
-  it('retries once after a network error', async () => {
+  it('sends once more only when the request never reached the server', async () => {
     let n = 0;
     const flaky: typeof fetch = async (url, init) => {
-      if (n++ === 0) throw new TypeError('fetch failed');
+      if (n++ === 0) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
       return fetch(url, init);
     };
     replies.push(chat('{"title": "Second try"}'));
     const out = await planWithAI(openai(), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES, fetch: flaky });
     expect(out.plan.title).toBe('Second try');
     expect(n).toBe(2);
+  });
+
+  it('never resends a request that timed out or broke off (it may be billed), and counts its tokens', async () => {
+    for (const thrown of [
+      Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }),
+      Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }),
+    ]) {
+      let n = 0;
+      const slow: typeof fetch = async () => {
+        n++;
+        throw thrown;
+      };
+      const e = await planWithAI(openai(), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES, fetch: slow }).catch((x) => x);
+      expect(n).toBe(1);
+      expect(e).toBeInstanceOf(AiError);
+      expect(e.code).toBe('network');
+      expect(e.info.reason).toBe(thrown.name === 'TimeoutError' ? 'timeout' : 'broken');
+      // Counted as if the provider did the work: the prompt and a full answer.
+      expect(e.usage.calls).toBe(1);
+      expect(e.usage.inputTokens).toBeGreaterThan(estimateTokens(SYSTEM_PROMPT));
+    }
+  });
+
+  it('OpenAI reasoning models (gpt-5, o-series) get max_completion_tokens and no temperature', async () => {
+    replies.push(chat('{"title": "T"}'));
+    await planWithAI(openai({ model: 'gpt-5-mini' }), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES });
+    const b = seen[0].body;
+    expect(b.max_completion_tokens).toBeGreaterThan(0);
+    expect(b).not.toHaveProperty('max_tokens');
+    expect(b).not.toHaveProperty('temperature');
+    expect(b.reasoning_effort).toBe('low');
+    expect((b.response_format as { type: string }).type).toBe('json_schema');
+  });
+
+  it('a model that rejects max_tokens, then temperature, is asked again the way it wants (400s are not billed)', async () => {
+    replies.push(
+      {
+        status: 400,
+        json: {
+          error: {
+            message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+            param: 'max_tokens',
+            code: 'unsupported_parameter',
+          },
+        },
+      },
+      {
+        status: 400,
+        json: {
+          error: {
+            message: "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.",
+            param: 'temperature',
+            code: 'unsupported_value',
+          },
+        },
+      },
+      chat('{"title": "Reasoned"}'),
+    );
+    const out = await planWithAI(openai({ model: 'my-reasoner' }), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES });
+    expect(out.plan.title).toBe('Reasoned');
+    expect(seen.map((x) => [x.body.max_tokens ?? null, x.body.max_completion_tokens ?? null, x.body.temperature ?? null])).toEqual([
+      [2000, null, 0.2],
+      [null, 2000, 0.2],
+      [null, 2000, null],
+    ]);
+    // Structured output stays on: the 400s were about other parameters.
+    expect(seen.every((x) => (x.body.response_format as { type: string }).type === 'json_schema')).toBe(true);
+    expect(out.usage.calls).toBe(1);
+  });
+});
+
+describe('Ollama (its own /api/chat)', () => {
+  const ollama = (extra: Partial<AiConfig> = {}) => openai({ provider: 'ollama', model: 'llama3.1', apiKey: '', ...extra });
+  const reply = (content: string) => ({ status: 200, json: { message: { role: 'assistant', content }, done: true, prompt_eval_count: 5100, eval_count: 120 } });
+
+  it('sizes the context window to the prompt, so a whole round is not cut off at 2–4k tokens', async () => {
+    const big = largeRound();
+    replies.push(reply('{"title": "Hele runden"}'));
+    const out = await planWithAI(ollama(), big.summary, '', big.plan, null, { allowedTemplates: TEMPLATES, kind: 'youtube' });
+    const r = seen[0];
+    expect(r.url).toBe('/api/chat'); // the old /v1 base URL still works
+    expect(r.body.stream).toBe(false);
+    expect(r.body.format).toMatchObject({ type: 'object' }); // the JSON schema
+    const prompt = estimateTokens(SYSTEM_PROMPT, userMessage(big.summary, '', big.plan, null, 'youtube'));
+    const ctx = (r.body.options as { num_ctx: number }).num_ctx;
+    expect(prompt).toBeGreaterThan(4096);
+    expect(ctx).toBeGreaterThanOrEqual(prompt * 1.3 + 2000);
+    expect(ctx % 2048).toBe(0);
+    expect(out.plan.title).toBe('Hele runden');
+    expect(out.usage).toMatchObject({ calls: 1, inputTokens: 5100, outputTokens: 120 });
+  });
+
+  it('the window stays small for small prompts and within what Ollama can hold', () => {
+    expect(ollamaContext(300, 0, 256)).toBe(4096);
+    expect(ollamaContext(10_000, 0, 2000)).toBe(16_384);
+    expect(ollamaContext(1e6, 0, 2000)).toBe(131_072);
+  });
+
+  it('falls back to "json" on Ollama before 0.5, and says how to get a missing model', async () => {
+    replies.push({ status: 400, json: { error: 'invalid format' } }, reply('{"title": "Old"}'));
+    const out = await planWithAI(ollama(), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES });
+    expect(seen.map((x) => (typeof x.body.format === 'string' ? x.body.format : 'schema'))).toEqual(['schema', 'json']);
+    expect(out.plan.title).toBe('Old');
+
+    replies.push({ status: 404, json: { error: "model 'llama9' not found" } });
+    const e = await planWithAI(ollama({ model: 'llama9' }), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES }).catch((x) => x);
+    expect(e.message).toContain('ollama pull llama9');
+    expect(e.info).toMatchObject({ reason: 'ollamaPull', model: 'llama9' });
+  });
+});
+
+describe('what the model sees and may change', () => {
+  it('names shots by number, and their numbers come back as ids', async () => {
+    const msg = userMessage(summary, '', rulePlan, { 'retake:s2:s3': 'last', 'shot:s2': 'keep' });
+    expect(summaryText(summary)).toMatch(/^shot 1 clip=1 t=\S+ hole=1 /m);
+    expect(summaryText(summary)).not.toContain('id=');
+    expect(msg).toContain('"includeShots":[1,2,3]');
+    expect(msg).toContain('"shot:2":"keep"');
+    replies.push(chat(JSON.stringify({ includeShots: [1, 3], order: [3, 1], shotTexts: [{ shot: 3, text: 'Andet forsøg' }] })));
+    const { plan } = await planWithAI(openai(), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES });
+    expect(plan.includeShotIds).toEqual(['s1', 's3']);
+    expect(plan.order).toEqual(['s3', 's1']);
+    expect(plan.shotTexts?.s3).toBe('Andet forsøg');
+  });
+
+  it('the format the user picked is its own line, and neither the wish nor the model can change it', async () => {
+    const rules = planFromRules(summary, 'en short af hvert slag', 'en', { kind: 'youtube' });
+    expect(rules.kind).toBe('youtube');
+    replies.push(chat(JSON.stringify({ kind: 'shorts', title: 'T' })));
+    const { plan } = await planWithAI(openai(), summary, 'en short af hvert slag', rules, null, { allowedTemplates: TEMPLATES, kind: 'youtube' });
+    expect((seen[0].body.messages as { content: string }[])[1].content).toContain('FORMAT\nyoutube\n');
+    expect(plan.kind).toBe('youtube');
+  });
+
+  it('a large round (100 shots) fits the default ceiling with both calls', () => {
+    const big = largeRound();
+    expect(estimateTokens(summaryText(big.summary))).toBeLessThan(3500);
+    const e = videoTokenEstimate(big.summary, '', big.plan);
+    expect(big.plan.questions.length).toBeGreaterThan(0);
+    expect(e.needed).toBeLessThanOrEqual(DEFAULT_AI_MAX_TOKENS);
+  });
+});
+
+describe('AI errors for the apps', () => {
+  it('travel as a code with the facts, short enough for the job error and without the key', async () => {
+    replies.push({ status: 401, json: { error: { message: `bad key ${KEY}` } } });
+    const e = await planWithAI(openai(), summary, '', rulePlan, null, { allowedTemplates: TEMPLATES }).catch((x) => x);
+    const text = aiErrorJson(e);
+    expect(text.length).toBeLessThan(500);
+    expect(text).not.toContain(KEY);
+    expect(parseAiError(text)).toMatchObject({ code: 'auth', reason: 'key', status: 401 });
+    expect(parseAiError('Workeren stoppede uventet.')).toBeNull();
+    const long = aiErrorJson(new AiError('x'.repeat(2000), 'http', { what: 'w', detail: 'd'.repeat(2000) }));
+    expect(long.length).toBeLessThan(500);
+    expect(parseAiError(long)?.code).toBe('http');
   });
 });
 

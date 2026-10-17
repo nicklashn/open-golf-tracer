@@ -22,7 +22,7 @@ def test_defaults_come_from_env(client, monkeypatch):
     s = client.get("/api/ai/settings").json()
     assert s["provider"] == "server"
     assert s["effective"] == {"provider": "ollama", "model": "qwen2.5", "baseUrl": "http://localhost:11434/v1", "source": "server",
-                              "keyMasked": "", "maxTokens": 16000, "cloud": False, "vision": False}
+                              "keyMasked": "", "maxTokens": 20000, "cloud": False, "vision": False}
     assert s["vision"] is False
 
 
@@ -97,7 +97,7 @@ def test_vision_is_off_by_default_and_round_trips(client, monkeypatch):
     assert r.json()["vision"] is False and r.json()["effective"]["vision"] is False
     r = client.put("/api/ai/settings", json={"provider": "server", "maxTokens": 9000, "vision": True})
     assert r.json()["effective"] | {"keyMasked": ""} == {"provider": "ollama", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1",
-                                                         "source": "server", "keyMasked": "", "maxTokens": 16000, "cloud": False,
+                                                         "source": "server", "keyMasked": "", "maxTokens": 20000, "cloud": False,
                                                          "vision": True}
 
     job = client.post("/api/ai/test").json()

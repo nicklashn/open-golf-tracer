@@ -178,3 +178,20 @@ def test_finished_export_can_be_watched_as_well_as_downloaded(client, tiny_video
         row.status, row.storage_key = "succeeded", "x/exports/e.mp4"
     done = client.get(f"/api/exports/{e['id']}").json()
     assert done["url"] and done["previewUrl"] and done["url"] != done["previewUrl"]
+
+
+def test_export_keeps_the_youtube_text_for_my_videos(client, tiny_video):
+    """The made video's description and chapters, as the export dialog showed them, can be copied later."""
+    from golf_api.db import session_scope
+    from golf_api.models import Job
+
+    pid = upload(client, tiny_video)["projectId"]
+    text = "Golfrunde på Testbane.\n\n0:00 Hul 1 – par 4\n0:40 Hul 2 – par 3\n1:30 Hul 3 – par 5"
+    e = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "youtube1080"}, "publishText": text}).json()
+    assert e["settings"]["publishText"] == text
+    assert client.get("/api/exports").json()["exports"][0]["settings"]["publishText"] == text
+    # The worker gets the export settings as they were (no text in them).
+    with session_scope() as db:
+        assert "publishText" not in db.get(Job, e["jobId"]).payload["settings"]
+    plain = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}}).json()
+    assert "publishText" not in plain["settings"]
