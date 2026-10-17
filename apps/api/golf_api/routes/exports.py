@@ -13,6 +13,7 @@ from ..documents import merged_document, validate_document
 from ..errors import ApiError, not_found
 from ..media_urls import export_url
 from ..models import Export, Job, Media, User
+from ..space import export_need, need_space
 from ..storage import storage
 from .projects import get_project
 
@@ -26,12 +27,17 @@ class ExportIn(BaseModel):
 
 def public_export(db: Session, e: Export) -> dict:
     job = db.get(Job, e.job_id) if e.job_id else None
-    return {"id": e.id, "projectId": e.project_id, "projectName": e.project_name, "settings": e.settings, "status": e.status,
+    status = e.status
+    if status in ("queued", "running") and job is not None and job.status in ("queued", "failed", "canceled"):
+        # Rows from before the queue kept them in step (an exporter that crashed mid-export).
+        status = job.status
+    return {"id": e.id, "projectId": e.project_id, "projectName": e.project_name, "settings": e.settings, "status": status,
             "progress": job.progress if job else (1.0 if e.status == "succeeded" else 0.0), "message": job.message if job else "",
             "jobId": e.job_id, "size": e.size, "width": e.width, "height": e.height, "duration": e.duration,
-            "url": export_url(e) if e.status == "succeeded" else None,
-            "previewUrl": export_url(e, download=False) if e.status == "succeeded" else None, "createdAt": e.created_at.isoformat(),
-            "finishedAt": e.finished_at.isoformat() if e.finished_at else None, "error": job.error[-300:] if job and e.status == "failed" else ""}
+            "url": export_url(e) if status == "succeeded" else None,
+            "previewUrl": export_url(e, download=False) if status == "succeeded" else None, "createdAt": e.created_at.isoformat(),
+            "finishedAt": e.finished_at.isoformat() if e.finished_at else None, "error": job.error[-300:] if job and status == "failed" else "",
+            "errorCode": jobs.public(job)["errorCode"] if job else ""}
 
 
 @router.post("/projects/{project_id}/exports")
@@ -47,6 +53,9 @@ def create_export(project_id: str, body: ExportIn, db: Session = Depends(get_db)
     missing = [mid for mid in doc.get("media", {}) if mid not in media]
     if missing:
         raise ApiError(422, "unknown_media", "The project refers to files that do not exist.")
+    seconds = sum((c["out"] - c["in"]) / (c.get("speed") or 1) if c.get("kind") == "video" else c.get("duration", 0)
+                  for c in doc.get("clips", []))
+    need_space(export_need(seconds, s["preset"]))
     e = Export(user_id=user.id, project_id=p.id, project_name=p.name, settings=s)
     db.add(e)
     db.flush()

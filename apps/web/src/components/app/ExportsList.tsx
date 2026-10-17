@@ -26,6 +26,7 @@ interface Row {
   duration: number;
   createdAt: string;
   jobId: string | null;
+  errorCode?: string;
   settings: { preset: 'shorts' | 'youtube1080' | 'youtube4k' | 'original' };
 }
 
@@ -84,6 +85,7 @@ export function ExportsList() {
                   {r.duration ? ` · ${duration(r.duration)}` : ''}
                   {r.size ? ` · ${bytes(r.size, locale)}` : ''} · {relativeTime(r.createdAt, locale)}
                 </p>
+                {r.status === 'failed' && r.errorCode === 'disk_full' ? <p className="mt-0.5 text-[12px] text-accent-fg">{t.errors.disk_full}</p> : null}
                 {r.status === 'queued' || r.status === 'running' ? (
                   <ProgressBar className="mt-2 max-w-xs" value={r.status === 'queued' ? null : r.progress} label={t.jobs.export} />
                 ) : null}

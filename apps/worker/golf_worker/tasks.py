@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import copy
 import gc
 import json
 import logging
@@ -18,10 +17,10 @@ from typing import Any
 
 import numpy as np
 
-from golf_api import performance
+from golf_api import performance, space
 from golf_api.chronology import epoch
-from golf_api.db import session_scope, utcnow
-from golf_api.documents import clean_shot
+from golf_api.db import session_scope, utcnow, write_lock
+from golf_api.documents import clean_shot, update_analysis
 from golf_api.models import Media, Project
 from golf_api.storage import storage, tmp_dir
 
@@ -54,6 +53,7 @@ _derived_lock = threading.Lock()   # ingest steps run in parallel and each rewri
 
 def _save_derived(media_id: str, key: str, path: Path, extra: dict[str, Any] | None = None) -> None:
     with _derived_lock, session_scope() as db:
+        write_lock(db)    # Settings → Storage may remove a proxy key meanwhile
         m = db.get(Media, media_id)
         if m is None:
             return
@@ -151,6 +151,8 @@ def ingest(job: dict, report: Report) -> dict:
     src = storage().local_path(m.storage_key)
     prefix = m.storage_key.rsplit("/", 1)[0]
     probe = m.probe or {}
+    # The preview is written next to the original: make sure it fits before an hour of encoding.
+    space.check_worker(int(src.stat().st_size * space.PROXY_SHARE) if src.exists() and m.kind != "image" else 0)
     work = tmp_dir() / f"ingest-{m.id}-{int(time.time())}"
     work.mkdir(parents=True, exist_ok=True)
     steps: list[tuple[str, Callable[[], None]]] = []
@@ -250,15 +252,13 @@ def waveform_peaks(src: Path) -> np.ndarray:
 
 def _store_analysis(project_id: str, media_id: str, shots: list[dict], status: str, warnings: list[str] | None = None,
                     place: dict | None = None) -> None:
-    with session_scope() as db:
-        p = db.get(Project, project_id)
-        if p is None:
-            return
-        a = copy.deepcopy(p.analysis or {})
+    def change(a: dict) -> None:
         prev = a.get(media_id, {})
         a[media_id] = {**prev, "shots": shots, "status": status, "warnings": warnings or [], "updatedAt": utcnow().isoformat(),
                        "place": place if place is not None else prev.get("place")}
-        p.analysis = a
+
+    with session_scope() as db:
+        update_analysis(db, project_id, change)
 
 
 def _place(m: Media, src: Path) -> dict | None:
@@ -335,12 +335,12 @@ def _resolve_round(project_id: str) -> None:
             continue
         resolved = _resolve_tee(project_id, mm, res["place"])
         if not resolved.get("alternatives"):
-            with session_scope() as db:
-                p = db.get(Project, project_id)
-                a = copy.deepcopy(p.analysis or {})
+            def change(a: dict, mid: str = mid, resolved: dict = resolved) -> None:
                 if mid in a:
                     a[mid]["place"] = resolved
-                    p.analysis = a
+
+            with session_scope() as db:
+                update_analysis(db, project_id, change)
 
 
 def apply_performance() -> int:
@@ -388,6 +388,24 @@ def _with_fallback(run: Callable[[], dict], report: Report) -> dict:
         return res
 
 
+def _within(seconds: float, fn: Callable[..., Any], *args: Any) -> Any:
+    """fn(*args), or None after `seconds` (or on error). The call runs on a daemon thread: a map
+    server that never answers must not keep the worker from shutting down (an executor's
+    threads are joined at exit)."""
+    out: list[Any] = [None]
+
+    def run() -> None:
+        try:
+            out[0] = fn(*args)
+        except Exception as exc:  # noqa: BLE001 - lookup error: go on without it
+            log.debug("%s failed: %s", getattr(fn, "__name__", fn), exc)
+
+    t = threading.Thread(target=run, name="place-lookup", daemon=True)
+    t.start()
+    t.join(seconds)
+    return None if t.is_alive() else out[0]
+
+
 def analyze(job: dict, report: Report) -> dict:
     from shottracer.pipeline import Options
     from shottracer.pipeline import analyze as run_analysis
@@ -411,13 +429,7 @@ def analyze(job: dict, report: Report) -> dict:
 
     # Where on the course this was filmed (GPS + OpenStreetMap). The distance to the green caps
     # the carry an estimate may claim; a slow map server must not hold up the analysis long.
-    pool = ThreadPoolExecutor(max_workers=1)
-    place_job = pool.submit(_place, m, src)
-    try:
-        place = place_job.result(timeout=25)
-    except Exception:  # noqa: BLE001 - timeout or lookup error: analyse without it
-        place = None
-    pool.shutdown(wait=False)
+    place = _within(25, _place, m, src)
     if place and place.get("alternatives"):
         place = _resolve_tee(project_id, m, place)
     to_green = (place or {}).get("toGreen")
@@ -475,3 +487,14 @@ def tune(job: dict, report: Report) -> dict:
 
 
 HANDLERS: dict[str, Callable[[dict, Report], dict]] = {"ingest": ingest, "analyze": analyze, "retrack": retrack, "tune": tune}
+
+
+def release_files() -> None:
+    """After each job: close the video files the engine keeps open for frame reads (the lane
+    threads live on, and Windows can't delete a project's videos while they are open)."""
+    try:
+        from shottracer.video import close_readers
+
+        close_readers()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("closing cached readers: %s", exc)

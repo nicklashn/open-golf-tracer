@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import threading
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,6 +130,10 @@ class _FrameReader:
         self.stream = self.container.streams.video[0]
         self.stream.thread_type = "AUTO"
         self.lock = threading.Lock()
+        self.path = path
+        self.closed = False
+        with _all_lock:
+            _all.add(self)
 
     def frame(self, index: int, fps: float) -> np.ndarray | None:
         t = index / fps
@@ -144,16 +149,41 @@ class _FrameReader:
         return None
 
     def close(self) -> None:
+        self.closed = True
+        with _all_lock:
+            _all.discard(self)
         self.container.close()
 
 
 _local = threading.local()
+_all: weakref.WeakSet[_FrameReader] = weakref.WeakSet()
+_all_lock = threading.Lock()
+
+
+def close_readers(path: str | None = None) -> int:
+    """Closes the cached open files (of one video, or all) that no thread is reading right now.
+    Windows can't delete a file that is open, and the worker's threads live on between jobs."""
+    with _all_lock:
+        readers = [r for r in _all if path is None or r.path == path]
+    n = 0
+    for r in readers:
+        if r.lock.acquire(blocking=False):
+            try:
+                if not r.closed:
+                    r.close()
+                    n += 1
+            finally:
+                r.lock.release()
+    return n
 
 
 def _reader(path: str) -> _FrameReader:
     """An open file per thread: analyses running side by side never share (or close) one."""
     readers: dict[str, _FrameReader] = _local.__dict__.setdefault("readers", {})
     r = readers.get(path)
+    if r is not None and r.closed:
+        del readers[path]
+        r = None
     if r is None:
         while len(readers) >= 2:                      # a thread sees one video at a time
             readers.pop(next(iter(readers))).close()

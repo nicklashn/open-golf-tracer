@@ -122,6 +122,10 @@ def create_demo(locale: str | None = None, db: Session = Depends(get_db), user: 
 @router.get("/{project_id}")
 def load_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
+    from .disk import restore_previews
+
+    if restore_previews(db, p) or db.dirty:   # previews deleted under Settings → Storage come back
+        db.commit()
     return {**summary(db, p), "document": merged_document(p), "docVersion": p.doc_version,
             "media": [public_media(m) for m in _project_media(db, p)]}
 

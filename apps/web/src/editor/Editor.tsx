@@ -127,10 +127,16 @@ export function Editor({ projectId }: { projectId: string }) {
   );
 
   // Live updates: proxy ready, shots found while analysing, retrack results, exports.
+  const diskFullShown = useRef(new Set<string>());
   const onEvent = useCallback(
     (ev: JobEvent) => {
       const s = useEditor.getState();
       const job = ev.job;
+      // A full disk stops previews, analyses and exports alike: say what to do, once per job.
+      if (job.status === 'failed' && job.errorCode === 'disk_full' && !diskFullShown.current.has(job.id)) {
+        diskFullShown.current.add(job.id);
+        toast.error(t.errors.disk_full, undefined, { duration: 20_000 });
+      }
       if (job.kind === 'ingest' && job.mediaId) {
         const ing = { ...s.ingesting };
         if (job.status === 'queued' || job.status === 'running') ing[job.mediaId] = job.progress;

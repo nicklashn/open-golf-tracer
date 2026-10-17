@@ -11,6 +11,7 @@ import { useMe, type Me } from '@/lib/me';
 import { AiSettingsForm } from './AiSettings';
 import { useTheme } from './AppRoot';
 import { PerformanceSettings } from './PerformanceSettings';
+import { StorageSettings } from './StorageSettings';
 
 function Section({ id, title, children, lead }: { id?: string; title: string; lead?: ReactNode; children: ReactNode }) {
   return (
@@ -106,6 +107,10 @@ export function SettingsPage() {
           <p className="text-[13px] text-fg-muted">{t.settings.geoLookupHint}</p>
           {me.geoLookupAllowed === false ? <p className="text-[13px] text-accent-fg">{t.settings.geoLookupEnv}</p> : null}
         </div>
+      </Section>
+
+      <Section id="storage" title={t.storage.title} lead={t.storage.lead}>
+        <StorageSettings />
       </Section>
 
       <Section id="data" title={t.settings.data} lead={t.settings.exportDataLead}>

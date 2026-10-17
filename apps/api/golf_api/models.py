@@ -106,6 +106,10 @@ class Job(Base):
     project_id: Mapped[str | None] = mapped_column(String(40), index=True)
     media_id: Mapped[str | None] = mapped_column(String(40), index=True)
     locked_by: Mapped[str | None] = mapped_column(String(80))
+    # Set by each claim; only its holder may report on the job (see jobs.owns).
+    lease: Mapped[str | None] = mapped_column(String(32))
+    # Times its worker went quiet (app closed, PC asleep); unlike failures these keep the attempts.
+    interruptions: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     heartbeat_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime())
     run_after: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)
     started_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime())
