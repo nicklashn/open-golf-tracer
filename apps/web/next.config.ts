@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { fileURLToPath } from 'node:url';
 
 const API = process.env.API_URL ?? 'http://127.0.0.1:8000';
 const isDev = process.env.NODE_ENV !== 'production';
@@ -21,6 +22,11 @@ const csp = [
 ].join('; ');
 
 const config: NextConfig = {
+  // A self-contained server in .next/standalone (scripts/standalone-assets.mjs adds the static
+  // files): scripts/dev.mjs --prod runs it, and the Windows installer ships it without the
+  // node_modules of the build (Next's compilers alone are ~140 MB).
+  output: 'standalone',
+  outputFileTracingRoot: fileURLToPath(new URL('../..', import.meta.url)),
   reactStrictMode: true,
   poweredByHeader: false,
   devIndicators: false,
@@ -29,7 +35,9 @@ const config: NextConfig = {
   transpilePackages: ['@golf/schema', '@golf/physics', '@golf/render', '@golf/compose'],
   // proxyTimeout: the API proxy otherwise cuts requests at 30 s, and validating a big upload
   // (ffprobe on a just-written file, which antivirus may scan first) can take longer.
-  experimental: { optimizePackageImports: ['lucide-react'], proxyTimeout: 600_000 },
+  // middlewareClientMaxBodySize: src/middleware.ts sees the upload chunks (8 MB by default) when the
+  // API runs on another port; above this Next would cut the body short.
+  experimental: { optimizePackageImports: ['lucide-react'], proxyTimeout: 600_000, middlewareClientMaxBodySize: '64mb' },
   // The app lives under /app; the old account page is now Settings.
   async redirects() {
     return [

@@ -47,13 +47,20 @@ en.LaunchApp=Start Open Golf Tracer now
 da.LaunchApp=Start Open Golf Tracer nu
 en.DeleteData=Also delete your projects, videos and exports?%n%nChoose No to keep them for a later installation.
 da.DeleteData=Skal dine projekter, videoer og eksporter også slettes?%n%nVælg Nej for at beholde dem til en senere installation.
+en.CloseApp=Open Golf Tracer is running and will be closed now.%n%nAn export that is still running is stopped.
+da.CloseApp=Open Golf Tracer kører og bliver lukket nu.%n%nEn eksport, der stadig er i gang, bliver stoppet.
+en.AppStillRunning=Close Open Golf Tracer (its black window) and run setup again.
+da.AppStillRunning=Luk Open Golf Tracer (det sorte vindue), og kør installationen igen.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [InstallDelete]
 ; An update replaces the code and runtimes completely so no stale files survive; data\ (projects,
-; videos) is kept. .venv and prepare.cmd are left over from 0.1.x, which downloaded PyTorch (~5 GB).
+; videos) and .env (settings) are kept. models\ belongs to the installer too: it holds the ball
+; detector the installer ships and is replaced on every update (a model of your own goes elsewhere,
+; with GOLF_ONNX_MODEL in .env). tests\ and docs\ came with versions up to 0.4; .venv and
+; prepare.cmd are left over from 0.1.x, which downloaded PyTorch (~5 GB).
 Type: filesandordirs; Name: "{app}\apps"
 Type: filesandordirs; Name: "{app}\packages"
 Type: filesandordirs; Name: "{app}\shottracer"
@@ -62,12 +69,15 @@ Type: filesandordirs; Name: "{app}\assets"
 Type: filesandordirs; Name: "{app}\models"
 Type: filesandordirs; Name: "{app}\node_modules"
 Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\tests"
+Type: filesandordirs; Name: "{app}\docs"
 Type: filesandordirs; Name: "{app}\.venv"
 Type: files; Name: "{app}\prepare.cmd"
 
 [Files]
-Source: "{#Stage}\*"; DestDir: "{app}"; Excludes: "\installer,\data,\.github,\videos,\setup.bat,\setup.sh,\start.bat,\.env"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#Stage}\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist
+Source: "{#Stage}\*"; DestDir: "{app}"; Excludes: "\installer,\data,\.github,\videos,\tests,\docs,\setup.bat,\setup.sh,\start.bat,\.env"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The user's settings (AI keys among them): never replaced by an update, never removed by uninstall.
+Source: "{#Stage}\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "files\OpenGolfTracer.cmd"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -88,6 +98,69 @@ Type: filesandordirs; Name: "{app}\node_modules"
 Type: filesandordirs; Name: "{app}\.venv"
 
 [Code]
+// scripts\dev.mjs writes its process id to data\app.pid while the app runs (see scripts\launcher.mjs).
+function AppPid(): String;
+var
+  S: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(ExpandConstant('{app}\data\app.pid'), S) then
+    Result := Trim(String(S));
+  if StrToIntDef(Result, 0) <= 0 then
+    Result := '';
+end;
+
+// The pid file can be left behind; it only counts while that process is still a node.exe.
+function AppRunning(const Pid: String): Boolean;
+var
+  Code: Integer;
+begin
+  Result := False;
+  if Pid = '' then
+    Exit;
+  if Exec(ExpandConstant('{cmd}'), '/D /C tasklist /NH /FI "PID eq ' + Pid + '" /FI "IMAGENAME eq node.exe" | find /I "node.exe" >nul',
+          '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Result := Code = 0;
+end;
+
+// Stops the launcher with everything it started (Python API and worker, web server, exporter).
+procedure StopApp(const Pid: String);
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /PID ' + Pid, '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Sleep(1500); // let Windows release the files
+end;
+
+// Files of a running app cannot be replaced: close it first (silently in a silent install).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Pid: String;
+begin
+  Result := '';
+  Pid := AppPid();
+  if not AppRunning(Pid) then
+    Exit;
+  if WizardSilent or (MsgBox(CustomMessage('CloseApp'), mbInformation, MB_OKCANCEL) = IDOK) then
+    StopApp(Pid)
+  else
+    Result := CustomMessage('AppStillRunning');
+end;
+
+function InitializeUninstall(): Boolean;
+var
+  Pid: String;
+begin
+  Result := True;
+  Pid := AppPid();
+  if not AppRunning(Pid) then
+    Exit;
+  if UninstallSilent or (MsgBox(CustomMessage('CloseApp'), mbInformation, MB_OKCANCEL) = IDOK) then
+    StopApp(Pid)
+  else
+    Result := False;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usUninstall) and DirExists(ExpandConstant('{app}\data')) and not UninstallSilent then

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import secrets
 from pathlib import Path
 
@@ -10,6 +11,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[3]
 API_DIR = Path(__file__).resolve().parents[1]
+
+
+@functools.cache
+def app_version() -> str:
+    """The product version: the root package.json is the single source (the release workflow
+    checks that the tag matches it)."""
+    try:
+        return str(json.loads((ROOT / "package.json").read_text("utf-8"))["version"])
+    except (OSError, ValueError, KeyError):
+        return "0.0.0"
 
 
 class Settings(BaseSettings):

@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import logging_setup, maintenance
-from .config import settings
+from .config import app_version, settings
 from .logging_setup import request_id
 from .routes import account, autovideo, chatgpt, exports, geo, internal, jobs, media, misc, performance, projects, uploads
 
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Open Golf Tracer API", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json",
+    app = FastAPI(title="Open Golf Tracer API", version=app_version(), lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json",
                   redoc_url=None)
 
     @app.middleware("http")

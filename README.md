@@ -30,7 +30,11 @@ Anthropic, paste a key if the service needs one, and click **Test connection** â
 
 To build the installer yourself: `powershell -ExecutionPolicy Bypass -File installer\build.ps1`
 (needs Git and [Inno Setup 6](https://jrsoftware.org/isinfo.php): `winget install JRSoftware.InnoSetup`).
-Pushing a `v*` tag builds it on GitHub Actions and attaches it to the release.
+Everything it bundles is pinned to an exact version and SHA-256 in `installer/versions.psd1`, and the
+Python packages come from `requirements-lock.txt` (with hashes). Releases are made by GitHub Actions,
+see [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
+The installer owns the program folder except `data\` and `.env`: an update replaces everything else,
+`models\` included, so keep a detector model of your own elsewhere (`GOLF_ONNX_MODEL` in `.env`).
 
 The steps below are for running from the source code.
 
@@ -53,7 +57,9 @@ The steps below are for running from the source code.
    a minute. The browser then opens at <http://localhost:3000>.
 3. Click **"Try a sample video"** or upload your own.
 
-Close the window to stop the app.
+Close the window to stop the app. When another program already uses port 3000 or 8000, `start.bat`
+(and the installed app) pick free ports and say so in the window; starting it a second time only
+opens the browser on the running copy.
 
 ### macOS / Linux
 

@@ -4,13 +4,17 @@
 
 .DESCRIPTION
   1. Exports the committed code (git HEAD - uncommitted changes are not included) to installer\build\stage.
-  2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and Python 3.12 (python-build-standalone,
-     fetched with uv), checking their SHA-256. Python is a plain folder: no junctions, which newer
-     Windows 11 builds refuse to follow for unprivileged processes (error 448).
-     The Python packages go straight into that Python, and the ball detector (RF-DETR as ONNX) into
-     models\, so the installed app needs no downloads at all.
-  3. Installs the npm packages and builds the web app with that Node, so the user's PC never has to.
-  4. Compiles OpenGolfTracer.iss with Inno Setup 6 (winget install JRSoftware.InnoSetup).
+  2. Downloads portable Node.js, FFmpeg (gyan.dev essentials) and Python 3.12 (python-build-standalone)
+     in the exact versions pinned in installer\versions.psd1, checking their SHA-256. Python is a
+     plain folder: no junctions, which newer Windows 11 builds refuse to follow for unprivileged
+     processes (error 448).
+     The Python packages go straight into that Python, from requirements-lock.txt with
+     --require-hashes, and the ball detector (RF-DETR as ONNX) into models\, so the installed app
+     needs no downloads at all.
+  3. Installs the npm packages and builds the web app (Next.js standalone server) and the exporter
+     (one bundled file) with that Node, so the user's PC never has to. The build tools are then
+     dropped: node_modules keeps only what the exporter needs at run time.
+  4. Compiles OpenGolfTracer.iss with Inno Setup 6 (-Iscc, else a standard install of it).
   Downloads are cached in installer\build\downloads.
 
 .EXAMPLE
@@ -18,7 +22,7 @@
 #>
 param(
   [string]$Version,
-  [int]$NodeMajor = 24,
+  [string]$Iscc,     # ISCC.exe of the pinned Inno Setup (CI); else the usual install folders are searched
   [switch]$StageOnly # stop before Inno Setup (for testing the stage)
 )
 $ErrorActionPreference = 'Stop'
@@ -29,6 +33,7 @@ $root = Split-Path $PSScriptRoot
 $build = Join-Path $PSScriptRoot 'build'
 $stage = Join-Path $build 'stage'
 $downloads = Join-Path $build 'downloads'
+$pins = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'versions.psd1')
 if (-not $Version) { $Version = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version }
 $Version = $Version.TrimStart('v')
 
@@ -52,23 +57,38 @@ function Get-Verified([string]$Url, [string]$Sha256) {
   return $file
 }
 
-function Get-Text([string]$Url) {
-  $c = (Invoke-WebRequest $Url -UseBasicParsing).Content
-  if ($c -is [byte[]]) { $c = [Text.Encoding]::UTF8.GetString($c) } # served as binary (e.g. .sha256 files)
-  return $c
-}
-
-# Unpacks a zip with a single top-level folder to $Dest.
-function Expand-Single([string]$Zip, [string]$Dest) {
-  $tmp = Join-Path $build ('unpack-' + [IO.Path]::GetFileNameWithoutExtension($Zip))
+# Unpacks a zip/tar with a single top-level folder to $Dest.
+function Expand-Single([string]$Archive, [string]$Dest) {
+  $tmp = Join-Path $build ('unpack-' + [IO.Path]::GetFileNameWithoutExtension($Archive))
   if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
   New-Item -ItemType Directory $tmp | Out-Null
-  Invoke-Native tar @('-xf', $Zip, '-C', $tmp)
+  Invoke-Native tar @('-xf', $Archive, '-C', $tmp)
   $inner = @(Get-ChildItem $tmp)
   $src = if ($inner.Count -eq 1 -and $inner[0].PSIsContainer) { $inner[0].FullName } else { $tmp }
   New-Item -ItemType Directory -Force (Split-Path $Dest) | Out-Null
   Move-Item $src $Dest
   if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+}
+
+# npm links the workspaces into node_modules\@golf with junctions. Deleting a junction with
+# [IO.Directory]::Delete removes the link only, never the folder it points to.
+function Remove-Links([string]$Dir) {
+  if (-not (Test-Path $Dir)) { return }
+  Get-ChildItem $Dir -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+    ForEach-Object { [IO.Directory]::Delete($_.FullName) }
+}
+
+# Deletes a folder that may hold those junctions without following them (rmdir does not either).
+function Remove-Tree([string]$Path) {
+  if (-not (Test-Path $Path)) { return }
+  Remove-Links (Join-Path $Path 'node_modules\@golf')
+  Remove-Links (Join-Path $Path '@golf')
+  Remove-Links $Path
+  Invoke-Native cmd.exe @('/d', '/c', 'rmdir', '/s', '/q', $Path)
+}
+
+function Get-FolderMB([string]$Path) {
+  try { [math]::Round(((Get-ChildItem $Path -Recurse -File -Force | Measure-Object Length -Sum).Sum / 1MB)) } catch { '?' }
 }
 
 # The script must be UTF-8 with exactly one BOM (for the Danish texts); a second one breaks line 1.
@@ -82,62 +102,55 @@ $missing = $used | Sort-Object -Unique | ForEach-Object {
 }
 if ($missing) { throw "OpenGolfTracer.iss uses custom messages that are not defined: $($missing -join ', ')" }
 
-$iscc = @(
-  "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-  "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-  "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $iscc -and -not $StageOnly) { throw 'Inno Setup 6 was not found. Install it with: winget install JRSoftware.InnoSetup' }
+if (-not $Iscc) {
+  $Iscc = @(
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $StageOnly -and -not ($Iscc -and (Test-Path $Iscc))) { throw 'Inno Setup 6 was not found. Install it with: winget install JRSoftware.InnoSetup' }
 
 Step "Code (git HEAD) -> $stage"
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+if (Test-Path $stage) { Remove-Tree $stage }
 New-Item -ItemType Directory -Force $stage, $downloads | Out-Null
 $tarball = Join-Path $build 'src.tar'
 Invoke-Native git @('-C', $root, 'archive', '--format=tar', '-o', $tarball, 'HEAD')
 Invoke-Native tar @('-xf', $tarball, '-C', $stage)
 Remove-Item $tarball
 
-Step "Node.js $NodeMajor (portable)"
-$node = (Get-Text 'https://nodejs.org/dist/index.json' | ConvertFrom-Json) |
-  Where-Object { $_.version -like "v$NodeMajor.*" -and $_.files -contains 'win-x64-zip' } | Select-Object -First 1
-if (-not $node) { throw "No Node.js $NodeMajor release with a win-x64 zip was found" }
-$nodeZip = "node-$($node.version)-win-x64.zip"
-$nodeSum = ((Get-Text "https://nodejs.org/dist/$($node.version)/SHASUMS256.txt") -split "`n" |
-  Where-Object { $_ -match "\s$([regex]::Escape($nodeZip))$" }) -split '\s+' | Select-Object -First 1
-Write-Host "  $($node.version)"
-Expand-Single (Get-Verified "https://nodejs.org/dist/$($node.version)/$nodeZip" $nodeSum) (Join-Path $stage 'runtime\node')
+Step "Node.js $($pins.Node.Version) (portable)"
+Expand-Single (Get-Verified $pins.Node.Url $pins.Node.Sha256) (Join-Path $stage 'runtime\node')
 
-Step 'FFmpeg (gyan.dev release essentials)'
-$ffUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
-Expand-Single (Get-Verified $ffUrl (Get-Text "$ffUrl.sha256")) (Join-Path $stage 'runtime\ffmpeg')
+Step "FFmpeg $($pins.FFmpeg.Version) (gyan.dev essentials)"
+Expand-Single (Get-Verified $pins.FFmpeg.Url $pins.FFmpeg.Sha256) (Join-Path $stage 'runtime\ffmpeg')
 Remove-Item (Join-Path $stage 'runtime\ffmpeg\doc') -Recurse -Force -ErrorAction SilentlyContinue
 
-Step 'Python 3.12 (portable)'
-$uvUrl = 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
-$uvSum = (Get-Text "$uvUrl.sha256").Trim() -split '\s+' | Select-Object -First 1
-$uvDir = Join-Path $build 'uv'
-if (Test-Path $uvDir) { Remove-Item $uvDir -Recurse -Force }
-New-Item -ItemType Directory -Force $uvDir | Out-Null
-Invoke-Native tar @('-xf', (Get-Verified $uvUrl $uvSum), '-C', $uvDir)
-$env:UV_SYSTEM_CERTS = '1' # the OS certificate store, for PCs where antivirus intercepts HTTPS
-$pyDir = Join-Path $build 'python'
-Invoke-Native (Join-Path $uvDir 'uv.exe') @('python', 'install', '3.12', '--install-dir', $pyDir, '--no-bin', '--no-registry')
-# The real folder (cpython-3.12.N-windows-...), not uv's minor-version junction next to it.
-$py = Get-ChildItem $pyDir -Directory | Where-Object {
-  $_.Name -like 'cpython-3.12.*' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path (Join-Path $_.FullName 'python.exe'))
-} | Sort-Object { [version]($_.Name -replace '^cpython-([\d.]+)-.*$', '$1') } -Descending | Select-Object -First 1
-if (-not $py) { throw "uv did not install Python 3.12 into $pyDir" }
-Write-Host "  $($py.Name)"
-Copy-Item $py.FullName (Join-Path $stage 'runtime\python') -Recurse
-
-Step 'Python packages (into the bundled Python)'
+Step "Python $($pins.Python.Version) (portable)"
+Expand-Single (Get-Verified $pins.Python.Url $pins.Python.Sha256) (Join-Path $stage 'runtime\python')
 $stagePy = Join-Path $stage 'runtime\python\python.exe'
-# uv marks its Pythons as externally managed (PEP 668); this copy is the app's own.
+$pyVersion = (& $stagePy -c 'import platform; print(platform.python_version())').Trim()
+if ($pyVersion -ne $pins.Python.Version) { throw "The bundled Python is $pyVersion, expected $($pins.Python.Version)" }
+
+Step 'Python packages (requirements-lock.txt, into the bundled Python)'
+# A uv-installed Python is marked as externally managed (PEP 668); this copy is the app's own.
 Remove-Item (Join-Path $stage 'runtime\python\Lib\EXTERNALLY-MANAGED') -ErrorAction SilentlyContinue
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
-Invoke-Native $stagePy @('-m', 'pip', 'install', '--no-cache-dir', '--no-warn-script-location',
-  '-r', (Join-Path $stage 'apps\worker\requirements.txt'))
-Invoke-Native $stagePy @('-c', 'import onnxruntime as ort, cv2, numba, fastapi; print(ort.__version__, ort.get_available_providers())')
+# --require-hashes: every package, dependencies included, must be pinned with its hash in the lock
+# (npm run lock:py); --only-binary: no package is built from source on the build machine.
+Invoke-Native $stagePy @('-m', 'pip', 'install', '--no-cache-dir', '--no-warn-script-location', '--require-hashes',
+  '--only-binary', ':all:', '-r', (Join-Path $stage 'requirements-lock.txt'))
+Invoke-Native $stagePy @('-m', 'pip', 'check')
+# The GPU (DirectML) build of ONNX Runtime must be the one installed, not the CPU-only one.
+# (A file, not -c: Windows PowerShell mangles quotes in arguments to native programs.)
+$check = Join-Path $build 'check-packages.py'
+Set-Content $check -Encoding ASCII -Value @'
+import onnxruntime as ort, cv2, numba, fastapi
+providers = ort.get_available_providers()
+print(ort.__version__, providers)
+assert 'DmlExecutionProvider' in providers, 'onnxruntime-directml is missing: the detector would run on the CPU only'
+'@
+Invoke-Native $stagePy @('-I', $check)
 
 Step 'Ball detector (RF-DETR as ONNX)'
 $detect = Get-Content (Join-Path $stage 'shottracer\detect.py') -Raw
@@ -147,21 +160,32 @@ if (-not $onnxUrl -or -not $onnxSum) { throw 'ONNX_URL / ONNX_SHA256 not found i
 New-Item -ItemType Directory -Force (Join-Path $stage 'models') | Out-Null
 Copy-Item (Get-Verified $onnxUrl $onnxSum) (Join-Path $stage 'models\rf-detr-large.onnx')
 
-Step 'npm packages and web build'
+Step 'npm packages, web build (standalone) and exporter bundle'
 $env:PATH = "$(Join-Path $stage 'runtime\node');$env:PATH"
 $env:NEXT_TELEMETRY_DISABLED = '1'
 Push-Location $stage
 try {
   Invoke-Native npm.cmd @('ci', '--no-audit', '--no-fund')
   Invoke-Native npm.cmd @('run', 'build')
+  $nm = Join-Path $stage 'node_modules'
+  $before = Get-FolderMB $nm
+  # The web app runs from .next\standalone (with its own node_modules) and the exporter from
+  # apps\exporter\dist, so the build tools go: only the exporter's run-time packages are kept.
+  Remove-Tree $nm
+  Invoke-Native npm.cmd @('ci', '--omit=dev', '--workspace', '@golf/exporter', '--no-audit', '--no-fund')
+  Write-Host "  node_modules: $before MB -> $(Get-FolderMB $nm) MB"
 } finally { Pop-Location }
-Remove-Item (Join-Path $stage 'apps\web\.next\cache') -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($p in 'apps\web\.next\standalone\apps\web\server.js', 'apps\exporter\dist\main.mjs') {
+  if (-not (Test-Path (Join-Path $stage $p))) { throw "The build did not make $p" }
+}
+Remove-Tree (Join-Path $stage 'apps\web\.next\cache')
 # npm links the workspaces into node_modules\@golf with junctions, which Inno Setup packs as copies.
-# web and exporter are started from their own folders, so their copies would only take up space.
-foreach ($ws in 'web', 'exporter') { [IO.Directory]::Delete((Join-Path $stage "node_modules\@golf\$ws")) }
+# Everything of theirs is bundled into the builds, so the links would only take up space.
+Remove-Tree (Join-Path $stage 'node_modules\@golf')
 
+Write-Host "  stage: $(Get-FolderMB $stage) MB"
 if ($StageOnly) { Write-Host "`nStage ready: $stage" -ForegroundColor Green; return }
 
 Step "Inno Setup -> installer\dist (version $Version)"
-Invoke-Native $iscc @("/DAppVersion=$Version", (Join-Path $PSScriptRoot 'OpenGolfTracer.iss'))
+Invoke-Native $Iscc @("/DAppVersion=$Version", (Join-Path $PSScriptRoot 'OpenGolfTracer.iss'))
 Write-Host "`nDone: $(Join-Path $PSScriptRoot "dist\OpenGolfTracer-Setup-$Version.exe")" -ForegroundColor Green

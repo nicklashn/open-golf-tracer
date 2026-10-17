@@ -1,3 +1,6 @@
+import contextlib
+import hashlib
+import io
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -230,3 +233,54 @@ def test_directml_gets_one_session_and_reports_why_sessions_failed(monkeypatch):
     ort.get_available_providers = lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
     det = OnnxRfDetrBallDetector(Path("x.onnx"), Runtime(sessions=3))
     assert det.sessions == 1 and "out of memory" in (det.session_error or "")
+
+
+def _fake_model(monkeypatch, tmp_path, good: bytes):
+    """Points the default model path at tmp_path and the published hash/size at `good`; the
+    "download" serves `good` and counts its calls."""
+    from shottracer import detect
+
+    monkeypatch.delenv("GOLF_ONNX_MODEL", raising=False)
+    monkeypatch.setattr(detect, "ONNX_MODEL", tmp_path / "model.onnx")
+    monkeypatch.setattr(detect, "ONNX_SHA256", hashlib.sha256(good).hexdigest())
+    monkeypatch.setattr(detect, "ONNX_SIZE", len(good))
+    monkeypatch.setattr(detect, "_verified", {})
+    downloads = []
+
+    def urlopen(url, timeout):
+        downloads.append(url)
+        return contextlib.closing(io.BytesIO(good))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    return detect, downloads
+
+
+def test_a_damaged_model_is_downloaded_again(monkeypatch, tmp_path):
+    good = b"onnx" * 1000
+    detect, downloads = _fake_model(monkeypatch, tmp_path, good)
+    (tmp_path / "model.onnx").write_bytes(good[:-10])   # a cut-off download
+    assert detect.ensure_onnx_model().read_bytes() == good
+    assert len(downloads) == 1
+    (tmp_path / "model.onnx").write_bytes(b"x" * len(good))   # same size, other bytes
+    assert detect.ensure_onnx_model().read_bytes() == good
+    assert len(downloads) == 2
+
+
+def test_a_good_model_is_hashed_once_and_not_downloaded(monkeypatch, tmp_path):
+    good = b"onnx" * 1000
+    detect, downloads = _fake_model(monkeypatch, tmp_path, good)
+    (tmp_path / "model.onnx").write_bytes(good)
+    hashed = []
+    real = detect._sha256
+    monkeypatch.setattr(detect, "_sha256", lambda p: hashed.append(p) or real(p))
+    for _ in range(3):
+        assert detect.ensure_onnx_model() == tmp_path / "model.onnx"
+    assert downloads == [] and len(hashed) == 1
+
+
+def test_an_own_model_is_used_as_it_is(monkeypatch, tmp_path):
+    detect, downloads = _fake_model(monkeypatch, tmp_path, b"onnx")
+    own = tmp_path / "own.onnx"
+    own.write_bytes(b"something else")
+    monkeypatch.setenv("GOLF_ONNX_MODEL", str(own))
+    assert detect.ensure_onnx_model() == own and downloads == []
