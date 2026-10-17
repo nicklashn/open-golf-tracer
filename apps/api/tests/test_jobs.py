@@ -61,7 +61,15 @@ def test_cancel_and_internal_api(client):
 
 
 def test_health_and_errors(client):
-    assert client.get("/api/health").json()["status"] == "ok"
+    import json
+
+    from golf_api.config import ROOT
+
+    health = client.get("/api/health").json()
+    assert health["status"] == "ok"
+    # The launcher (scripts/dev.mjs) recognises a running copy by these two.
+    assert health["app"] == "open-golf-tracer"
+    assert health["version"] == json.loads((ROOT / "package.json").read_text("utf-8"))["version"]
     r = client.get("/api/projects")
     assert r.status_code == 200      # no login: everything acts as the local user
     assert r.headers["x-content-type-options"] == "nosniff"

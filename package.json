@@ -17,7 +17,7 @@
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "npm run build -w @golf/web",
+    "build": "npm run build -w @golf/web && npm run build -w @golf/exporter",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
@@ -28,7 +28,8 @@
     "demo": "node scripts/py.mjs scripts/make_demo.py --analyze",
     "check": "npm run lint && npm run typecheck && npm test",
     "test:py": "node scripts/py.mjs -m pytest",
-    "autovideo": "tsx apps/exporter/src/autovideo.ts"
+    "autovideo": "tsx apps/exporter/src/autovideo.ts",
+    "lock:py": "node scripts/lock-python.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

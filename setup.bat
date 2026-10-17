@@ -24,7 +24,7 @@ echo == Installing Python packages ==
 rem Optional, only for GOLF_DETECTOR=rfdetr-torch and scripts\export_onnx.py: pip install -r requirements-torch.txt
 
 echo == Fetching the ball detector (RF-DETR, ONNX) ==
-"%PY%" scripts\fetch_model.py >nul 2>nul || echo [!] Could not fetch the model - it is tried again at the first analysis.
+"%PY%" scripts\fetch_model.py || echo [!] Could not fetch the model ^(see the error above^) - it is tried again at the first analysis.
 
 echo == Installing Node packages ==
 call npm install || goto :fail

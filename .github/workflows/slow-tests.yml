@@ -1,0 +1,41 @@
+name: Slow tests
+
+# The pytest tests marked slow (real video decoding and the detector on synthetic clips), once a
+# week and on demand; too slow for every push. Tests that need the optional YOLO weights skip
+# themselves (with the reason) when those are not installed.
+on:
+  schedule:
+    - cron: '23 4 * * 1' # Mondays 04:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.15'
+          cache: pip
+          cache-dependency-path: requirements-dev-lock.txt
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libgl1
+      - name: Install (the locked versions, checked against their hashes)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements-dev-lock.txt
+      - name: Ball detector model (cached)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: models/rf-detr-large.onnx
+          key: rf-detr-large-onnx-${{ hashFiles('shottracer/detect.py') }}
+      - run: .venv/bin/python scripts/fetch_model.py
+      - run: .venv/bin/python -m pytest -m slow -rs --durations=20
