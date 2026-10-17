@@ -201,16 +201,18 @@ def load() -> dict[str, Any]:
     p = _path()
     try:
         mtime = p.stat().st_mtime_ns
-    except OSError:
+    except FileNotFoundError:
         return {"profile": "balanced", "rev": 0}
+    except OSError:   # e.g. Windows: the file is being replaced right now; the last good read stands
+        return _cached(p)
     if _cache.get("path") == p and _cache.get("mtime") == mtime:
         return json.loads(json.dumps(_cache["data"]))
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError
-    except OSError:   # e.g. Windows: the file is being replaced right now; the next read sees it
-        return {"profile": "balanced", "rev": 0}
+    except OSError:   # as above; a moment later the new file is read
+        return _cached(p)
     except ValueError:
         data = {}
     # A file from an older version or edited by hand must not stop the worker.
@@ -225,6 +227,14 @@ def load() -> dict[str, Any]:
         data["rev"] = 0
     _cache.update(path=p, mtime=mtime, data=data)
     return json.loads(json.dumps(data))
+
+
+def _cached(p: Path) -> dict[str, Any]:
+    """The last data read from `p` (a transient read error must not switch a tuned PC back to
+    Balanced for a job), or the defaults when there is none."""
+    if _cache.get("path") == p:
+        return json.loads(json.dumps(_cache["data"]))
+    return {"profile": "balanced", "rev": 0}
 
 
 def _save(data: dict[str, Any]) -> dict[str, Any]:
@@ -338,7 +348,9 @@ DEVICE_ERRORS = re.compile(
 
 
 def is_device_error(exc: BaseException) -> bool:
-    """Out of (GPU) memory or a lost GPU device: worth one more try with lower settings."""
-    if isinstance(exc, MemoryError):
-        return True
+    """Out of GPU memory or a lost GPU device: worth one more try with lower settings. Not the
+    computer's own memory running out (Python's MemoryError, OpenCV's "Insufficient memory"): a
+    gentler GPU profile does not help that, and stepping down would stay for every later job."""
+    if isinstance(exc, MemoryError) or type(exc).__module__.split(".")[0] in ("cv2", "numpy"):
+        return False
     return bool(DEVICE_ERRORS.search(f"{type(exc).__name__}: {exc}"))

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,10 +28,12 @@ from .impact import Impact, PresenceProbe, ball_left, choose_impact
 from .physics import Flight, default_flight, fit_flight, into_frame, off_frame_reason
 from .render import TracerPath, TracerRenderer, stats_card
 from .track import Candidates, Track, find_candidates, track_ball
-from .video import OverlayCompositor, VideoInfo, decode, load_audio, probe, read_frame
+from .video import OverlayCompositor, VideoInfo, decode, decode_pair, load_audio, probe, read_frame
 
 ANALYSIS_LONG_SIDE = 1920
 TRACK_SECONDS = 4.0
+MAX_TRACK_FRAMES = 640   # analysis frames per track at most (~1.3 GB of grey full-HD): slow motion samples sparser
+CHECK_EVERY = 30         # frames between looks at whether the analysis was cancelled
 ADDRESS_LEAD = 0.6   # seconds before impact where the golfer stands still over the ball
 MIN_SHOT_GAP = 2.0   # two strikes closer than this are the same shot
 GREEN_SLACK_M = 25.0  # a ball may carry this far past the green before the hole says no
@@ -204,7 +208,19 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
     """
     opt = opt or Options()
     t_start = _T0[0] = time.perf_counter()
-    report = progress or (lambda f, m: None)
+    report = _Report(progress)
+    stopped = threading.Event()   # tells the background motion scans to stop (cancelled or failed)
+    # The motion around each strike (clean.py) is measured in the background, beside the detector.
+    motion_pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return _analyze(src, opt, report, on_shot, t_start, motion_pool, stopped)
+    finally:
+        stopped.set()
+        motion_pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _analyze(src: Path, opt: Options, report: _Report, on_shot, t_start: float, motion_pool: ThreadPoolExecutor,
+             stopped: threading.Event) -> dict:
     info = probe(src)
     report(0.02, "probe")
     det = get_detector(opt.model)
@@ -230,20 +246,37 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
     green = auto and _by_green(opt)
     spans: list[tuple[float, float]] = []   # followed for putts
     ticks: list | None = None
-    # The motion around each strike (clean.py) is measured in the background, beside the detector.
-    motion_pool = ThreadPoolExecutor(max_workers=1)
 
-    def motion(t0: float, t1: float, golfer) -> Future:
-        return motion_pool.submit(clean_mod.measure_span, info, t0, t1, golfer)
+    def motion(t0: float, t1: float, golfer, head=None) -> Future:
+        return motion_pool.submit(clean_mod.measure_span, info, t0, t1, golfer, head, stopped.is_set)
+
+    # A shot is handed on once its motion scan is done: the scan runs beside the next shot's
+    # steps, not in front of them.
+    pending: list[tuple[dict, float, Future | None, float | None]] = []
 
     def emit(doc: dict, t: float, moved: Future | None = None, land: float | None = None) -> None:
+        pending.append((doc, t, moved, land))
+
+    def flush(wait: bool) -> None:
+        while pending and (wait or pending[0][2] is None or pending[0][2].done()):
+            _emit(*pending.pop(0))
+
+    def _emit(doc: dict, t: float, moved: Future | None = None, land: float | None = None) -> None:
         sound = audio_mod.signature(*aud, t) if aud else None
         if sound:
             doc["sound"] = sound
         if moved is not None:
             try:
-                clean = clean_mod.window(moved.result(), t, land if land is not None else t, opt.slowmo, doc["kind"] == "putt")
+                while True:   # still measuring: wait, but notice a cancel
+                    try:
+                        m = moved.result(timeout=0.5)
+                        break
+                    except FutureTimeout:
+                        report.check()
+                clean = clean_mod.window(m, t, land if land is not None else t, opt.slowmo, doc["kind"] == "putt")
             except Exception as exc:  # noqa: BLE001 - the window is a nicety: the shot stands without it
+                if exc is report.raised:
+                    raise
                 _log(f"clean window failed: {exc}")
                 clean = None
             if clean:
@@ -253,11 +286,8 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
         if on_shot:
             on_shot(doc)
 
-    for k, addr in enumerate(addresses):
-        base = 0.3 + 0.68 * k / max(1, len(addresses))
-        report(base, f"shot {k + 1}/{len(addresses)}")
-        if any(a <= addr.ref_idx / info.fps <= b for a, b in spans):
-            continue
+    def shot(addr: Address) -> None:
+        nonlocal ticks
         stop = None
         if opt.ref_time is not None and opt.impact is None:
             stop = min(info.frame_count, addr.ref_idx + int(8.0 * info.fps))
@@ -265,21 +295,26 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
             stop = int((addr.verified + 2.0) * info.fps)
         elif len(addresses) > 1:
             stop = min(info.frame_count, addr.ref_idx + int(6.0 * info.fps))
-        impact = _find_impact(info, addr, strikes, opt, stop=stop)
+        impact = _find_impact(info, addr, strikes, opt, stop=stop, check=report.check)
         if impact is not None and any(abs(impact.time - t) < MIN_SHOT_GAP for t in used):
-            continue
-        moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo), addr.golfer) if impact is not None and not green else None
+            return
+        # The motion scan before the strike and through the track comes from the track's decode;
+        # the rest is decoded once the landing is known.
+        t_scan = clean_mod.scan_range(impact.time, opt.slowmo)[0] if impact is not None else 0.0
+        head: list = []
         sh, err = None, None
         if impact is not None and not green:
             try:
-                sh = _track_and_fit(info, det, impact, addr.ball, opt)
+                sh = _track_and_fit(info, det, impact, addr.ball, opt, (clean_mod.span(info, t_scan, info.duration), head), report.check)
             except RuntimeError as exc:
+                if exc is report.raised:
+                    raise
                 err = str(exc)
         if auto and addr.ball is not None and (green or (impact is not None and _maybe_putt(opt, sh))):
             # On the green, or a stroke that did not fly: follow the ball through the putts.
             if ticks is None:
                 ticks = audio_mod.find_strikes(*aud, min_ratio=PUTT_TICK) if aud else []
-            putts, span = _putts(info, det, addr, opt, ticks, len(shots))
+            putts, span = _putts(info, det, addr, opt, ticks, len(shots) + len(pending), report.check)
             if putts:
                 spans.append(span)
                 moves = [motion(*clean_mod.scan_range(d["impactTime"], opt.slowmo, d["putt"]["end"]), addr.golfer) for d in putts]
@@ -287,23 +322,44 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
                     used.append(doc["impactTime"])
                     emit(doc, doc["impactTime"], mv, doc["putt"]["end"])
                 if impact is None or any(abs(d["impactTime"] - impact.time) < 1.0 for d in putts):
-                    continue
+                    return
         if impact is None:
-            continue
+            return
         if sh is None and err is None:
             try:
-                sh = _track_and_fit(info, det, impact, addr.ball, opt)
+                sh = _track_and_fit(info, det, impact, addr.ball, opt, (clean_mod.span(info, t_scan, info.duration), head), report.check)
             except RuntimeError as exc:
+                if exc is report.raised:
+                    raise
                 err = str(exc)
         if sh is None:
             warnings.append(err or "")
-            continue
+            return
         used.append(impact.time)
-        if moved is None:
-            moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo), addr.golfer)
         flight_s = float(sh.stats.get("flight_time_s") or 4.0) if sh.stats else 4.0
-        emit(_shot_doc(info, sh, len(shots), opt), impact.time, moved, impact.time + (sh.flight.t_offset + flight_s) * opt.slowmo)
-    motion_pool.shutdown(cancel_futures=True)   # on an error it winds down once collected
+        land = impact.time + (sh.flight.t_offset + flight_s) * opt.slowmo
+        # A believable flight: scanned to its landing. A doubtful one (the tracer may be moved
+        # to a longer flight in the editor): to the longest flight, as before.
+        sure = sh.track is not None and not sh.verdict and not any(c in ("off_frame", "no_track") for c, _ in sh.codes)
+        moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo, land if sure else None), addr.golfer, head)
+        emit(_shot_doc(info, sh, len(shots) + len(pending), opt), impact.time, moved, land)
+
+    for k, addr in enumerate(addresses):
+        base = 0.3 + 0.68 * k / max(1, len(addresses))
+        report(base, f"shot {k + 1}/{len(addresses)}")
+        flush(False)
+        if any(a <= addr.ref_idx / info.fps <= b for a, b in spans):
+            continue
+        try:
+            shot(addr)
+        except Exception as exc:
+            # One shot that breaks the analysis (a bad fit, an odd frame) must not cost the others.
+            if exc is report.raised or _fatal(exc):
+                raise
+            at = addr.verified if addr.verified is not None else addr.ref_idx / info.fps
+            _log(f"shot at {at:.1f} s failed: {type(exc).__name__}: {exc}")
+            warnings.append(f"The shot at {at:.1f} s could not be analysed ({type(exc).__name__}: {exc})"[:300])
+    flush(True)
     _settle_putts(shots, info.diag)
     shots.sort(key=lambda s: s["impactTime"])
     report(1.0, "done")
@@ -314,6 +370,47 @@ def analyze(src: Path, opt: Options | None = None, progress: Progress | None = N
         "warnings": warnings,
         "seconds": round(time.perf_counter() - t_start, 2),
     }
+
+
+class _Report:
+    """The caller's progress callback, which may raise to cancel the analysis (the worker's
+    does); `check()` asks again with the last values, from inside long loops, and `raised` is
+    what it raised, so no step mistakes a cancel for its own failure."""
+
+    def __init__(self, fn: Progress | None):
+        self.fn = fn
+        self.last: tuple[float, str] = (0.0, "")
+        self.raised: BaseException | None = None
+
+    def __call__(self, f: float, msg: str) -> None:
+        self.last = (f, msg)
+        self._call(f, msg)
+
+    def check(self) -> None:
+        self._call(*self.last)
+
+    def _call(self, f: float, msg: str) -> None:
+        if self.fn is None:
+            return
+        try:
+            self.fn(f, msg)
+        except BaseException as exc:
+            self.raised = exc
+            raise
+
+
+def _fatal(exc: BaseException) -> bool:
+    """Errors that are not one shot's: out of memory, or the detector (the GPU) failing – the
+    worker retries the whole analysis with gentler settings."""
+    return isinstance(exc, MemoryError) or type(exc).__module__.split(".")[0] in ("onnxruntime", "torch")
+
+
+def _checked(frames, check: Callable[[], None] | None, every: int = CHECK_EVERY):
+    """The frames, with a look at whether the analysis was cancelled every so often."""
+    for k, item in enumerate(frames):
+        if check is not None and k % every == every - 1:
+            check()
+        yield item
 
 
 def _confidence(sh: ShotAnalysis) -> float:
@@ -411,7 +508,8 @@ def _maybe_putt(opt: Options, sh: ShotAnalysis | None) -> bool:
     return sh is None or sh.track is None or bool(sh.verdict and ("slow" in sh.verdict or "flight time" in sh.verdict))
 
 
-def _putts(info: VideoInfo, det: BallDetector, addr: Address, opt: Options, ticks, n0: int) -> tuple[list[dict], tuple[float, float]]:
+def _putts(info: VideoInfo, det: BallDetector, addr: Address, opt: Options, ticks, n0: int,
+           check: Callable[[], None] | None = None) -> tuple[list[dict], tuple[float, float]]:
     """Follow the ball lying at this address through the putts that follow (putt.py)."""
     ball = addr.ball
     assert ball is not None
@@ -423,9 +521,10 @@ def _putts(info: VideoInfo, det: BallDetector, addr: Address, opt: Options, tick
     step = max(1, round(info.fps / putt_mod.FOLLOW_FPS))
     t_ref = addr.ref_idx / info.fps
     stop = min(info.frame_count, addr.ref_idx + int(putt_mod.MAX_FOLLOW_S * info.fps))
-    frames = decode(info, start=addr.ref_idx, stop=stop, scale=sp, gray=True)
+    # Only every step-th frame is followed: the others are dropped in ffmpeg, before scaling.
+    frames = decode(info, start=addr.ref_idx, stop=stop, scale=sp, gray=True, every=step, phase=addr.ref_idx)
     try:
-        seen = putt_mod.follow(((i / info.fps, g) for i, g in frames if (i - addr.ref_idx) % step == 0),
+        seen = putt_mod.follow(((i / info.fps, g) for i, g in _checked(frames, check, max(1, CHECK_EVERY // step))),
                                (ball.x * sx, ball.y * sy), ball.r * 0.5 * (sx + sy))
     finally:
         frames.close()
@@ -685,7 +784,8 @@ def _find_address(info: VideoInfo, det: BallDetector, strikes, opt: Options) -> 
     return Address(*best, None)
 
 
-def _find_impact(info: VideoInfo, addr: Address, strikes, opt: Options, stop: int | None = None) -> Impact | None:
+def _find_impact(info: VideoInfo, addr: Address, strikes, opt: Options, stop: int | None = None,
+                 check: Callable[[], None] | None = None) -> Impact | None:
     fps = info.fps
     if opt.impact is not None:
         return Impact(opt.impact, int(opt.impact * fps), "manual", 1.0)
@@ -701,7 +801,7 @@ def _find_impact(info: VideoInfo, addr: Address, strikes, opt: Options, stop: in
         stop = int((addr.verified + 2.0) * fps)
     pres, energy = [], []
     if presence_probe:
-        for _, crop in decode(info, start=addr.ref_idx, stop=stop, crop=presence_probe.region, gray=True):
+        for _, crop in _checked(decode(info, start=addr.ref_idx, stop=stop, crop=presence_probe.region, gray=True), check):
             p, e = presence_probe(crop)
             pres.append(p)
             energy.append(e)
@@ -711,25 +811,40 @@ def _find_impact(info: VideoInfo, addr: Address, strikes, opt: Options, stop: in
     return choose_impact(times, np.array(pres) if ball else None, np.array(energy), fps, local)
 
 
-def _track_and_fit(info: VideoInfo, det: BallDetector, impact: Impact, ball: Ball | None, opt: Options) -> ShotAnalysis:
+def _track_window(fps: float, t_impact: float, slowmo: float = 1.0) -> tuple[int, int, int, int]:
+    """(first frame, end frame, frame step, difference lag in analysis frames) of a track."""
+    step = max(1, round(fps / 120))
+    while True:
+        k = max(1, round(fps / step / 30))
+        i0 = max(0, int(t_impact * fps) - (k + 2) * step)
+        i1 = int((t_impact + TRACK_SECONDS * slowmo) * fps) + (k + 1) * step
+        if (i1 - i0) / step <= MAX_TRACK_FRAMES:
+            return i0, i1, step, k
+        # Slow motion: 4 s of flight are 4 x slowmo seconds of video. Every frame of them at full
+        # size ran out of memory (x16: ~8 GB); the ball moves little between them anyway.
+        step = max(step + 1, math.ceil((i1 - i0) / MAX_TRACK_FRAMES))
+
+
+def _track_and_fit(info: VideoInfo, det: BallDetector, impact: Impact, ball: Ball | None, opt: Options,
+                   motion: tuple[clean_mod.Span, list] | None = None, check: Callable[[], None] | None = None) -> ShotAnalysis:
+    """`motion`: a motion scan's samples and a list that gets those of them up to the end of the
+    track, from the same decode."""
     fps = info.fps
     warnings: list[str] = []
     codes: list[tuple[str, str]] = []
     sa = min(1.0, ANALYSIS_LONG_SIDE / info.long_side)
-    step = max(1, round(fps / 120))
+    i0, i1, step, k = _track_window(fps, impact.time, opt.slowmo)
     fps_a = fps / step
-    k = max(1, round(fps_a / 30))
-    i0 = max(0, int(impact.time * fps) - (k + 2) * step)
-    i1 = int((impact.time + TRACK_SECONDS * opt.slowmo) * fps) + (k + 1) * step
     people_at = {int((impact.time + dt * opt.slowmo) * fps) for dt in (0.0, 0.3, 0.6)}
     frames, times, color_at_impact, people = [], [], None, []
     # People are looked for beside the decode, not in its way.
     pool = ThreadPoolExecutor(max_workers=det.parallel)
     found_people = []
+    main = {"start": i0, "stop": i1, "scale": sa, "every": step, "phase": i0}
+    head: list = []
     try:
-        for i, small in decode(info, start=i0, stop=i1, scale=sa):
-            if (i - i0) % step:
-                continue
+        decoded = decode_pair(info, main, motion[0].decode_args(stop=i1), head) if motion else decode(info, **main)
+        for i, small in _checked(decoded, check):
             if color_at_impact is None and i >= impact.frame:
                 color_at_impact = small.copy()
             if any(i <= p < i + step for p in people_at):
@@ -740,6 +855,8 @@ def _track_and_fit(info: VideoInfo, det: BallDetector, impact: Impact, ball: Bal
             people += [b for b in fut.result() if b.h > 0.2 * frames[0].shape[0]]
     finally:
         pool.shutdown(cancel_futures=True)
+    if motion:
+        motion[1][:] = head
     if len(frames) < 2 * k + 3:
         raise RuntimeError(f"Too few frames after the impact at {impact.time:.1f} s.")
     times = np.array(times)

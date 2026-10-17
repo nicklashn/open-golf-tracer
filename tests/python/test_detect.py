@@ -284,3 +284,23 @@ def test_an_own_model_is_used_as_it_is(monkeypatch, tmp_path):
     own.write_bytes(b"something else")
     monkeypatch.setenv("GOLF_ONNX_MODEL", str(own))
     assert detect.ensure_onnx_model() == own and downloads == []
+
+
+def test_the_detector_is_not_reloaded_for_decoder_settings(monkeypatch):
+    """A decoder found broken (decode_failed) or another decoder changes the Runtime, not the
+    detector: reloading the model on the GPU took seconds per job."""
+    from shottracer import runtime
+    from shottracer.detect import get_detector
+
+    monkeypatch.setenv("GOLF_DETECTOR", "blob")
+    get_detector.cache_clear()
+    try:
+        runtime.configure(runtime.Runtime(batch=2))
+        det = get_detector()
+        runtime.configure(runtime.Runtime(batch=2, decoder="d3d11va", decode_failed=("d3d11va:hevc:yuv420p10le",)))
+        assert get_detector() is det
+        runtime.configure(runtime.Runtime(batch=4))
+        assert get_detector() is not det
+    finally:
+        runtime.configure(runtime.Runtime())
+        get_detector.cache_clear()

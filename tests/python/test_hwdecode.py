@@ -46,7 +46,7 @@ def _before_input(cmd: list[str]) -> list[str]:
 def test_each_method_only_changes_the_decoder(method, args):
     cmd, shape = decode_cmd(_info(), method, start=120, stop=360, exe="ffmpeg")
     sw, _ = decode_cmd(_info(), "sw", start=120, stop=360, exe="ffmpeg")
-    assert _before_input(cmd) == ["ffmpeg", "-v", "error", *args, "-ss", f"{119.5 / 60:.6f}"]
+    assert _before_input(cmd) == ["ffmpeg", "-v", "error", *args, "-ss", f"{117.5 / 60:.6f}", "-copyts", "-start_at_zero"]
     # After the input everything is the same: frames come back to memory and are cropped, scaled,
     # converted and auto-rotated by the same software filters (no -hwaccel_output_format, no
     # -noautorotate), so their size and orientation never depend on the decoder.
@@ -55,15 +55,19 @@ def test_each_method_only_changes_the_decoder(method, args):
     assert shape == (1080, 1920, 3) and cmd[cmd.index("-frames:v") + 1] == "240"
 
 
-def test_filters_threads_rate_and_gray():
+def test_filters_threads_every_and_gray():
     info = _info()
     cmd, shape = decode_cmd(info, "cuda", start=0, stop=600, crop=(10, 20, 640, 360), scale=0.5, gray=True, threads=6)
     assert cmd[cmd.index("-threads") + 1] == "6" and "-ss" not in cmd
-    assert cmd[cmd.index("-vf") + 1] == "crop=640:360:10:20,scale=320:180:flags=area,format=gray"
+    assert cmd[cmd.index("-vf") + 1] == "fps=60:start_time=0:round=near,crop=640:360:10:20,scale=320:180:flags=area,format=gray"
     assert shape == (180, 320) and cmd[-3:] == ["-pix_fmt", "gray", "-"]
-    cmd, shape = decode_cmd(info, "d3d11va", start=60, stop=120, scale=0.1, gray=True, rate=10.0)
-    assert cmd[cmd.index("-vf") + 1] == "fps=10,scale=192:108:flags=area,format=gray"
-    assert cmd[cmd.index("-t") + 1] == "1.000000" and "-frames:v" not in cmd and shape == (108, 192)
+    # Every 6th frame counted from frame 57: 60 is 3 past it, so the first kept is 63 (63, 69, ... 117).
+    cmd, shape = decode_cmd(info, "d3d11va", start=60, stop=120, scale=0.1, gray=True, every=6, phase=57)
+    assert cmd[cmd.index("-vf") + 1] == "fps=60:start_time=0:round=near,trim=start_pts=60,select='not(mod(n+3,6))',scale=192:108:flags=area,format=gray"
+    assert cmd[cmd.index("-frames:v") + 1] == "10" and shape == (108, 192)
+    assert list(V.picked(60, 120, 6, 57)) == list(range(63, 120, 6))
+    cmd, _ = decode_cmd(_info(fps=30000 / 1001), "sw", start=10, stop=20)
+    assert cmd[cmd.index("-vf") + 1].startswith("fps=30000/1001:")      # the exact rate, not 29.97
 
 
 def test_a_portrait_phone_clip_keeps_its_display_size():
@@ -230,9 +234,9 @@ def test_the_end_of_the_file_is_not_a_failure(clip, fake):
 
 
 @needs_ffmpeg
-def test_with_a_rate_the_cpu_starts_over_and_skips_what_was_delivered(clip, fake):
+def test_every_nth_frame_the_cpu_carries_on_after_what_was_delivered(clip, fake):
     info = probe(clip)
-    kw = {"start": 3, "stop": 80, "scale": 0.5, "gray": True, "rate": 10.0}
+    kw = {"start": 3, "stop": 80, "scale": 0.5, "gray": True, "every": 3, "phase": 1}
     runtime.configure(runtime.Runtime(decoder="sw"))
     ref = _frames(info, **kw)
     runtime.configure(runtime.Runtime(decoder="qsv"))
@@ -290,3 +294,24 @@ def test_os_error_from_a_missing_binary_is_still_raised(monkeypatch):
     runtime.configure(runtime.Runtime(decoder="sw"))
     with pytest.raises(OSError):
         list(decode(_info()))
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("which", ["clip", "rotated"])
+def test_one_decode_for_two_uses_gives_the_same_frames(clip, rotated, fake, which):
+    """decode_pair: the track's frames and the motion scan's samples from one ffmpeg run are the
+    frames two separate decodes give (also on a rotated clip, and through a GPU decoder, which
+    falls back to the two decodes)."""
+    info = probe(clip if which == "clip" else rotated)
+    main = {"start": 30, "stop": 70, "scale": 1.0, "every": 2, "phase": 30}
+    side = {"start": 12, "stop": 70, "scale": 0.25, "gray": True, "every": 3, "phase": 12}
+    runtime.configure(runtime.Runtime(decoder="sw"))
+    ref_main, ref_side = _frames(info, **main), _frames(info, **side)
+    for decoder, mode in (("sw", "ok"), ("d3d11va", "fail")):
+        runtime.configure(runtime.Runtime(decoder=decoder))
+        fake(mode, 0)
+        side_out: list = []
+        _same([(i, f.copy()) for i, f in V.decode_pair(info, main, side, side_out)], ref_main)
+        _same(side_out, ref_side)
+        if decoder == "sw":
+            assert len(fake.calls()) == 1 and "split=2" in fake.calls()[0]   # one run

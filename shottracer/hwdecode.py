@@ -138,3 +138,26 @@ def candidates(ffmpeg: str, platform: str | None = None) -> list[str]:
     """GPU decoders worth measuring on this platform, best first."""
     have = set(compiled(ffmpeg))
     return [m for m in PLATFORM_METHODS.get(platform or sys.platform, ()) if m in have]
+
+
+@functools.cache
+def device_ok(ffmpeg: str, method: str) -> bool:
+    """This PC has the device for a GPU decoder (ffmpeg can open it): qsv needs an Intel GPU,
+    cuda an NVIDIA one, vaapi a render node. Cheap: no video is decoded."""
+    cmd = [ffmpeg, "-v", "error", "-init_hw_device", method, "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04", "-frames:v", "1", "-f", "null", "-"]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def usable(ffmpeg: str, platform: str | None = None) -> list[str]:
+    """candidates() whose device this PC has: the others would only fail (e.g. qsv without an
+    Intel GPU), so they are not measured."""
+    out = []
+    for m in candidates(ffmpeg, platform):
+        if device_ok(ffmpeg, m):
+            out.append(m)
+        else:
+            log.info("GPU decoder %s skipped: no such device on this PC", m)
+    return out

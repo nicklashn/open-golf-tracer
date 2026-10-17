@@ -399,6 +399,8 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
         # rfdetr: RGB in [0, 1], bilinear resize without antialiasing, ImageNet normalisation.
         # Resize and channel order commute with the per-pixel scaling, so they come first and the
         # arithmetic runs on 704x704 values, not a full-HD frame's (the same result, 39 -> 19 ms on 4 cores).
+        # The resize itself stays in float: an 8-bit resize rounds (up to 0.75 grey levels off
+        # rfdetr's input) and saves only ~2 ms of the ~3, beside the network.
         x = cv2.resize(img.astype(np.float32), (self.RESOLUTION, self.RESOLUTION), interpolation=cv2.INTER_LINEAR)
         x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
         return np.ascontiguousarray(((x - self._SUB) * self._MUL).transpose(2, 0, 1))
@@ -489,10 +491,11 @@ _loaded: dict[tuple, BallDetector] = {}
 
 def get_detector(weights: str | None = None) -> BallDetector:
     """The process's detector for the current Runtime (loaded once; a lock so a warm-up thread
-    and the first job do not both load the model). Another Runtime replaces it; the old one's
-    memory goes once no job holds it any more."""
+    and the first job do not both load the model). A Runtime with other detector settings
+    replaces it (the decoder settings do not: reloading the model on the GPU takes seconds); the
+    old one's memory goes once no job holds it any more."""
     rt = runtime.current()
-    key = (weights, rt)
+    key = (weights, rt.sessions, rt.batch, rt.threads, rt.gpu)
     with _detector_lock:
         if key not in _loaded:
             _loaded.clear()

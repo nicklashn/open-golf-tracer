@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import collections
+import fractions
 import functools
 import json
+import math
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import weakref
 from dataclasses import dataclass
@@ -40,6 +43,11 @@ class VideoInfo:
     @property
     def duration(self) -> float:
         return self.frame_count / self.fps
+
+    @property
+    def rate(self) -> fractions.Fraction:
+        """The frame rate as the exact fraction ffmpeg is given (30000/1001, not 29.97...)."""
+        return frame_rate(self.fps)
 
     @property
     def hdr(self) -> bool:
@@ -104,6 +112,17 @@ def parse_rotation(stream: dict) -> int:
         return 0
 
 
+def frame_rate(fps: float) -> fractions.Fraction:
+    return fractions.Fraction(fps).limit_denominator(100_000)
+
+
+# Frame i of a video is the picture shown at i / fps seconds after the file's start, on a
+# constant-rate grid at the probed fps, both in decode() and in read_frame(): of the frames whose
+# time rounds to slot i, the last one; with none (a variable-rate phone clip filming slower in low
+# light), the one before it, shown again. ffmpeg's fps filter does exactly this, and read_frame
+# picks the same frame, so the times of strikes, tracks and putts line up on any clip.
+
+
 def read_frame(info: VideoInfo, index: int) -> np.ndarray | None:
     """One display-oriented BGR frame. In-process (PyAV) when possible: starting an ffmpeg
     process per frame cost ~1 s each on Windows, ~15x slower than seeking in an open file."""
@@ -117,8 +136,13 @@ def read_frame(info: VideoInfo, index: int) -> np.ndarray | None:
     return None
 
 
+FORWARD_S = 2.0   # a frame at most this far ahead is decoded on to, not sought (unless a keyframe comes sooner)
+SEEK_PAD = 2      # slots sought before the one wanted, so a gap in a variable-rate clip finds the frame before it
+
+
 class _FrameReader:
-    """An open container for random frame access (seek to the keyframe, decode forward)."""
+    """An open container for random frame access (seek to the keyframe, decode forward; a frame
+    shortly after the last one read is decoded on to without seeking)."""
 
     _ROTATE = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, -90: cv2.ROTATE_90_CLOCKWISE, 270: cv2.ROTATE_90_CLOCKWISE,
                -270: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180, -180: cv2.ROTATE_180}
@@ -134,25 +158,77 @@ class _FrameReader:
         self.closed = False
         with _all_lock:
             _all.add(self)
+        self.tb = fractions.Fraction(self.stream.time_base)
+        # Times count from the file's start, as ffmpeg's (-start_at_zero) do: an MPEG-TS clip
+        # or a trimmed phone video may start at 1.4 s.
+        start = self.container.start_time or 0
+        self.origin = _round_near(fractions.Fraction(start, 1_000_000) / self.tb)
+        self._frames = None            # the decoder after the last seek
+        self._cur = None               # the last frame read from it that was before the slot asked for
+        self._next = None              # the frame after that, already decoded
+        self._last_key: int | None = None
+        self._gop: float | None = None  # longest keyframe distance seen (seconds)
+
+    def _slot_below(self, pts: int, rate: fractions.Fraction, bound: fractions.Fraction) -> bool:
+        """True when a frame at `pts` falls in a slot before `bound` (slot + 1/2)."""
+        return (pts - self.origin) * self.tb * rate < bound
+
+    def _pull(self):
+        assert self._frames is not None
+        for f in self._frames:
+            if f.pts is None:
+                continue
+            if f.key_frame:
+                if self._last_key is not None and f.pts > self._last_key:
+                    self._gop = max(self._gop or 0.0, float((f.pts - self._last_key) * self.tb))
+                self._last_key = f.pts
+            return f
+        return None
 
     def frame(self, index: int, fps: float) -> np.ndarray | None:
-        t = index / fps
-        half = 0.5 / fps
-        s = self.stream
+        rate = frame_rate(fps)
+        bound = fractions.Fraction(2 * index + 1, 2)
         with self.lock:
-            self.container.seek(max(0, int((t - half) / float(s.time_base))), stream=s, backward=True)
-            for f in self.container.decode(s):
-                if f.time is not None and f.time >= t - half:
-                    img = f.to_ndarray(format="bgr24")
-                    rot = self._ROTATE.get(int(round(getattr(f, "rotation", 0) or 0)))
-                    return cv2.rotate(img, rot) if rot is not None else img
-        return None
+            pts = self._cur.pts if self._cur is not None else None
+            ahead = (index - float((pts - self.origin) * self.tb * rate)) / float(rate) if pts is not None else math.inf
+            if not (pts is not None and self._slot_below(pts, rate, bound) and ahead <= min(FORWARD_S, self._gop or FORWARD_S)):
+                t = fractions.Fraction(index - SEEK_PAD, 1) / rate - fractions.Fraction(1, 2) / rate
+                target = self.origin + math.floor(max(fractions.Fraction(0), t) / self.tb)
+                self.container.seek(int(target), stream=self.stream, backward=True)
+                self._frames = self.container.decode(self.stream)
+                self._cur = self._next = None
+                self._last_key = None
+            try:
+                while True:
+                    f = self._next if self._next is not None else self._pull()
+                    self._next = None
+                    if f is None:
+                        break
+                    if self._slot_below(f.pts, rate, bound):
+                        self._cur = f
+                        continue
+                    self._next = f
+                    break
+            except Exception:
+                self._cur = self._next = None   # seek again next time
+                raise
+            f = self._cur if self._cur is not None else self._next   # before the first frame: the first one
+            if f is None:
+                return None
+            img = f.to_ndarray(format="bgr24")
+            rot = self._ROTATE.get(int(round(getattr(f, "rotation", 0) or 0)))
+            return cv2.rotate(img, rot) if rot is not None else img
 
     def close(self) -> None:
         self.closed = True
         with _all_lock:
             _all.discard(self)
         self.container.close()
+
+
+def _round_near(x: fractions.Fraction) -> int:
+    """Rounds half away from zero, as ffmpeg does (AV_ROUND_NEAR_INF)."""
+    return int(math.floor(x + fractions.Fraction(1, 2))) if x >= 0 else -int(math.floor(-x + fractions.Fraction(1, 2)))
 
 
 _local = threading.local()
@@ -211,10 +287,17 @@ class DecodeError(RuntimeError):
 
 
 def decode_plan(info: VideoInfo, crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
-                rate: float | None = None) -> tuple[list[str], tuple[int, ...], str]:
+                start: int = 0, every: int = 1, phase: int = 0) -> tuple[list[str], tuple[int, ...], str]:
     """(filters, frame shape, pixel format) for decode()."""
     w, h = (crop[2], crop[3]) if crop else (info.width, info.height)
-    filters = [f"fps={rate:g}"] if rate else []
+    # The constant-rate grid (see read_frame), counted from the file's start (-copyts
+    # -start_at_zero, start_time=0); trim drops the slots before `start` and select keeps every
+    # `every`-th slot counted from `phase`. Both run before the pixels are touched.
+    filters = [f"fps={info.rate}:start_time=0:round=near"]
+    if start > 0:
+        filters.append(f"trim=start_pts={start}")
+    if every > 1:
+        filters.append(f"select='not(mod(n+{(start - phase) % every},{every}))'")
     if crop:
         filters.append(f"crop={crop[2]}:{crop[3]}:{crop[0]}:{crop[1]}")
     if scale != 1.0:
@@ -227,23 +310,29 @@ def decode_plan(info: VideoInfo, crop: tuple[int, int, int, int] | None = None, 
     return filters, ((h, w) if gray else (h, w, 3)), pix
 
 
+def picked(start: int, stop: int | None, every: int = 1, phase: int = 0) -> range | None:
+    """The frame indices decode() yields for these arguments (None: to the end of the file)."""
+    first = start + (phase - start) % every
+    return range(first, stop, every) if stop is not None else None
+
+
 def decode_cmd(info: VideoInfo, method: str = hwdecode.AUTO, start: int = 0, stop: int | None = None,
                crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
-               rate: float | None = None, threads: int = 0, exe: str = "ffmpeg") -> tuple[list[str], tuple[int, ...]]:
+               every: int = 1, phase: int = 0, threads: int = 0, exe: str = "ffmpeg") -> tuple[list[str], tuple[int, ...]]:
     """The ffmpeg command decode() runs, and the shape of each frame it writes.
 
     Every method decodes to frames in memory and then crops, scales, converts and rotates them
     in software (ffmpeg's autorotation), so the frames are the same size and orientation
     whichever decoder made them."""
-    filters, shape, pix = decode_plan(info, crop, scale, gray, rate)
+    filters, shape, pix = decode_plan(info, crop, scale, gray, start, every, phase)
     cmd = [exe, "-v", "error", *hwdecode.input_args(method)]
     if threads:
         cmd += ["-threads", str(threads)]
-    if start > 0:
-        cmd += ["-ss", f"{(start - 0.5) / info.fps:.6f}"]
-    cmd += ["-i", str(info.path)]
+    if start > SEEK_PAD:   # a little early: the frames before `start` only pass the grid, which trim drops
+        cmd += ["-ss", f"{(start - SEEK_PAD - 0.5) / info.fps:.6f}"]
+    cmd += ["-copyts", "-start_at_zero", "-i", str(info.path)]
     if stop is not None:
-        cmd += ["-t", f"{(stop - start) / info.fps:.6f}"] if rate else ["-frames:v", str(stop - start)]
+        cmd += ["-frames:v", str(len(picked(start, stop, every, phase) or ()))]
     cmd += ["-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", ",".join(filters),
             "-f", "rawvideo", "-pix_fmt", pix, "-"]
     return cmd, shape
@@ -261,9 +350,10 @@ def _read_into(stream, out: np.ndarray) -> bool:
     return True
 
 
-def _pipe(cmd: list[str], shape: tuple[int, ...], start: int, check: bool = False):
-    """Yield (index, frame) from an ffmpeg rawvideo pipe. With `check` a failed ffmpeg (non-zero
-    exit at the end of the stream) raises DecodeError with the end of its error output."""
+def _pipe(cmd: list[str], shape: tuple[int, ...], start: int, check: bool = False, step: int = 1, finish: bool = False):
+    """Yield (index, frame) from an ffmpeg rawvideo pipe (indices start, start + step, ...). With
+    `check` a failed ffmpeg (non-zero exit at the end of the stream) raises DecodeError with the
+    end of its error output; with `finish` ffmpeg may finish its other outputs after the pipe ends."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE if check else subprocess.DEVNULL, bufsize=0)
     assert proc.stdout is not None
     err: collections.deque[bytes] = collections.deque(maxlen=20)
@@ -280,7 +370,9 @@ def _pipe(cmd: list[str], shape: tuple[int, ...], start: int, check: bool = Fals
             if not _read_into(proc.stdout, frame):
                 break
             yield i, frame
-            i += 1
+            i += step
+        if finish:
+            proc.wait()
         if check:
             rc = proc.wait()
             if drain is not None:
@@ -299,22 +391,20 @@ def _pipe(cmd: list[str], shape: tuple[int, ...], start: int, check: bool = Fals
             proc.stderr.close()
 
 
-def _expected(info: VideoInfo, start: int, stop: int | None, rate: float | None) -> int | None:
+def _expected(info: VideoInfo, start: int, stop: int | None, every: int, phase: int) -> int | None:
     """Frames a decode should give when the file has them (None: not known well enough)."""
-    if rate:
-        return None
     end = min(stop, info.frame_count) if stop is not None and info.frame_count else stop or info.frame_count
-    return max(0, end - start) if end else None
+    return len(picked(start, end, every, phase) or ()) if end else None
 
 
 def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
            crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
-           rate: float | None = None):
+           every: int = 1, phase: int = 0):
     """Yield (index, frame) via an ffmpeg pipe – decoding, crop and resize happen in ffmpeg.
 
-    crop = (x, y, w, h) in display (rotated) pixels; scale applies after the crop. With `rate`
-    the frames are resampled to that many per second (the index then counts samples from
-    `start`, `rate` per second) and `stop` limits the duration.
+    crop = (x, y, w, h) in display (rotated) pixels; scale applies after the crop. With `every`
+    only the frames whose index is `phase` plus a multiple of `every` are yielded (dropped in
+    ffmpeg, before they are scaled or sent).
 
     The decoder is the one in the runtime settings (hwdecode); a GPU decoder that fails hands
     over to the CPU where it stopped, so the caller sees one unbroken run of frames.
@@ -322,46 +412,98 @@ def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
     rt = runtime.current()
     method = hwdecode.choose(rt.decoder, info.codec, info.pix_fmt, rt.decode_failed)
     exe = ffmpeg_bin()
+    every = max(1, int(every))
 
     def run(m: str, s: int, check: bool = False):
-        cmd, shape = decode_cmd(info, m, s, stop, crop, scale, gray, rate, rt.threads, exe)
-        return _pipe(cmd, shape, s, check)
+        cmd, shape = decode_cmd(info, m, s, stop, crop, scale, gray, every, phase, rt.threads, exe)
+        return _pipe(cmd, shape, s + (phase - s) % every, check, every)
 
     if method not in hwdecode.HW_METHODS:
         yield from run(method, start)
         return
-    n, reason = 0, None
+    n, last, reason = 0, None, None
     frames = run(method, start, check=True)
     try:
         for item in frames:
             yield item
             n += 1
+            last = item[0]
     except DecodeError as exc:
         reason = str(exc)
     finally:
         frames.close()
-    expected = _expected(info, start, stop, rate)
-    short = expected is not None and n < expected or (rate is not None and n == 0)
+    expected = _expected(info, start, stop, every, phase)
+    short = expected is not None and n < expected
     if reason is None and not short:
         return
     if reason is not None:
         hwdecode.record_failure(method, info.codec, info.pix_fmt, reason)
-    # Carry on in software from the first frame the GPU did not deliver. With a rate the samples
-    # depend on where the decode began, so that run starts over and skips what was delivered.
-    s = start if rate else start + n
+    # Carry on in software from the first frame the GPU did not deliver.
+    s = start if last is None else last + 1
     if stop is not None and s >= stop:
         return
     rest = run(hwdecode.SW, s)
     try:
-        for k, (i, f) in enumerate(rest):
-            if rate and k < n:
-                continue
+        for i, f in rest:
             if reason is None:   # the GPU stopped early, the CPU found more: it dropped frames
                 hwdecode.record_failure(method, info.codec, info.pix_fmt, f"{n} of {expected or 'the'} frames, then nothing")
                 reason = "short"
             yield i, f
     finally:
         rest.close()
+
+
+def decode_pair(info: VideoInfo, main: dict, side: dict, out: list[tuple[int, np.ndarray]]):
+    """decode(**main), and decode(**side) of the same video from the same ffmpeg run: each frame
+    is decoded once and goes both ways (e.g. the track's full-size frames and the motion scan's
+    small samples around them). Yields main's (index, frame); `out` gets side's at the end.
+
+    The frames are those the two decodes would give on their own. A GPU decoder (which may hand
+    over to the CPU half way) or nothing to share: the two decodes, one after the other."""
+    rt = runtime.current()
+    method = hwdecode.choose(rt.decoder, info.codec, info.pix_fmt, rt.decode_failed)
+    s0, s1 = int(main.get("start", 0)), main.get("stop")
+    t0, t1 = int(side.get("start", 0)), side.get("stop")
+    if method in hwdecode.HW_METHODS or s1 is None or t1 is None or t1 <= t0 or s1 <= s0:
+        yield from decode(info, **main)
+        out.extend(decode(info, **side))
+        return
+
+    def branch(kw: dict) -> tuple[str, tuple[int, ...], str, range, int]:
+        every = max(1, int(kw.get("every", 1)))
+        phase = int(kw.get("phase", 0))
+        filters, shape, pix = decode_plan(info, kw.get("crop"), kw.get("scale", 1.0), kw.get("gray", False), kw["start"], every, phase)
+        return ",".join(filters[1:]), shape, pix, picked(kw["start"], kw["stop"], every, phase) or range(0), every
+
+    mf, mshape, mpix, mpick, mevery = branch(main)
+    sf, sshape, spix, spick, _ = branch(side)
+    first = min(s0, t0)
+    cmd = [ffmpeg_bin(), "-v", "error", "-y", *hwdecode.input_args(method)]
+    if rt.threads:
+        cmd += ["-threads", str(rt.threads)]
+    if first > SEEK_PAD:
+        cmd += ["-ss", f"{(first - SEEK_PAD - 0.5) / info.fps:.6f}"]
+    # The decoder's own pixel format up to the split, so each branch converts from it as its own
+    # decode would (else ffmpeg may convert once, before the split, for both).
+    grid = decode_plan(info)[0][0] + (f",format={info.pix_fmt}" if info.pix_fmt else "")
+    fd, tmp = tempfile.mkstemp(suffix=".raw", prefix="shottracer-")
+    os.close(fd)
+    cmd += ["-copyts", "-start_at_zero", "-i", str(info.path), "-an", "-sn", "-dn",
+            "-filter_complex", f"[0:v]{grid},split=2[a][b];[a]{mf}[m];[b]{sf}[s]",
+            "-map", "[m]", "-frames:v", str(len(mpick)), "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", mpix, "-",
+            "-map", "[s]", "-frames:v", str(len(spick)), "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", spix, tmp]
+    try:
+        yield from _pipe(cmd, mshape, mpick.start if len(mpick) else s0, step=mevery, finish=True)
+        size = int(np.prod(sshape))
+        data = np.fromfile(tmp, np.uint8)
+        n = min(len(spick), data.size // size)
+        frames = data[: n * size].reshape(n, *sshape)
+        out.extend((spick[k], frames[k]) for k in range(n))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def load_audio(path: Path, sr: int = 22050) -> tuple[np.ndarray, int] | None:
