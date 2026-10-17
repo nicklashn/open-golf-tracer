@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,9 @@ class ExportIn(BaseModel):
     settings: dict
     document: dict | None = None      # the editor sends its current document (saved first)
     locale: str | None = None         # the UI language: graphics in the export are drawn in it
+    # A made video's description and chapters for YouTube, as the export dialog showed them;
+    # kept with the export so "My videos" can copy it.
+    publishText: str | None = Field(None, max_length=8000)
 
 
 def public_export(db: Session, e: Export) -> dict:
@@ -57,7 +60,8 @@ def create_export(project_id: str, body: ExportIn, db: Session = Depends(get_db)
     seconds = sum((c["out"] - c["in"]) / (c.get("speed") or 1) if c.get("kind") == "video" else c.get("duration", 0)
                   for c in doc.get("clips", []))
     need_space(export_need(seconds, s["preset"]))
-    e = Export(user_id=user.id, project_id=p.id, project_name=p.name, settings=s)
+    kept = {**s, "publishText": body.publishText.strip()} if body.publishText and body.publishText.strip() else s
+    e = Export(user_id=user.id, project_id=p.id, project_name=p.name, settings=kept)
     db.add(e)
     db.flush()
     locale = body.locale if body.locale in ("da", "en") else (user.locale if user.locale in ("da", "en") else "en")

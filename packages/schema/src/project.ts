@@ -451,6 +451,20 @@ export const HoleEdit = z.object({
 });
 export type HoleEdit = z.infer<typeof HoleEdit>;
 
+/**
+ * What "Make a video for me" wrote for posting the video: the description, and a chapter title
+ * per hole ("Hul 4 – par 4 – birdie"). The chapters' times are not stored – they come from the
+ * timeline as it is, so trimming the video keeps them right (see @golf/compose publish.ts).
+ */
+export const Publish = z.object({
+  title: z.string().max(120).default(''),
+  description: z.string().max(5000).default(''),
+  /** The first chapter's title when the first hole starts later ("Intro"). */
+  intro: z.string().max(100).default('Intro'),
+  holes: z.record(z.string().min(1).max(8), z.string().max(100)).default({}),
+});
+export type Publish = z.infer<typeof Publish>;
+
 // ---------------------------------------------------------------------------------------------
 // Project
 
@@ -484,6 +498,8 @@ export const Project = z.object({
   audio: z.object({ originalVolume: z.number().min(0).max(2).default(1), muted: z.boolean().default(false) }).default({ originalVolume: 1, muted: false }),
   /** The user's corrections to the score, by hole ('7'), see `HoleEdit`. Optional: older projects have none. */
   scoreEdits: z.record(z.string().min(1).max(8), HoleEdit).optional(),
+  /** Text for posting a made video (YouTube): set by "Make a video for me", optional. */
+  publish: Publish.optional(),
 });
 export type Project = z.infer<typeof Project>;
 export type ProjectInput = z.input<typeof Project>;

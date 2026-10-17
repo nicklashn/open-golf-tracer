@@ -70,6 +70,8 @@ export function Editor({ projectId }: { projectId: string }) {
   const raw = useEditor((s) => s.doc?.format.aspect === 'original' && s.doc.layers.length === 0);
   /** Analyses still queued or running in this project (a round has one per clip). */
   const analysing = useRef(new Set<string>());
+  /** Videos waiting for answers the user was told about (once each). */
+  const asked = useRef(new Set<string>());
 
   const load = useCallback(async () => {
     try {
@@ -229,6 +231,11 @@ export function Editor({ projectId }: { projectId: string }) {
             });
           else toast.info(t.editor.analysisNone, t.editor.analysisNoneHint, { duration: 10_000 });
         }
+      }
+      // A video waiting for answers (also one started before a reload): say so once, with the way back.
+      if (job.kind === 'compose' && job.status === 'awaiting_answers' && !s.makeOpen && !asked.current.has(job.id)) {
+        asked.current.add(job.id);
+        toast.info(t.auto.waiting, t.auto.waitingHint, { action: { label: t.auto.answerNow, onClick: () => setAutoOpen(true) }, duration: 20_000 });
       }
       if (job.kind === 'retrack') {
         const shotId = (job.result?.shot as Shot | undefined)?.id;

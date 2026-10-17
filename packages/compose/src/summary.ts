@@ -270,12 +270,6 @@ export function tagHighlights(s: RoundSummary): void {
 }
 
 /**
- * The summary as compact text for a language model: a header line, one line per clip and one
- * per shot. Small on purpose – a round of 80 shots stays well under 3 000 tokens. Clips are
- * "clip n", never their file names (which can hold names, places or dates): the text may go to a
- * cloud provider.
- */
-/**
  * Free text from the user or OpenStreetMap (project name, course name) as one quoted value: no
  * line breaks or control/format characters (a name can't start a line of its own that reads like
  * an instruction), quotes escaped, and capped.
@@ -291,18 +285,38 @@ export function quoted(v: string, max = 80): string {
 /** A short token from OpenStreetMap (a hole's ref): letters, digits and a few signs only. */
 const token = (v: string | null | undefined, max = 8) => (v ? v.replace(/[^\p{L}\p{N}._/-]+/gu, '').slice(0, max) : '') || '?';
 
+/**
+ * The summary as compact text for a language model: a header line, one line per clip and one
+ * per shot, nothing the model can read elsewhere (a shot's par is its clip's, an empty field is
+ * left out). Small on purpose – a round of 100 shots stays around 3 000 tokens, so the second
+ * call (after the answers) fits the ceiling too. Shots are "shot n" – the model names them by
+ * that number (see ai.ts), never by id. Clips are "clip n", never their file names (which can
+ * hold names, places or dates): the text may go to a cloud provider.
+ */
 export function summaryText(s: RoundSummary): string {
   const lines = [
     `round ${quoted(s.name)} course ${s.course ? quoted(s.course) : '"?"'} date ${token(s.date, 10)} clips ${s.clips.length} shots ${s.shots.length}`,
   ];
   for (const c of s.clips)
     lines.push(
-      `clip ${c.n} id=${c.id} filmed=${c.recordedAt ?? '?'} ${c.seconds}s ${c.portrait ? 'portrait' : 'landscape'} gps=${c.gps ? 'y' : 'n'} hole=${token(c.hole)} par=${c.par ?? '?'} shots=${c.shots}`,
+      `clip ${c.n} ${filmedAt(c.recordedAt)} ${Math.round(c.seconds)}s ${c.portrait ? 'portrait' : 'landscape'}${c.gps ? '' : ' nogps'} hole=${token(c.hole)} par=${c.par ?? '?'}`,
     );
-  for (const x of s.shots)
+  for (const x of s.shots) {
+    const flags = [...x.flags, ...(x.nextOff ? ['next_shot_distance'] : [])];
     lines.push(
-      `shot ${x.n} id=${x.id} clip=${x.clip} t=${x.t} hole=${token(x.hole)} par=${x.par ?? '?'} club=${x.club} carry=${x.carrySuggestM ? `~${x.carrySuggestM}` : (x.carryM ?? '?')} apex=${x.apexM ?? '?'} conf=${x.confidence} flags=${[...x.flags, ...(x.nextOff ? ['next_shot_distance'] : [])].join(',') || '-'}${x.nextM ? ` next=${x.nextM}` : ''}${x.tags?.length ? ` tags=${x.tags.join(',')}` : ''}`,
+      [
+        `shot ${x.n} clip=${x.clip} t=${x.t} hole=${token(x.hole)}`,
+        x.club && x.club !== 'auto' ? `club=${x.club}` : '',
+        `carry=${x.carrySuggestM ? `~${x.carrySuggestM}` : (x.carryM ?? '?')}`,
+        `conf=${x.confidence}`,
+        flags.length ? `flags=${flags.join(',')}` : '',
+        x.nextM ? `next=${x.nextM}` : '',
+        x.tags?.length ? `tags=${x.tags.join(',')}` : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
     );
+  }
   for (const p of s.putts)
     if (p.tags?.length) lines.push(`putt clip=${p.clip} t=${p.t} hole=${token(p.hole)} holed=${p.holed ? 'y' : 'n'} tags=${p.tags.join(',')}`);
   const holes = scoredHoles(s);
@@ -315,4 +329,10 @@ export function summaryText(s: RoundSummary): string {
     );
   }
   return lines.join('\n');
+}
+
+/** The clip's local time of day ("10:50", as filmed; the day is in the header), or '?'. */
+function filmedAt(iso: string | null): string {
+  const m = iso ? /T(\d\d:\d\d)/.exec(iso) : null;
+  return m ? m[1] : '?';
 }

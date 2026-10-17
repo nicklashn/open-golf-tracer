@@ -6,6 +6,7 @@
 import { hostname } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { InternalApi } from './api';
+import { aiErrorJson } from '@golf/compose';
 import { AiError, handleAiTest, handleCompose } from './compose-job';
 import { handleExport } from './export-job';
 import { Canceled } from './run';
@@ -30,8 +31,8 @@ async function handle(job: { id: string; payload: Record<string, unknown> }): Pr
   });
 }
 
-/** One lane claims one kind of job at a time. Exports and video plans run in separate lanes,
- *  so a long 4K export never holds up "Make a video for me". */
+/** One lane claims one kind of job at a time. Exports, video plans and "Test connection" run in
+ *  separate lanes, so a long 4K export never holds up "Make a video for me", nor a video the test. */
 async function lane(kinds: string[], run: (job: { id: string; kind: string; payload: Record<string, unknown> }) => Promise<void>): Promise<void> {
   let idle = 500;
   while (!stopping) {
@@ -70,20 +71,30 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 
-log('exporter starter', { worker, api: api.base, lanes: ['export', 'compose'] });
+/** The AI said no, or cannot be reached: the user has to change something, so no retry. The
+ *  error is a code the apps put in the user's language (see `aiErrorJson`). */
+async function aiFailed(job: { id: string }, e: unknown): Promise<boolean> {
+  if (!(e instanceof AiError)) return false;
+  log('ai failed', { job: job.id, code: e.code, error: e.message });
+  await api.fail(job.id, aiErrorJson(e), false);
+  return true;
+}
+
+log('exporter starter', { worker, api: api.base, lanes: ['export', 'compose', 'ai_test'] });
 void lane(['export'], handle);
-void lane(['compose', 'ai_test'], async (job) => {
+void lane(['compose'], async (job) => {
   try {
-    if (job.kind === 'ai_test') return await handleAiTest(api, job);
     const outcome = await handleCompose(api, job, log);
     if (outcome !== 'waiting') log(`video ${outcome}`, { job: job.id });
   } catch (e) {
-    // The AI said no, or cannot be reached: the user has to change something, so no retry.
-    if (e instanceof AiError) {
-      log('ai failed', { job: job.id, code: e.code, error: e.message });
-      await api.fail(job.id, e.message, false);
-      return;
-    }
-    throw e;
+    if (!(await aiFailed(job, e))) throw e;
+  }
+});
+// "Test connection" has a lane of its own: it answers in seconds even while a video is planned.
+void lane(['ai_test'], async (job) => {
+  try {
+    await handleAiTest(api, job);
+  } catch (e) {
+    if (!(await aiFailed(job, e))) throw e;
   }
 });

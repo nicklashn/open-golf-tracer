@@ -11,6 +11,8 @@ import {
   noUsage,
   planFromRules,
   planWithAI,
+  PLAN_KINDS,
+  publishText,
   puttCrop,
   puttFrames,
   puttSegment,
@@ -28,6 +30,7 @@ import {
   type AiUsage,
   type LayerNames,
   type PlanAnswers,
+  type PlanKind,
   type RoundSummary,
 } from '@golf/compose';
 import { migrateProject, type Project } from '@golf/schema';
@@ -38,6 +41,8 @@ type Locale = 'da' | 'en';
 
 export interface ComposePayload {
   project_id: string;
+  /** The format the user picked (a card in the dialog); the wish cannot change it. */
+  kind?: PlanKind | null;
   preference?: string;
   locale?: Locale;
   names?: LayerNames;
@@ -50,6 +55,13 @@ export interface ComposePayload {
   usage?: AiUsage | null;
   /** What the AI found itself from still frames before asking (answers and their notes). */
   vision?: VisionFound | null;
+  /**
+   * Saved by an earlier attempt of this job (see `checkpoint`): the plan above already has the
+   * answers applied by the AI, so a retry after a later failure does not call (or pay for) it again.
+   */
+  answered?: boolean;
+  /** The videos an earlier attempt already saved, in order: a retry does not make them twice. */
+  derived?: { id: string; name: string }[];
 }
 
 /** The AI model for a job (from the API: the user's settings, else the .env defaults). */
@@ -83,7 +95,8 @@ export function onlyClips(doc: Project, mediaIds: string[] | undefined): Project
   });
 }
 
-type Api = Pick<InternalApi, 'jobProject' | 'jobAi' | 'defer' | 'awaitAnswers' | 'derive' | 'progress' | 'complete'> & Partial<Pick<InternalApi, 'media'>>;
+type Api = Pick<InternalApi, 'jobProject' | 'jobAi' | 'defer' | 'awaitAnswers' | 'derive' | 'progress' | 'complete'> &
+  Partial<Pick<InternalApi, 'media' | 'checkpoint'>>;
 type Log = (msg: string, extra: Record<string, unknown>) => void;
 
 const T = {
@@ -97,6 +110,16 @@ const T = {
     overCeiling: (max: number) => `loftet på ${max} tokens ville blive overskredet`,
     none: 'Ingen slag blev tilbage, så der blev ikke lavet en video.',
     visionBudget: "AI'en så ikke på billederne fra greenen: det ville bruge flere tokens, end der er sat af til billeder.",
+    reasons: {
+      config: 'AI-indstillingerne mangler noget',
+      network: (what: string) => `${what} kunne ikke nås eller svarede ikke i tide`,
+      auth: (what: string) => `${what} afviste nøglen eller login`,
+      model: (what: string, model: string) => `${what} kender ikke modellen "${model}"`,
+      refused: (what: string) => `${what} afslog opgaven`,
+      limit: 'grænsen for din ChatGPT-plan er nået',
+      http: (what: string, status?: number) => `${what} svarede med en fejl${status ? ` (${status})` : ''}`,
+      other: 'AI-tjenesten fejlede',
+    },
   },
   en: {
     byModel: (m: string) => `The plan was made by the AI model ${m}.`,
@@ -108,6 +131,16 @@ const T = {
     overCeiling: (max: number) => `the ceiling of ${max} tokens would be passed`,
     none: 'No shots were left, so no video was made.',
     visionBudget: 'The AI did not look at frames from the green: it would use more tokens than are set aside for pictures.',
+    reasons: {
+      config: 'the AI settings are incomplete',
+      network: (what: string) => `${what} could not be reached or did not answer in time`,
+      auth: (what: string) => `${what} rejected the key or sign-in`,
+      model: (what: string, model: string) => `${what} does not know the model "${model}"`,
+      refused: (what: string) => `${what} declined the task`,
+      limit: 'the limit of your ChatGPT plan is reached',
+      http: (what: string, status?: number) => `${what} answered with an error${status ? ` (${status})` : ''}`,
+      other: 'the AI provider failed',
+    },
   },
 };
 
@@ -201,11 +234,31 @@ async function lookAtPutts(
   return { plan, usage, found };
 }
 
-/** Why the AI could not be used, in a few words for a note. */
+/** Why the AI could not be used, in a few words for a note – in the user's language. */
 function aiReason(e: unknown, ai: AiConfig, locale: Locale): string {
-  if (e instanceof AiError && e.code === 'budget') return T[locale].overCeiling(ai.maxTokens);
-  const text = e instanceof AiError ? e.message : 'the AI provider failed';
-  return text.replace(/\.$/, '').slice(0, 180);
+  const R = T[locale].reasons;
+  if (!(e instanceof AiError)) return R.other;
+  const what = e.info.what ?? 'AI';
+  switch (e.code) {
+    case 'budget':
+      return T[locale].overCeiling(ai.maxTokens);
+    case 'config':
+      return R.config;
+    case 'network':
+      return R.network(what);
+    case 'auth':
+      return R.auth(what);
+    case 'model':
+      return R.model(what, e.info.model ?? ai.model);
+    case 'refused':
+      return R.refused(what);
+    case 'limit':
+      return R.limit;
+    case 'http':
+    case 'vision':
+    case 'invalid':
+      return R.http(what, e.info.status);
+  }
 }
 
 export async function handleCompose(
@@ -226,7 +279,8 @@ export async function handleCompose(
   const doc = onlyClips(migrateProject(project.document), p.media_ids);
   const summary = summarize(doc);
   const stored = p.plan ? VideoPlan.safeParse(p.plan) : null;
-  const rules = planFromRules(summary, p.preference ?? '', locale);
+  const kind = p.kind && (PLAN_KINDS as readonly string[]).includes(p.kind) ? p.kind : null;
+  const rules = planFromRules(summary, p.preference ?? '', locale, { kind });
   const ai = (await api.jobAi(job.id)) as JobAiConfig;
   const useAi = ai.provider !== 'none';
   let usage: AiUsage = p.usage ?? noUsage();
@@ -240,13 +294,20 @@ export async function handleCompose(
       out = await planWithAI(ai, summary, p.preference ?? '', base, answers, {
         allowedTemplates: templatesFor(),
         used: usage,
+        kind,
         fetch: doFetch,
         log,
       });
     } catch (e) {
       const u = (e as { usage?: AiUsage }).usage;
       if (u) usage = addUsage(usage, u);
-      log('ai failed', { job: job.id, provider: ai.provider, model: ai.model, code: e instanceof AiError ? e.code : 'unknown', error: aiReason(e, ai, 'en') });
+      log('ai failed', {
+        job: job.id,
+        provider: ai.provider,
+        model: ai.model,
+        code: e instanceof AiError ? e.code : 'unknown',
+        error: e instanceof AiError ? e.message : 'unknown',
+      });
       const budget = e instanceof AiError && e.code === 'budget';
       if (answers) return { ...base, notes: [...base.notes.slice(0, 9), T[locale].failedAfter(aiReason(e, ai, locale))] };
       return { ...base, notes: [budget ? T[locale].budget(ai.maxTokens) : T[locale].failed(aiReason(e, ai, locale)), ...ruleNotes] };
@@ -260,8 +321,20 @@ export async function handleCompose(
   let plan: VideoPlan;
   let found: VisionFound = { answers: p.vision?.answers ?? {}, notes: p.vision?.notes ?? [] };
   const answers = (extra: PlanAnswers | null | undefined): PlanAnswers => ({ ...found.answers, ...(extra ?? {}) });
+  // What the AI made is kept on the job right away: should anything later fail and the job run
+  // again, it starts from there instead of calling (and paying for) the AI once more – the
+  // ceiling is per video, not per attempt.
+  const checkpoint = async (data: Partial<ComposePayload>) => {
+    Object.assign(p, data);
+    // Only a cost saving for a retry: never a reason to fail the video.
+    await api
+      .checkpoint?.(job.id, data as Record<string, unknown>)
+      .catch((e: unknown) => log('checkpoint failed', { job: job.id, error: String(e).slice(0, 200) }));
+  };
   if (stored?.success) {
-    plan = useAi && p.answers && stored.data.questions.length ? await withAi(stored.data, answers(p.answers)) : stored.data;
+    const again = useAi && p.answers && !p.answered && stored.data.questions.length;
+    plan = again ? await withAi(stored.data, answers(p.answers)) : stored.data;
+    if (again) await checkpoint({ plan, usage, answered: true });
     // The model writes its own notes; what it saw in the frames stays said.
     const missing = found.notes.filter((n) => !plan.notes.includes(n));
     if (missing.length) plan = { ...plan, notes: [...plan.notes, ...missing].slice(0, 10) };
@@ -279,6 +352,7 @@ export async function handleCompose(
       usage = v.usage;
       found = v.found;
     }
+    if (useAi) await checkpoint({ plan, usage, vision: Object.keys(found.answers).length ? found : null });
   }
 
   if (plan.questions.length && !p.answers && !p.yes) {
@@ -300,16 +374,19 @@ export async function handleCompose(
 
   await api.progress(job.id, 0.5, locale === 'da' ? 'Klipper videoen' : 'Editing the video');
   const videos = compose(doc, plan, answers(p.answers), { locale, names: p.names ?? {} });
-  const projects: { id: string; name: string }[] = [];
+  const projects: { id: string; name: string }[] = [...(p.derived ?? [])].slice(0, videos.length);
   for (const [i, v] of videos.entries()) {
+    if (i < projects.length) continue;
     projects.push(await api.derive(job.id, v.name, v.document));
+    await checkpoint({ derived: projects });
     await api.progress(job.id, 0.5 + (0.5 * (i + 1)) / videos.length);
   }
   await api.complete(job.id, {
     projects,
     kind: plan.kind,
     title: plan.title,
-    description: plan.description ?? '',
+    // For YouTube: the AI's description or one from the facts, with chapters from the timeline.
+    description: videos.length ? publishText(videos[0].document) : '',
     // Nothing left to show (every shot left out): say so instead of an empty project.
     notes: videos.length ? plan.notes : [...plan.notes, T[locale].none],
     ai: useAi ? { provider: ai.provider, model: ai.model } : null,
@@ -318,7 +395,7 @@ export async function handleCompose(
   return 'done';
 }
 
-/** "Test connection" from Settings → AI: one tiny call with the user's model. */
+/** "Test connection" from Settings → AI: one tiny call with the user's model (errors: see main.ts). */
 export async function handleAiTest(api: Pick<InternalApi, 'jobAi' | 'complete'>, job: { id: string }, doFetch?: typeof fetch): Promise<void> {
   const ai = (await api.jobAi(job.id)) as JobAiConfig;
   const t = await testConnection(ai, doFetch);

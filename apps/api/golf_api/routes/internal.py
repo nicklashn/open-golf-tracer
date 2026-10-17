@@ -55,6 +55,10 @@ class AwaitIn(BaseModel):
     message: str = Field("Waiting for answers", max_length=200)
 
 
+class CheckpointIn(BaseModel):
+    data: dict = {}
+
+
 class DeriveIn(BaseModel):
     name: str = Field(max_length=120)
     document: dict
@@ -135,6 +139,19 @@ def await_answers(job_id: str, body: AwaitIn, db: Session = Depends(get_db)):
     q.await_answers(db, j, body.result, body.message)
     db.commit()
     return {"status": j.status}
+
+
+@router.post("/jobs/{job_id}/checkpoint")
+def checkpoint(job_id: str, body: CheckpointIn, db: Session = Depends(get_db)):
+    """Keeps what a running job has done so far (the compose job's AI plan and tokens, the videos
+    it saved) in its payload: a retry after a later failure starts from there instead of redoing
+    – and paying for – the AI calls."""
+    j = _job(db, job_id)
+    if j.status != "running":
+        raise ApiError(409, "not_running", "The job is not running.")
+    j.payload = {**(j.payload or {}), **body.data}
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/jobs/{job_id}/project")

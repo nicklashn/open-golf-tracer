@@ -82,6 +82,10 @@ export class InternalApi {
     this.leases.delete(id);
     return this.call<{ status: string }>('POST', `/jobs/${id}/defer`, { lease, seconds, message });
   }
+  /** Merges `data` into the job's payload, so a retry of the job starts from there. */
+  checkpoint(id: string, data: Record<string, unknown>) {
+    return this.call<{ ok: boolean }>('POST', `/jobs/${id}/checkpoint`, { data });
+  }
   awaitAnswers(id: string, result: Record<string, unknown>, message?: string) {
     const lease = this.leases.get(id);
     this.leases.delete(id);

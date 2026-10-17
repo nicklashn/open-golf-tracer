@@ -156,7 +156,7 @@ class AiSettings(Base):
     base_url: Mapped[str] = mapped_column(String(300), default="")
     # Encrypted with DPAPI on Windows (see secretbox.py).
     api_key: Mapped[str] = mapped_column(SecretText(), default="")
-    max_tokens: Mapped[int] = mapped_column(Integer, default=16000)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=20000)
     # Still frames from the green may be sent when the putt count is unsure (off by default).
     vision: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)

@@ -179,11 +179,26 @@ you turn that on (`AI_VISION`, below).
 | `AI_MODEL` | provider default | e.g. `llama3.1`, `gpt-4o-mini`, `claude-haiku-5-5` |
 | `AI_BASE_URL` | provider default | e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://openrouter.ai/api/v1` |
 | `AI_API_KEY` | – | Never sent to the browser, logged, or stored in projects or the data export |
-| `AI_MAX_TOKENS` | `16000` | Token ceiling for the plan calls of one video (in + out); above it the plan is made by fixed rules and a note says why – the video is still made. Settings → AI shows about how many tokens a full round needs |
+| `AI_MAX_TOKENS` | `20000` | Token ceiling for the plan calls of one video (in + out); above it the plan is made by fixed rules and a note says why – the video is still made. Settings → AI shows about how many tokens a full round needs |
 | `AI_VISION` | `0` | `1` = when the putt count on a hole is unsure, the model looks at up to 8 still frames from the green instead of asking you: taken at each putt the analysis found (strike, where the ball stopped, 1 s after the last) and cropped around ball, cup and player (max 768 px). The model answers simple questions per frame and the app counts. Needs a model that can see images (Ollama's default `llama3.1` cannot: use e.g. `llama3.2-vision`); one call per hole, at most 6 per video, up to about 7 000 tokens each, from a separate allowance of 30 000 tokens on top of `AI_MAX_TOKENS`. With Ollama the frames stay on the PC; with a cloud provider they are sent there. Answers below 0.7 confidence are asked as usual |
 
 The same can be chosen in the app under **Settings → AI** (with "Test connection"); otherwise the
 `.env` defaults are used. Token usage is shown when the video is done.
+
+With **Ollama** the app talks to Ollama's own API (`/api/chat`, the `/v1` in the address is fine) and
+sets the context window (`num_ctx`) to what the round needs: Ollama's default of 2–4k tokens would
+silently cut a whole round short. If you point other tools at Ollama's OpenAI endpoint, set
+`OLLAMA_CONTEXT_LENGTH=16384` (or more) on the Ollama server for the same reason. OpenAI's reasoning
+models (`gpt-5`, `o3`, `o4-mini` …) work too: they get `max_completion_tokens` and no temperature.
+
+A request that timed out is never sent again (the provider may already have billed it; its tokens
+are counted), and a video that has to be made again after a later error reuses the plan the AI
+already made – `AI_MAX_TOKENS` is per video, not per attempt.
+
+Without AI (and with it), a made video gets a **text for YouTube**: a description from the facts of the
+round (course, day, score, highlights – or the AI's description) and chapters with exact times from the
+timeline (`0:00 Intro`, `1:12 Hul 1 – par 4 – birdie` …). It is shown when the video is done, in the
+export dialog and under My videos, with a **Copy for YouTube** button.
 
 #### Use your ChatGPT plan (Sign in with ChatGPT, preview)
 

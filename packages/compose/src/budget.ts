@@ -4,7 +4,7 @@
  * job uses before each call (ai.ts planCallEstimate, vision.ts visionCallEstimate).
  */
 import { estimateTokens, OUTPUT_TOKENS, planCallEstimate, SYSTEM_PROMPT, userMessage } from './ai';
-import { resolveAnswers, VideoPlan } from './plan';
+import { resolveAnswers, VideoPlan, type PlanKind } from './plan';
 import type { ClipSummary, RoundSummary, ShotSummary } from './summary';
 import { puttsHoleOf, VISION_FRAMES, VISION_MAX_CALLS, visionAllowance, visionCallEstimate } from './vision';
 
@@ -27,13 +27,15 @@ export interface EstimateOptions {
   /** --yes: no questions, so no second call. */
   yes?: boolean;
   visionMaxTokens?: number;
+  /** The format the user picked (sent to the model as its own line). */
+  kind?: PlanKind | null;
 }
 
 /** The tokens one video of this round will about use, with the rule plan the job starts from. */
 export function videoTokenEstimate(summary: RoundSummary, preference: string, rulePlan: VideoPlan, opts: EstimateOptions = {}): TokenEstimate {
-  const in1 = planCallEstimate(summary, preference, rulePlan, null) - OUTPUT_TOKENS;
+  const in1 = planCallEstimate(summary, preference, rulePlan, null, opts.kind) - OUTPUT_TOKENS;
   const asks = !opts.yes && rulePlan.questions.length > 0;
-  const in2 = asks ? estimateTokens(SYSTEM_PROMPT, userMessage(summary, preference, rulePlan, resolveAnswers(rulePlan, null))) : 0;
+  const in2 = asks ? estimateTokens(SYSTEM_PROMPT, userMessage(summary, preference, rulePlan, resolveAnswers(rulePlan, null), opts.kind)) : 0;
   const plan = in1 + TYPICAL_OUT + (asks ? in2 + TYPICAL_OUT : 0);
   const needed = asks ? in1 + TYPICAL_OUT + in2 + OUTPUT_TOKENS : in1 + OUTPUT_TOKENS;
   const holes = rulePlan.questions.filter((q) => puttsHoleOf(q) !== null).length;
@@ -125,6 +127,9 @@ export function typicalRound(clips = 40, shots = 45, puttHoles = 3): { summary: 
   });
   return { summary, plan };
 }
+
+/** A large round: every shot filmed, retakes included (what DEFAULT_AI_MAX_TOKENS is sized for). */
+export const largeRound = () => typicalRound(90, 100, 4);
 
 /** The estimate for a typical 18-hole round (Settings → AI). */
 export function typicalTokenEstimate(opts: EstimateOptions = {}): TokenEstimate {

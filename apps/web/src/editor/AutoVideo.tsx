@@ -22,9 +22,9 @@ import {
 } from '@golf/compose';
 import { sourcePath, TEMPLATES } from '@golf/render';
 import type { Project, Shot } from '@golf/schema';
-import { Check, Clapperboard, Copy, ExternalLink, Loader2, MonitorPlay, Pause, Play, Smartphone, Sparkles, SquarePen } from 'lucide-react';
+import { Check, Clapperboard, ExternalLink, Loader2, MonitorPlay, Pause, Play, Smartphone, Sparkles, SquarePen } from 'lucide-react';
 import Link from 'next/link';
-import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/controls';
@@ -33,6 +33,8 @@ import { Field, Textarea } from '@/components/ui/input';
 import { ProgressBar } from '@/components/ui/misc';
 import { api, errorMessage } from '@/lib/api';
 import { aiPrivacy, ChatGptPlanNote, ManageUsage, type AiSettingsInfo } from '@/components/app/AiSettings';
+import { YoutubeText } from '@/components/app/YoutubeText';
+import { aiErrorText } from '@/lib/aiError';
 import { useJobEvents, type JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { jobMessage } from '@/lib/jobMessage';
@@ -82,11 +84,31 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
     if (open && !job) setPicked(new Set(clips.map((c) => c.id)));
   }, [open, job, clips]);
 
+  // The job lives on the server: on opening the dialog (after a reload too) and after the live
+  // connection was lost, fetch it again – a video waiting for answers shows its questions.
+  const resume = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const { jobs } = await api<{ jobs: JobInfo[] }>(`/jobs?project_id=${encodeURIComponent(projectId)}`);
+      setJob((cur) =>
+        cur
+          ? (jobs.find((j) => j.id === cur.id) ?? cur)
+          : (jobs.find((j) => j.kind === 'compose' && (j.status === 'awaiting_answers' || j.status === 'queued' || j.status === 'running')) ?? null),
+      );
+    } catch {
+      /* offline: the dialog works on what it has */
+    }
+  }, [projectId]);
+  useEffect(() => {
+    if (open) void resume();
+  }, [open, resume]);
+
   useJobEvents(
     (ev) => {
       if (job && ev.job.id === job.id) setJob(ev.job);
     },
     open && job ? projectId : null,
+    () => void resume(),
   );
 
   const questions = (job?.status === 'awaiting_answers' ? (job.result.questions as PlanQuestion[] | undefined) : undefined) ?? [];
@@ -96,6 +118,16 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.status, job?.id]);
 
+  /**
+   * Saves pending edits first. Another window's save is never overwritten: on a conflict the
+   * conflict dialog says why; any other failed save is said here.
+   */
+  async function savedFirst(): Promise<boolean> {
+    const r = await flush();
+    if (!r.ok && r.reason !== 'conflict') setError(T.saveFailed);
+    return r.ok;
+  }
+
   async function start() {
     if (!picked.size) {
       setError(T.pickClips);
@@ -104,11 +136,11 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
     setError('');
     setBusy(true);
     try {
-      if (!(await flush()).ok) return; // another window's save is never overwritten: the conflict dialog or the save badge says why
+      // The video is made from the saved project: stop when the latest edits did not make it.
+      if (!(await savedFirst())) return;
       const mediaIds = picked.size === clips.length ? [] : [...picked];
-      // The format picked on a card leads; the free text adds to it ("only good shots" …).
-      const wish = [T.kindPhrase[kind], preference.trim()].filter(Boolean).join('. ');
-      setJob(await api<JobInfo>('/autovideo', { body: { projectId, preference: wish, locale, names: t.layers.types, mediaIds } }));
+      // The format picked on a card is its own field; the free text only adds to it ("only good shots" …).
+      setJob(await api<JobInfo>('/autovideo', { body: { projectId, kind, preference: preference.trim(), locale, names: t.layers.types, mediaIds } }));
     } catch (e) {
       setError(errorMessage(e, t));
     } finally {
@@ -119,7 +151,10 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
   async function answer(useDefaults: boolean) {
     if (!job) return;
     setBusy(true);
+    setError('');
     try {
+      // A shot fixed with "Fix in editor" a moment ago is still in the autosave's wait.
+      if (!(await savedFirst())) return;
       // Send every answer, defaults included: putting is only shown on holes someone answered.
       const body = useDefaults ? Object.fromEntries(questions.map((q) => [q.id, q.default])) : answers;
       setJob(await api<JobInfo>(`/jobs/${job.id}/answers`, { body: { answers: body } }));
@@ -157,7 +192,7 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
                 )}
               </Field>
               {ai && ai.effective.provider === 'none' ? <PreferenceChips text={preference} /> : null}
-              {ai && ai.effective.provider !== 'none' ? <TokenLine doc={doc} picked={picked} preference={preference} ai={ai.effective} /> : null}
+              {ai && ai.effective.provider !== 'none' ? <TokenLine doc={doc} picked={picked} preference={preference} kind={kind} ai={ai.effective} /> : null}
               <p className="text-[12px] text-fg-muted" data-testid="auto-privacy">
                 {aiPrivacy(t, ai?.effective)}
               </p>
@@ -253,6 +288,11 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
                   </li>
                 ))}
               </ol>
+              {error ? (
+                <p role="alert" className="text-sm text-accent-fg">
+                  {error}
+                </p>
+              ) : null}
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="secondary" onClick={() => void answer(true)} disabled={busy}>
                   {T.useDefaults}
@@ -266,10 +306,10 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
             <Done result={result} onAgain={reset} onOpen={() => onOpenChange(false)} />
           ) : (
             <div className="flex flex-col gap-3">
-              <p role="alert" className="text-sm">
-                <span className="font-semibold">{T.failed}.</span> {job.error}
+              <p role="alert" className="text-sm" data-testid="auto-failed">
+                <span className="font-semibold">{T.failed}.</span> {aiErrorText(job.error, t).text}
               </p>
-              {job.error?.includes(CHATGPT_USAGE_URL) ? <ManageUsage /> : null}
+              {aiErrorText(job.error, t).limit ? <ManageUsage /> : null}
               <div className="flex justify-end">
                 <Button variant="secondary" onClick={reset}>
                   {T.again}
@@ -287,7 +327,11 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
 function PreferenceChips({ text }: { text: string }) {
   const { t, f, locale } = useI18n();
   const T = t.aiPlan;
-  const e = useMemo(() => explainPreference(text), [text]);
+  // The format is picked on a card: a format word in the text changes nothing, so it is no chip.
+  const e = useMemo(() => {
+    const x = explainPreference(text);
+    return { ...x, understood: x.understood.filter((c) => c.key !== 'kind') };
+  }, [text]);
   if (!text.trim()) return null;
   const label = (c: PreferenceChip): string => {
     switch (c.key) {
@@ -331,8 +375,12 @@ function PreferenceChips({ text }: { text: string }) {
   );
 }
 
-/** About how many tokens the video will use with the AI, and a warning when the ceiling is too low. */
-function TokenLine({ doc, picked, preference, ai }: { doc: Project; picked: Set<string>; preference: string; ai: AiSettingsInfo['effective'] }) {
+/**
+ * Only when the round is too large for the user's AI limit: then the rules make the plan. Normal
+ * use shows no token talk here (the estimate is under Settings → AI).
+ */
+function TokenLine(p: { doc: Project; picked: Set<string>; preference: string; kind: Kind; ai: AiSettingsInfo['effective'] }) {
+  const { doc, picked, preference, kind, ai } = p;
   const { t, f, locale } = useI18n();
   const wish = useDeferredValue(preference);
   const e = useMemo(() => {
@@ -340,22 +388,16 @@ function TokenLine({ doc, picked, preference, ai }: { doc: Project; picked: Set<
       const media = Object.fromEntries(Object.entries(doc.media).filter(([id, m]) => picked.has(id) || m.kind !== 'video'));
       const sub = { ...doc, media, clips: doc.clips.filter((c) => picked.has(c.mediaId)), shots: doc.shots.filter((s) => picked.has(s.mediaId)) };
       const s = summarize(sub);
-      return videoTokenEstimate(s, wish, planFromRules(s, wish, locale), { vision: ai.vision });
+      return videoTokenEstimate(s, wish, planFromRules(s, wish, locale, { kind }), { vision: ai.vision, kind });
     } catch {
       return null;
     }
-  }, [doc, picked, wish, locale, ai.vision]);
-  if (!e || !picked.size) return null;
-  const n = (v: number) => (Math.ceil(v / 100) * 100).toLocaleString(locale === 'da' ? 'da-DK' : 'en-GB');
+  }, [doc, picked, wish, locale, kind, ai.vision]);
+  if (!e || !picked.size || e.needed <= ai.maxTokens) return null;
   return (
-    <div className="-mt-2 text-[12px]" data-testid="auto-tokens-estimate">
-      <p className="text-fg-muted">{f(t.aiPlan.dialogEstimate, { total: n(e.total) })}</p>
-      {e.needed > ai.maxTokens ? (
-        <p role="status" className="text-accent-fg">
-          {f(t.aiPlan.dialogTooLow, { max: n(ai.maxTokens) })}
-        </p>
-      ) : null}
-    </div>
+    <p role="status" className="-mt-2 text-[12px] text-accent-fg" data-testid="auto-tokens-estimate">
+      {f(t.aiPlan.dialogTooLow, { max: ai.maxTokens.toLocaleString(locale === 'da' ? 'da-DK' : 'en-GB') })}
+    </p>
   );
 }
 
@@ -664,7 +706,6 @@ function ShotLoop({ item, shot, label }: { item: PlanItem; shot: Shot | undefine
 function Done({ result, onAgain, onOpen }: { result: Result; onAgain: () => void; onOpen: () => void }) {
   const { t, f } = useI18n();
   const T = t.auto;
-  const [copied, setCopied] = useState(false);
   const projects = result.projects ?? [];
   return (
     <div className="flex flex-col gap-4" data-testid="auto-done">
@@ -705,32 +746,14 @@ function Done({ result, onAgain, onOpen }: { result: Result; onAgain: () => void
           ))}
         </ul>
       ) : null}
+      {result.description ? <YoutubeText text={result.description} /> : null}
       {result.usage && result.ai ? (
-        <p className="tabular text-[12px] text-fg-muted" data-testid="auto-tokens">
-          {f(T.tokensUsed, { calls: result.usage.calls, input: result.usage.inputTokens, output: result.usage.outputTokens, model: result.ai.model })}
-        </p>
-      ) : null}
-      {result.description ? (
-        <Field label={T.description}>
-          {(p) => (
-            <div className="flex flex-col gap-2">
-              <Textarea {...p} readOnly value={result.description} rows={4} />
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="self-end"
-                onClick={() => {
-                  void navigator.clipboard?.writeText(result.description ?? '');
-                  setCopied(true);
-                }}
-              >
-                {copied ? <Check /> : <Copy />}
-                {copied ? T.copied : T.copy}
-              </Button>
-            </div>
-          )}
-        </Field>
+        <details className="text-[12px] text-fg-muted" data-testid="auto-tokens">
+          <summary className="cursor-pointer">{T.usageDetails}</summary>
+          <p className="tabular mt-1">
+            {f(T.tokensUsed, { calls: result.usage.calls, input: result.usage.inputTokens, output: result.usage.outputTokens, model: result.ai.model })}
+          </p>
+        </details>
       ) : null}
       <div className="flex justify-end">
         <Button variant="secondary" onClick={onAgain}>

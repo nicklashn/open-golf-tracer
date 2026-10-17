@@ -25,6 +25,10 @@ test('make a video for me: preference in, finished project out (no AI)', async (
   await expect(done).toBeVisible({ timeout: 90_000 });
   await expect(done.getByText('Your video is ready')).toBeVisible();
   await expect(done.getByText(/press Export/)).toBeVisible();
+  // Without AI too: a description from the facts, ready to copy to YouTube; no token talk.
+  await expect(done.getByTestId('youtube-text').getByRole('textbox')).toHaveValue(/^A round of golf/);
+  await expect(done.getByRole('button', { name: 'Copy for YouTube' })).toBeVisible();
+  await expect(dialog.getByText(/tokens/)).toHaveCount(0);
   const open = done.getByRole('link', { name: /^Open video/ });
   const href = await open.getAttribute('href');
   const id = href!.split('/').pop()!;
@@ -37,4 +41,7 @@ test('make a video for me: preference in, finished project out (no AI)', async (
   // The dialog closes with the old project; in the made video, export is the main action.
   await expect(page.getByTestId('auto-video')).toBeHidden();
   await expect(page.getByTestId('open-export')).toHaveClass(/bg-accent/);
+  // The export dialog has the same text, timed from the timeline as it is now.
+  await page.getByTestId('open-export').click();
+  await expect(page.getByTestId('youtube-text').getByRole('textbox')).toHaveValue(/^A round of golf/);
 });
