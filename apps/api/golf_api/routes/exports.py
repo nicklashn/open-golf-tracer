@@ -23,6 +23,7 @@ router = APIRouter(tags=["exports"])
 class ExportIn(BaseModel):
     settings: dict
     document: dict | None = None      # the editor sends its current document (saved first)
+    locale: str | None = None         # the UI language: graphics in the export are drawn in it
 
 
 def public_export(db: Session, e: Export) -> dict:
@@ -59,7 +60,8 @@ def create_export(project_id: str, body: ExportIn, db: Session = Depends(get_db)
     e = Export(user_id=user.id, project_id=p.id, project_name=p.name, settings=s)
     db.add(e)
     db.flush()
-    job = jobs.enqueue(db, "export", {"export_id": e.id, "document": doc, "settings": s},
+    locale = body.locale if body.locale in ("da", "en") else (user.locale if user.locale in ("da", "en") else "en")
+    job = jobs.enqueue(db, "export", {"export_id": e.id, "document": doc, "settings": s, "locale": locale},
                        user_id=user.id, project_id=p.id, max_attempts=2)
     e.job_id = job.id
     db.commit()

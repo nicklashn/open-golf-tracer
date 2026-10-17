@@ -22,8 +22,20 @@ export function jobMessage(message: string | null | undefined, t: Dict): string 
     'Tracking the shot': T.tracking,
     'Out of memory – trying again with gentler settings': T.oom,
     Done: T.done,
+    // Exports (apps/exporter/src/run.ts, plan.ts and main.ts).
+    'Preparing graphics': T.exportPrepare,
+    Exporting: T.exportRender,
+    'Mixing the sound': T.exportAudio,
+    'Finishing the video': T.exportFinish,
+    'Canceled by the user': T.canceled,
+    'The project has no clips': T.noClips,
+    'The video is missing': T.missingVideo,
+    'The video is too short to export': T.tooShort,
   };
   if (m in fixed) return fixed[m];
+  if (/^Clip \d+ is missing its video$/.test(m)) return T.missingVideo;
+  // ffmpeg's own error text is for the log, not for the user.
+  if (m.startsWith('ffmpeg failed')) return T.exportFailed;
   const shot = /^Analysing shot (.+)$/.exec(m);
   if (shot) return fmt(T.shot, { n: shot[1] });
   const found = /^(\d+) shots found$/.exec(m);

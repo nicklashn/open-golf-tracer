@@ -7,8 +7,8 @@ import { hostname } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { InternalApi } from './api';
 import { AiError, handleAiTest, handleCompose } from './compose-job';
-import { Canceled, runExport } from './run';
-import type { MediaFile } from './plan';
+import { handleExport } from './export-job';
+import { Canceled } from './run';
 
 const api = new InternalApi();
 const worker = `${hostname()}-exporter-${process.pid}`;
@@ -19,41 +19,15 @@ function log(msg: string, extra: Record<string, unknown> = {}): void {
 }
 
 async function handle(job: { id: string; payload: Record<string, unknown> }): Promise<void> {
-  const p = job.payload as {
-    export_id: string;
-    document: { media?: Record<string, unknown>; layers?: { type: string; props: { mediaId?: string } }[]; audioTracks?: { mediaId: string }[] };
-    settings: unknown;
-  };
-  const ids = new Set<string>([...Object.keys(p.document.media ?? {}), ...(p.document.audioTracks ?? []).map((a) => a.mediaId)]);
-  for (const l of p.document.layers ?? []) if (l.type === 'image' && l.props.mediaId) ids.add(l.props.mediaId);
-  const media: Record<string, MediaFile> = {};
-  for (const id of ids) {
-    const m = await api.media(id);
-    const pr = m.probe as Record<string, unknown>;
-    media[id] = {
-      id,
-      path: m.path,
-      width: Number(pr.width ?? 0),
-      height: Number(pr.height ?? 0),
-      fps: Number(pr.fps ?? 30),
-      duration: Number(pr.duration ?? 0),
-      hdr: Boolean(pr.hdr),
-      hasAudio: Boolean(pr.hasAudio),
-      color: (pr.color as Record<string, string>) ?? undefined,
-    };
-  }
-  const { path } = await api.exportStart(p.export_id);
   const t0 = performance.now();
-  const res = await runExport({
-    document: p.document,
-    settings: p.settings,
-    media,
-    output: path,
-    onProgress: async (f, message) => (await api.progress(job.id, f, message)).continue,
+  const res = await handleExport(api, job);
+  log('export done', {
+    job: job.id,
+    seconds: +((performance.now() - t0) / 1000).toFixed(1),
+    frames: res.frames,
+    overlay: res.overlay,
+    overlayFrames: res.overlayFrames,
   });
-  await api.exportDone(p.export_id, { width: res.width, height: res.height, duration: res.duration });
-  await api.complete(job.id, { width: res.width, height: res.height, duration: res.duration, seconds: res.seconds });
-  log('export done', { job: job.id, seconds: +((performance.now() - t0) / 1000).toFixed(1), frames: res.frames, overlay: res.overlay });
 }
 
 /** One lane claims one kind of job at a time. Exports and video plans run in separate lanes,
@@ -81,9 +55,9 @@ async function lane(kinds: string[], run: (job: { id: string; kind: string; payl
       const canceled = e instanceof Canceled;
       log(canceled ? `${job.kind} canceled` : `${job.kind} failed`, { job: job.id, error: String(e) });
       try {
-        await api.fail(job.id, canceled ? 'Annulleret af brugeren' : String(e instanceof Error ? e.message : e), !canceled);
+        await api.fail(job.id, canceled ? 'Canceled by the user' : String(e instanceof Error ? e.message : e), !canceled);
       } catch (e2) {
-        log('kunne ikke melde fejl', { error: String(e2) });
+        log('could not report the failure', { error: String(e2) });
       }
     }
   }

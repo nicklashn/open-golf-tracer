@@ -257,6 +257,7 @@ export function Editor({ projectId }: { projectId: string }) {
                   url: ev.export?.url ?? e.url,
                   previewUrl: ev.export?.previewUrl ?? e.previewUrl,
                   projectName: ev.export?.projectName ?? e.projectName,
+                  message: job.message,
                   error: job.error,
                 }
               : e,
