@@ -37,7 +37,7 @@ import { useJobEvents, type JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { jobMessage } from '@/lib/jobMessage';
 import { cn } from '@/lib/cn';
-import { saveNow } from './autosave';
+import { flush } from './autosave';
 import * as ops from './ops';
 import { useEditor } from './store';
 
@@ -104,7 +104,7 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
     setError('');
     setBusy(true);
     try {
-      await saveNow(true);
+      if (!(await flush()).ok) return; // another window's save is never overwritten: the conflict dialog or the save badge says why
       const mediaIds = picked.size === clips.length ? [] : [...picked];
       // The format picked on a card leads; the free text adds to it ("only good shots" …).
       const wish = [T.kindPhrase[kind], preference.trim()].filter(Boolean).join('. ');

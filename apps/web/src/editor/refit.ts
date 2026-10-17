@@ -12,14 +12,15 @@ export interface RefitResult {
 }
 
 /**
- * Latest-wins refit queue on a Web Worker: while a fit runs, only the newest request waits,
- * so the handle never lags behind the pointer.
+ * Latest-wins refit queue on a Web Worker: while a fit runs, only the newest request per shot
+ * waits, so the handle never lags behind the pointer. "Latest" is per shot: a fit of another
+ * shot (a constraint or club changed on one, a handle dragged on the next) never cancels it.
  */
-class Refitter {
+export class Refitter {
   private worker: Worker | null = null;
   private seq = 0;
   private busy = false;
-  private pending: { shot: Shot; opts: RefitOptions; resolve: (r: RefitResult | null) => void } | null = null;
+  private pending = new Map<string, { shot: Shot; opts: RefitOptions; resolve: (r: RefitResult | null) => void }>();
   private current: { id: number; resolve: (r: RefitResult | null) => void } | null = null;
 
   private ensure(): Worker | null {
@@ -39,16 +40,16 @@ class Refitter {
     return this.worker;
   }
 
-  private pump() {
-    if (this.busy || !this.pending) return;
-    const job = this.pending;
-    this.pending = null;
+  private pump(): void {
+    if (this.busy || !this.pending.size) return;
+    const [key, job] = this.pending.entries().next().value!;
+    this.pending.delete(key);
     const w = this.ensure();
     if (!w) {
       // No worker support: compute inline (still correct, just on the main thread).
       const r = refitShot(job.shot, job.opts);
       job.resolve({ params: r.params, ms: r.ms, rmsPx: r.rmsPx, lambda: r.lambda, converged: r.converged });
-      return;
+      return this.pump();
     }
     this.busy = true;
     const id = ++this.seq;
@@ -58,9 +59,9 @@ class Refitter {
 
   request(shot: Shot, opts: RefitOptions): Promise<RefitResult | null> {
     return new Promise((resolve) => {
-      // A newer request supersedes the waiting one (it resolves with null).
-      this.pending?.resolve(null);
-      this.pending = { shot: JSON.parse(JSON.stringify(shot)), opts, resolve };
+      // A newer request for the same shot supersedes the waiting one (it resolves with null).
+      this.pending.get(shot.id)?.resolve(null);
+      this.pending.set(shot.id, { shot: JSON.parse(JSON.stringify(shot)), opts, resolve });
       this.pump();
     });
   }

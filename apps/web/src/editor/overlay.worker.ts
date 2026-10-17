@@ -8,12 +8,16 @@ type Msg =
   | { type: 'init'; canvas: OffscreenCanvas; locale: 'da' | 'en' }
   | { type: 'size'; w: number; h: number }
   | { type: 'doc'; doc: Project }
+  | { type: 'live'; live: Record<string, number[]> }
+  | { type: 'locale'; locale: 'da' | 'en' }
   | { type: 'image'; mediaId: string; img: ImageData8 }
   | { type: 'frame'; t: number; hidden: string[]; seq: number };
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let painter: OverlayPainter | null = null;
 let doc: Project | null = null;
+let live: Record<string, number[]> = {};
+let locale: 'da' | 'en' | null = null;
 let want: { t: number; hidden: string[] } | null = null;
 let scheduled = false;
 let size: { w: number; h: number } | null = null;
@@ -30,7 +34,7 @@ function schedule() {
 function run() {
   scheduled = false;
   if (!want || !doc || !painter) return;
-  const ms = painter.render({ doc, t: want.t, hidden: want.hidden });
+  const ms = painter.render({ doc, live, t: want.t, hidden: want.hidden });
   if (ms == null) return; // fonts still loading: drawn once they are
   want = null;
   scope.postMessage({ type: 'drawn', ms });
@@ -42,7 +46,7 @@ scope.onmessage = (e: MessageEvent<Msg>) => {
     case 'init': {
       const ctx = m.canvas.getContext('2d');
       if (!ctx) return;
-      painter = new OverlayPainter(ctx, m.locale);
+      painter = new OverlayPainter(ctx, locale ?? m.locale);
       if (size) painter.resize(size.w, size.h);
       break;
     }
@@ -52,6 +56,13 @@ scope.onmessage = (e: MessageEvent<Msg>) => {
       break;
     case 'doc':
       doc = m.doc;
+      break;
+    case 'live':
+      live = m.live;
+      break;
+    case 'locale':
+      locale = m.locale;
+      painter?.setLocale(m.locale);
       break;
     case 'image':
       painter?.images.set(m.mediaId, m.img);

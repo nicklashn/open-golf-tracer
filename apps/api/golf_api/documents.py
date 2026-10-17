@@ -18,7 +18,7 @@ from .errors import ApiError
 from .models import Media, Project
 
 SCHEMA_VERSION = 1
-MAX_DOC_BYTES = 5 * 1024 * 1024
+MAX_DOC_BYTES = 10 * 1024 * 1024  # LIMITS.docBytes in packages/schema/src/project.ts
 SHOT_KEYS = {"id", "mediaId", "source", "kind", "impactTime", "confidence", "warnings", "camera", "anchor", "track", "params",
              "rmsPx", "auto", "constraints", "timing", "slowmo", "club", "style", "visible", "label", "sound", "putt", "clean"}
 

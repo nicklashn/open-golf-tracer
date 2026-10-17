@@ -196,3 +196,34 @@ def test_export_job_carries_the_ui_language(client, tiny_video):
         assert payload(e)["locale"] == "da"
         # Without one (older web apps) the account's language is used.
         assert payload(plain)["locale"] in ("da", "en") and payload(odd)["locale"] in ("da", "en")
+
+
+def test_conflicting_document_can_be_kept_as_a_copy(client):
+    """"Save mine as a copy" in the conflict dialog: the editor's document becomes a new project,
+    the saved one stays as the other window left it."""
+    p = client.post("/api/projects", json={"name": "Runde 1"}).json()
+    v = client.get(f"/api/projects/{p['id']}").json()["docVersion"]
+    assert client.put(f"/api/projects/{p['id']}/document", json={"document": _doc("Theirs"), "baseVersion": v}).status_code == 200
+    copy = client.post(f"/api/projects/{p['id']}/duplicate", json={"document": _doc("Mine"), "name": "Mine (kopi)"}).json()
+    assert copy["id"] != p["id"]
+    assert client.get(f"/api/projects/{copy['id']}").json()["document"]["name"] == "Mine (kopi)"
+    assert client.get(f"/api/projects/{p['id']}").json()["document"]["name"] == "Theirs"
+    bad = client.post(f"/api/projects/{p['id']}/duplicate", json={"document": {"schemaVersion": 1, "clips": [{"kind": "x"}]}})
+    assert bad.status_code == 422
+    # Without a body it is the plain duplicate.
+    assert client.post(f"/api/projects/{p['id']}/duplicate").status_code == 200
+
+
+def test_a_full_round_of_shots_can_be_saved(client):
+    """A round with practice swings and two cameras has several hundred shots (LIMITS.shots = 600)."""
+    p = client.post("/api/projects", json={"name": "Runde 1"}).json()
+    v = client.get(f"/api/projects/{p['id']}").json()["docVersion"]
+    shot = {"id": "s", "mediaId": "m", "impactTime": 1, "camera": {"cx": 0.5, "cy": 0.5}, "anchor": {"x": 0.5, "y": 0.9},
+            "params": [40, 0.2, 0, 0.1, 0.1, 0, 0, 0, 0], "auto": {"params": [40, 0.2, 0, 0.1, 0.1, 0, 0, 0, 0],
+                                                                     "anchor": {"x": 0.5, "y": 0.9}, "impactTime": 1}}
+    doc = {**_doc(), "shots": [{**shot, "id": f"s{i}"} for i in range(600)]}
+    r = client.put(f"/api/projects/{p['id']}/document", json={"document": doc, "baseVersion": v})
+    assert r.status_code == 200, r.text
+    doc["shots"].append({**shot, "id": "s600"})
+    r = client.put(f"/api/projects/{p['id']}/document", json={"document": doc, "baseVersion": v + 1})
+    assert r.status_code == 422 and r.json()["error"]["details"]["path"] == "shots"

@@ -32,3 +32,8 @@ export function useI18n(): Ctx {
   if (!c) throw new Error('useI18n uden I18nProvider');
   return c;
 }
+
+/** The locale where a provider exists (generic controls also render without one, in tests). */
+export function useOptionalLocale(): Locale | null {
+  return useContext(I18nContext)?.locale ?? null;
+}

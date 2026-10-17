@@ -27,6 +27,7 @@ import { Kbd } from '@/components/ui/misc';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
+import { refreshMedia } from './mediaUrls';
 import * as ops from './ops';
 import { snapTime, timelineRemap } from './ripple';
 import { onReveal } from './reveal';
@@ -74,7 +75,13 @@ function useWaveform(m: MediaInfo | undefined) {
     let alive = true;
     let p = waveCache.get(id);
     if (!p) {
+      // An expired signed URL (403) is renewed once (mediaUrls.ts).
       p = fetch(url)
+        .then(async (r) => {
+          if (r.ok) return r;
+          const fresh = (await refreshMedia(id))?.urls.waveform;
+          return fresh ? fetch(fresh) : r;
+        })
         .then((r) => r.json())
         .then((j: { peaks: string }) => {
           const bin = atob(j.peaks);

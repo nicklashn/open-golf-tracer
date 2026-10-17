@@ -405,7 +405,7 @@
     },
     "shots": {
       "default": [],
-      "maxItems": 200,
+      "maxItems": 600,
       "type": "array",
       "items": {
         "type": "object",
