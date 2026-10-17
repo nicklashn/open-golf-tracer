@@ -140,8 +140,12 @@ def proxy_cmds(src: Path, out: Path, thumbs: Path | None, probe: dict, vp9: bool
                  "-g", str(PROXY_KEYINT), "-pix_fmt", "yuv420p"]
     else:
         video = h264_args(crf=23, keyint=PROXY_KEYINT, fast_decode=True, preview=True)
-    chain = [tonemap_filter()] if probe.get("hdr") else []
-    chain += [*rate, _vf_scale(w, h, PROXY_LONG_SIDE) + ":flags=area", "format=yuv420p"]
+    # Fewer and smaller frames first, then the tone mapping (float maths per pixel): at 1280 px
+    # and <= 60 fps it has a third of the pixels of a 4K or 120 fps clip to work on (2x faster on
+    # a 1080p60 iPhone HLG clip). The scale keeps the 10 bits.
+    chain = [*rate, _vf_scale(w, h, PROXY_LONG_SIDE) + ":flags=area"]
+    chain += [tonemap_filter()] if probe.get("hdr") else []
+    chain += ["format=yuv420p"]
     cmds.append(build(hwaccel_args(), chain, [], video))
     return cmds
 
@@ -160,8 +164,8 @@ def ingest(job: dict, report: Report) -> dict:
     if m.kind in ("video", "image"):
         def poster():
             out = work / "poster.jpg"
-            vf = ",".join(f for f in (tonemap_filter() if hdr else "", _vf_scale(probe.get("width", 0), probe.get("height", 0), 1280),
-                                      "format=yuvj420p") if f)
+            vf = ",".join(f for f in (_vf_scale(probe.get("width", 0), probe.get("height", 0), 1280), tonemap_filter() if hdr else "",
+                                      "format=yuvj420p") if f)   # scaled first, as the proxy
             at = [] if m.kind == "image" else ["-ss", f"{min(1.0, dur / 3):.3f}"]
             run([ffmpeg(), "-y", "-v", "error", *at, "-i", str(src), "-frames:v", "1", "-vf", vf, "-q:v", "3", str(out)])
             _save_derived(m.id, f"{prefix}/poster.jpg", out)

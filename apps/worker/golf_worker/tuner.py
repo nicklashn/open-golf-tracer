@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
+import subprocess
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -277,14 +279,43 @@ def _demo() -> Path:
     return ROOT / "assets" / "demo" / "demo.mp4"
 
 
+SAMPLE_S = 2.0   # seconds of the decode sample
+
+
+def _sample() -> Path:
+    """A clip like the ones analysed – a phone's 1080p60 HEVC 10-bit HLG video – to measure the
+    decoders on (the demo is 8-bit H.264 at 30 fps: decoders that do well on it can be slow or
+    fail on iPhone clips). Made once with ffmpeg (~1 MB); the demo when this ffmpeg has no x265."""
+    from golf_api.storage import tmp_dir
+    from shottracer.video import ffmpeg_bin
+
+    out = tmp_dir() / "decode-sample-hevc10-1080p60.mp4"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    part = out.with_name(f"{out.stem}.{os.getpid()}.part.mp4")
+    cmd = [ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=1920x1080:r=60:d={SAMPLE_S}",
+           "-vf", "noise=alls=12:allf=t", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "keyint=60:log-level=error",
+           "-pix_fmt", "yuv420p10le", "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
+           "-tag:v", "hvc1", str(part)]
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+        part.replace(out)
+        return out
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        log.info("tuner: no HEVC 10-bit sample (%s); decoding is measured on the demo clip", exc)
+        part.unlink(missing_ok=True)
+        return _demo()
+
+
 def check_decoder(method: str, n: int = 12) -> str | None:
-    """None when `method` decodes the demo clip like the CPU does (same number, size and
+    """None when `method` decodes the sample clip like the CPU does (same number, size and
     orientation of frames, practically the same pixels), else what is wrong."""
     from shottracer import hwdecode, runtime
     from shottracer.pipeline import ANALYSIS_LONG_SIDE
     from shottracer.video import probe
 
-    info = probe(_demo())
+    info = probe(_sample())
     scale = min(1.0, ANALYSIS_LONG_SIDE / info.long_side)
     start = int(info.fps)
 
@@ -310,7 +341,7 @@ def check_decoder(method: str, n: int = 12) -> str | None:
 
 
 def measure_decoding(method: str = "auto") -> Callable[[int], Trial]:
-    """`k` decoders side by side on the demo clip at analysis size, as `k` analyses tracking shots.
+    """`k` decoders side by side on the sample clip at analysis size, as `k` analyses tracking shots.
     A GPU decoder that falls back to the CPU while measuring fails the trial (its number would be
     the CPU's)."""
     from shottracer import hwdecode
@@ -332,9 +363,9 @@ def measure_decoding(method: str = "auto") -> Callable[[int], Trial]:
             hwdecode.reset()
             # All threads, as the tuned profile (the next job sets its own).
             runtime.configure(runtime.Runtime(decoder=method))
-            info = probe(_demo())
+            info = probe(_sample())
             scale = min(1.0, ANALYSIS_LONG_SIDE / info.long_side)
-            n = max(10, int(info.fps * 2))
+            n = max(10, min(int(info.fps * 2), info.frame_count - 1))
 
             def work(i: int) -> int:
                 done, start = 0, (i * n) % max(1, info.frame_count - n)
@@ -368,15 +399,13 @@ def decoders() -> list[str]:
     from shottracer.video import ffmpeg_bin
 
     try:
-        hw = hwdecode.candidates(ffmpeg_bin())
+        hw = hwdecode.usable(ffmpeg_bin())
     except RuntimeError:
         hw = []
     return ["sw", "auto", *hw]
 
 
 def run_tuner(report: Callable[[float, str], bool]) -> dict[str, Any]:
-    import os
-
     if os.environ.get("GOLF_DETECTOR", "").strip().lower() not in ("", "rfdetr", "rf-detr", "rfdetr-onnx", "onnx"):
         raise ValueError("Optimise needs the default RF-DETR detector (ONNX).")
     from shottracer.detect import get_detector

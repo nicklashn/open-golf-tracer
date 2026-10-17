@@ -104,7 +104,8 @@ def test_step_down_after_out_of_memory(env):
                   "tid(2f0c) 887A0005 The GPU device instance has been suspended."), True),
     (RuntimeError("CUDA error: out of memory"), True),
     (RuntimeError("Failed to allocate memory for requested buffer of size 123456"), True),
-    (MemoryError(), True),
+    (MemoryError(), False),    # the computer's memory (e.g. a huge slow-motion track): a GPU profile does not help
+    (MemoryError("Unable to allocate 7.91 GiB for an array with shape (1024, 1080, 1920)"), False),
     (RuntimeError("Too few frames after the impact at 3.0 s."), False),
     (ValueError("Cannot open video: x.mp4"), False),
 ])
@@ -172,7 +173,31 @@ def test_a_failed_read_is_not_remembered(env, monkeypatch):
 
     monkeypatch.setattr(performance.Path, "read_text", flaky)
     performance._cache.clear()
-    assert performance.load()["profile"] == "balanced"     # this one read: the safe default
+    assert performance.load()["profile"] == "balanced"     # nothing read before: the safe default
+    assert performance.load()["profile"] == "max"
+
+
+def test_a_failed_read_keeps_the_last_settings(env, monkeypatch):
+    """The file is replaced (new mtime) and the read fails a moment: the job keeps the profile
+    read before, it does not drop to Balanced."""
+    import os
+
+    performance.set_profile("max")
+    performance._cache.clear()
+    assert performance.load()["profile"] == "max"
+    p = performance._path()
+    st = p.stat()
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    real = performance.Path.read_text
+
+    def failing(self, *a, **k):
+        if self.name == performance.FILE:
+            raise PermissionError(13, "The process cannot access the file")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(performance.Path, "read_text", failing)
+    assert performance.load()["profile"] == "max"
+    monkeypatch.setattr(performance.Path, "stat", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError(13, "busy")))
     assert performance.load()["profile"] == "max"
 
 

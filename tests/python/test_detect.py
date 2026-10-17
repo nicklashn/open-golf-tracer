@@ -230,3 +230,23 @@ def test_directml_gets_one_session_and_reports_why_sessions_failed(monkeypatch):
     ort.get_available_providers = lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
     det = OnnxRfDetrBallDetector(Path("x.onnx"), Runtime(sessions=3))
     assert det.sessions == 1 and "out of memory" in (det.session_error or "")
+
+
+def test_the_detector_is_not_reloaded_for_decoder_settings(monkeypatch):
+    """A decoder found broken (decode_failed) or another decoder changes the Runtime, not the
+    detector: reloading the model on the GPU took seconds per job."""
+    from shottracer import runtime
+    from shottracer.detect import get_detector
+
+    monkeypatch.setenv("GOLF_DETECTOR", "blob")
+    get_detector.cache_clear()
+    try:
+        runtime.configure(runtime.Runtime(batch=2))
+        det = get_detector()
+        runtime.configure(runtime.Runtime(batch=2, decoder="d3d11va", decode_failed=("d3d11va:hevc:yuv420p10le",)))
+        assert get_detector() is det
+        runtime.configure(runtime.Runtime(batch=4))
+        assert get_detector() is not det
+    finally:
+        runtime.configure(runtime.Runtime())
+        get_detector.cache_clear()

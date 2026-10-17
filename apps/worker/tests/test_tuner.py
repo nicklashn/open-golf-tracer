@@ -1,5 +1,8 @@
 """Optimise: the benchmark's stop rules (simulated timings, GPU memory and errors), what it
 recommends, the out-of-memory fallback of an analysis, and how many lane threads claim jobs."""
+import os
+import subprocess
+
 import pytest
 
 from golf_api import performance
@@ -161,11 +164,27 @@ def test_a_second_device_error_fails_the_job(env):
     from golf_worker import tasks
 
     def run():
-        raise MemoryError()
+        raise RuntimeError("[ONNXRuntimeError] DmlExecutionProvider: 887A0005 The GPU device instance has been suspended")
+
+    with pytest.raises(RuntimeError):
+        tasks._with_fallback(run, lambda p, m: True)
+    assert performance.load()["profile"] == "gentle"
+
+
+def test_running_out_of_ram_keeps_the_profile(env):
+    """The computer's memory, not the GPU's: a gentler profile would not help, and it would stay."""
+    from golf_worker import tasks
+
+    performance.set_profile("max")
+    calls = []
+
+    def run():
+        calls.append(1)
+        raise MemoryError("Unable to allocate 7.91 GiB for an array")
 
     with pytest.raises(MemoryError):
         tasks._with_fallback(run, lambda p, m: True)
-    assert performance.load()["profile"] == "gentle"
+    assert calls == [1] and performance.load()["profile"] == "max" and "fallback" not in performance.load()
 
 
 def test_runtime_follows_the_profile(env, monkeypatch):
@@ -382,3 +401,44 @@ def test_a_gpu_decoder_that_falls_back_is_not_measured_as_working():
         tuner.MIN_TRIAL_S = old
     assert tr.error and tr.fps is None and tr.decoder == hw[0]
     assert tuner.check_decoder("sw") is None
+
+
+def test_decoding_is_measured_on_a_phone_like_clip(env):
+    """iPhone clips are 1080p60 HEVC 10-bit HLG; the demo is 8-bit H.264 at 30 fps, on which a
+    GPU decoder can look good and then fail or crawl on the real thing."""
+    import shutil
+
+    from golf_worker import tuner
+    from shottracer.video import probe
+
+    if not shutil.which("ffmpeg") or "libx265" not in subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout:
+        pytest.skip("needs ffmpeg with x265")
+    path = tuner._sample()
+    info = probe(path)
+    assert (info.codec, info.pix_fmt, info.width, info.height, round(info.fps)) == ("hevc", "yuv420p10le", 1920, 1080, 60)
+    assert info.hdr and info.frame_count >= 100 and path.stat().st_size < 4_000_000
+    assert tuner._sample() == path   # made once
+    assert tuner.check_decoder("sw") is None
+
+
+def test_gpu_decoders_without_their_device_are_not_tried(monkeypatch):
+    """No Intel GPU: qsv is not measured (it would only fail, with an alarming line in the results)."""
+    from golf_worker import tuner
+    from shottracer import hwdecode
+
+    monkeypatch.setattr(hwdecode, "candidates", lambda exe, platform=None: ["d3d11va", "cuda", "qsv"])
+    monkeypatch.setattr(hwdecode, "device_ok", lambda exe, m: m != "qsv")
+    assert tuner.decoders() == ["sw", "auto", "d3d11va", "cuda"]
+
+
+def test_a_missing_device_is_noticed_for_real():
+    import shutil
+
+    from shottracer import hwdecode
+
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        pytest.skip("needs ffmpeg")
+    assert hwdecode.device_ok(exe, "no-such-device") is False
+    if not performance.gpus() and not os.path.exists("/dev/dri"):
+        assert all(not hwdecode.device_ok(exe, m) for m in ("cuda", "qsv", "vaapi"))
