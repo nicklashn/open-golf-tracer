@@ -5,12 +5,15 @@ from __future__ import annotations
 import copy
 import functools
 import json
+from collections.abc import Callable
 from typing import Any
 
 from jsonschema import Draft202012Validator
+from sqlalchemy.orm import Session
 
 from .chronology import clip_slot
 from .config import ROOT
+from .db import write_lock
 from .errors import ApiError
 from .models import Media, Project
 
@@ -83,6 +86,20 @@ def clean_shot(shot: dict[str, Any], media_id: str) -> dict[str, Any]:
     s["mediaId"] = media_id
     s["id"] = f"{media_id[-6:]}_{shot['id']}"[:64]
     return s
+
+
+def update_analysis(db: Session, project_id: str, change: Callable[[dict[str, Any]], None]) -> Project | None:
+    """Changes project.analysis under the write lock, so concurrent writers (analyses running
+    side by side, an upload attaching a clip) can't overwrite each other's entries. The caller
+    commits; None when the project is gone."""
+    write_lock(db)
+    p = db.get(Project, project_id, populate_existing=True, with_for_update=True)
+    if p is None or p.deleted_at is not None:
+        return None
+    a = copy.deepcopy(p.analysis or {})
+    change(a)
+    p.analysis = a
+    return p
 
 
 def merged_document(p: Project) -> dict[str, Any]:

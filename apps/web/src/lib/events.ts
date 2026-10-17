@@ -11,6 +11,8 @@ export interface JobInfo {
   projectId: string | null;
   mediaId: string | null;
   error: string;
+  /** A stable code for a known failure (e.g. 'disk_full'), translated under t.errors. */
+  errorCode?: string;
   result: Record<string, unknown>;
 }
 

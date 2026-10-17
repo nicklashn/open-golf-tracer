@@ -62,7 +62,10 @@ function run(name, cmd, cmdArgs, opts = {}) {
       buf += d.toString();
       const lines = buf.split(/\r?\n/);
       buf = lines.pop();
-      for (const l of lines) out.write(tag + l + '\n');
+      for (const l of lines) {
+        out.write(tag + l + '\n');
+        opts.onLine?.(l);
+      }
     });
   };
   pipe(p.stdout, process.stdout);
@@ -105,13 +108,25 @@ async function waitForApi(url, tries = 120) {
   return false;
 }
 
+// An older app installed over data from a newer one: say so plainly and stop
+// (golf_api.main.NEWER_DATA), instead of a traceback and "the API did not start".
+const NEWER_DATA = 'DATA_FROM_NEWER_VERSION: ';
 run('api', py, ['-m', 'uvicorn', 'golf_api.main:app', '--host', '127.0.0.1', '--port', apiPort, ...(prod ? [] : ['--reload', '--reload-dir', 'golf_api'])], {
   cwd: resolve(root, 'apps/api'),
   critical: true,
+  onLine: (l) => {
+    const i = l.indexOf(NEWER_DATA);
+    if (i < 0 || stopping) return;
+    console.error('\n  \x1b[31m\x1b[1mOpen Golf Tracer kan ikke åbne dine data / cannot open your data\x1b[0m');
+    console.error('  Dataene er fra en nyere version af Open Golf Tracer – installer den nyeste version.');
+    console.error('  The data is from a newer version of Open Golf Tracer – install the newest version.');
+    console.error(`  ${l.slice(i + NEWER_DATA.length)}\n`);
+    shutdown(1);
+  },
 });
 const ok = await waitForApi(`${apiUrl}/api/health`);
 if (!ok) {
-  console.error('API’et startede ikke. Se loggen ovenfor.');
+  if (!stopping) console.error('API’et startede ikke. Se loggen ovenfor.');
   shutdown(1);
 } else {
   if (!args.has('--no-worker')) {

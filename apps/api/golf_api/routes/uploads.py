@@ -10,19 +10,22 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import chronology, jobs
 from ..config import settings
-from ..db import get_db, utcnow
+from ..db import SessionLocal, get_db, utcnow, write_lock
 from ..deps import current_user
-from ..documents import media_ref, new_document
+from ..documents import media_ref, new_document, update_analysis
 from ..errors import ApiError, not_found
 from ..limits import check_duration, check_upload
 from ..media_urls import public_media
 from ..models import Media, Project, Upload, User
 from ..probe import ProbeError, probe_file
+from ..space import disk_full, need_space, upload_need
 from ..storage import media_prefix, storage, tmp_dir
 from .projects import get_project, summary
 
@@ -96,6 +99,10 @@ def create_upload(body: CreateIn, db: Session = Depends(get_db), user: User = De
     check_upload(body.size)
     if body.projectId:
         get_project(db, user, body.projectId)
+    # Uploads under way have their part files (sparse until written) and previews still to come.
+    pending = sum(upload_need(u.size - len(u.received or []) * u.chunk_size, u.kind)
+                  for u in db.scalars(select(Upload).where(Upload.user_id == user.id, Upload.status == "open")).all())
+    need_space(upload_need(body.size, body.kind), max(0, pending))
     up = Upload(user_id=user.id, project_id=body.projectId, kind=body.kind, filename=name, size=body.size,
                 chunk_size=settings().upload_chunk_bytes, received=[])
     db.add(up)
@@ -115,33 +122,55 @@ def upload_status(upload_id: str, db: Session = Depends(get_db), user: User = De
 
 
 @router.put("/{upload_id}/chunks/{index}")
-async def put_chunk(upload_id: str, index: int, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    up = _get(db, user, upload_id)
-    if up.status != "open":
-        raise ApiError(409, "upload_closed", "The upload is already finished.")
-    n = -(-up.size // up.chunk_size)
-    if not 0 <= index < n:
-        raise ApiError(422, "bad_chunk", "Ugyldigt stykke.")
-    expected = min(up.chunk_size, up.size - index * up.chunk_size)
-    path = _tmp_path(up)
-    if not path.exists():
-        raise ApiError(410, "upload_expired", "The upload has expired. Start over.")
-    written = 0
-    with path.open("r+b") as f:
-        f.seek(index * up.chunk_size)
-        async for part in request.stream():
-            written += len(part)
-            if written > expected:
-                raise ApiError(422, "bad_chunk", "The chunk is too large.")
-            f.write(part)
-    if written != expected:
-        raise ApiError(422, "bad_chunk", f"The chunk was incomplete ({written} of {expected} bytes).")
-    db.refresh(up)
-    if index not in up.received:
-        up.received = sorted({*up.received, index})
-    up.updated_at = utcnow()
-    db.commit()
-    return {"received": len(up.received), "chunks": n}
+async def put_chunk(upload_id: str, index: int, request: Request, user: User = Depends(current_user)):
+    # The body arrives on the event loop; the file write and the database work (8 MB each, many
+    # uploads at once) run in the thread pool so they never stall other requests.
+    limit = settings().upload_chunk_bytes
+    parts, size = [], 0
+    async for part in request.stream():
+        size += len(part)
+        if size > limit:
+            raise ApiError(422, "bad_chunk", "The chunk is too large.")
+        parts.append(part)
+    return await run_in_threadpool(_store_chunk, upload_id, index, b"".join(parts), user.id)
+
+
+def _store_chunk(upload_id: str, index: int, body: bytes, user_id: str) -> dict:
+    db = SessionLocal()
+    try:
+        up = db.get(Upload, upload_id)
+        if up is None or up.user_id != user_id:
+            raise not_found("Uploaden")
+        if up.status != "open":
+            raise ApiError(409, "upload_closed", "The upload is already finished.")
+        n = -(-up.size // up.chunk_size)
+        if not 0 <= index < n:
+            raise ApiError(422, "bad_chunk", "Ugyldigt stykke.")
+        expected = min(up.chunk_size, up.size - index * up.chunk_size)
+        if len(body) > expected:
+            raise ApiError(422, "bad_chunk", "The chunk is too large.")
+        if len(body) != expected:
+            raise ApiError(422, "bad_chunk", f"The chunk was incomplete ({len(body)} of {expected} bytes).")
+        path = _tmp_path(up)
+        if not path.exists():
+            raise ApiError(410, "upload_expired", "The upload has expired. Start over.")
+        try:
+            with path.open("r+b") as f:
+                f.seek(index * up.chunk_size)
+                f.write(body)
+        except OSError as exc:
+            if disk_full(exc):
+                raise ApiError(507, "disk_full", "The disk is full.") from exc
+            raise
+        write_lock(db)          # chunks arrive in parallel; each adds itself to `received`
+        db.refresh(up)
+        if index not in up.received:
+            up.received = sorted({*up.received, index})
+        up.updated_at = utcnow()
+        db.commit()
+        return {"received": len(up.received), "chunks": n}
+    finally:
+        db.close()
 
 
 @router.post("/{upload_id}/complete")
@@ -169,10 +198,17 @@ def complete_upload(upload_id: str, db: Session = Depends(get_db), user: User = 
         _discard(up)
         raise ApiError(415, "wrong_kind", {"video": "The file is not a video.", "audio": "The file is not an audio file.",
                                           "image": "The file is not an image."}[up.kind])
-    if up.kind == "video":
-        check_duration(info["duration"])
-        if not info.get("fps") or info["fps"] > 1000:
-            raise ApiError(415, "invalid_media", "The video has an invalid frame rate.")
+    try:
+        if up.kind == "video":
+            check_duration(info["duration"])
+            if not info.get("fps") or info["fps"] > 1000:
+                raise ApiError(415, "invalid_media", "The video has an invalid frame rate.")
+    except ApiError:
+        # Rejected for good: free the (multi-GB) part file now, not after 48 hours.
+        up.status = "failed"
+        db.commit()
+        _discard(up)
+        raise
     if info["kind"] == "video":
         chronology.settle(info, up.filename, _last_modified(up))
 
@@ -201,9 +237,9 @@ def complete_upload(upload_id: str, db: Session = Depends(get_db), user: User = 
     elif project is not None and up.kind == "video":
         # Another clip for an existing project (a round). The stored document is not touched –
         # an open editor would conflict – it is merged in on load, like analysis results.
-        a = dict(project.analysis or {})
-        a[m.id] = {**a.get(m.id, {}), "attach": media_ref(m), "shots": [], "status": "queued"}
-        project.analysis = a
+        # Under the write lock: analyses of the round's other clips write the same column.
+        ref = media_ref(m)
+        update_analysis(db, project.id, lambda a: a.__setitem__(m.id, {**a.get(m.id, {}), "attach": ref, "shots": [], "status": "queued"}))
     # Ingest (proxy, thumbnails, waveform) and analysis run in parallel: the editor opens as
     # soon as the proxy is ready and shots appear while the analysis is still running.
     jobs.enqueue(db, "ingest", {"media_id": m.id}, user_id=user.id, project_id=project.id if project else None, media_id=m.id)

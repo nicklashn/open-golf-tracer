@@ -15,7 +15,7 @@ export interface UploadItem {
   size: number;
   kind: UploadKind;
   sent: number;
-  status: 'preparing' | 'uploading' | 'validating' | 'done' | 'error' | 'canceled';
+  status: 'waiting' | 'preparing' | 'uploading' | 'validating' | 'done' | 'error' | 'canceled';
   error?: unknown;
   speed: number;
   projectId?: string | null;
@@ -55,7 +55,37 @@ export const useUploads = create<UploadStore>((set) => ({
 }));
 
 const PARALLEL = 3;
+/** Files sent at once (a round is 20–30 clips of 1–2 GB): the rest wait their turn, so the first
+ *  clips finish – and can be analysed – early, and the server is not flooded. */
+const FILES_AT_ONCE = 2;
 const controllers = new Map<string, AbortController>();
+
+let sending = 0;
+const waiting: (() => void)[] = [];
+
+/** Waits for a free upload slot (rejects if the upload is cancelled meanwhile). */
+function turn(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stop = () => {
+      const i = waiting.indexOf(go);
+      if (i >= 0) waiting.splice(i, 1);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    function go() {
+      signal.removeEventListener('abort', stop);
+      sending++;
+      resolve();
+    }
+    if (signal.aborted) return stop();
+    if (sending < FILES_AT_ONCE) return go();
+    waiting.push(go);
+    signal.addEventListener('abort', stop, { once: true });
+  });
+}
+function leave() {
+  sending--;
+  waiting.shift()?.();
+}
 
 function fileKey(f: File, projectId?: string | null) {
   return `${projectId ?? 'new'}:${f.name}:${f.size}:${f.lastModified}`;
@@ -92,10 +122,27 @@ export async function uploadFile(file: File, opts: { projectId?: string | null; 
   const kind = opts.kind ?? kindOf(file);
   const key = fileKey(file, opts.projectId);
   const store = useUploads.getState();
-  store.add({ key, name: file.name, size: file.size, kind, sent: 0, status: 'preparing', speed: 0, projectId: opts.projectId });
+  store.add({
+    key,
+    name: file.name,
+    size: file.size,
+    kind,
+    sent: 0,
+    status: sending < FILES_AT_ONCE ? 'preparing' : 'waiting',
+    speed: 0,
+    projectId: opts.projectId,
+  });
   const ctrl = new AbortController();
   controllers.set(key, ctrl);
+  let slot = false;
+  const release = () => {
+    if (slot) leave();
+    slot = false;
+  };
   try {
+    await turn(ctrl.signal);
+    slot = true;
+    useUploads.getState().update(key, { status: 'preparing' });
     let status: { id: string; chunkSize: number; chunks: number; received: number[]; status: string } | null = null;
     const prev = remembered(key);
     if (prev) {
@@ -146,6 +193,7 @@ export async function uploadFile(file: File, opts: { projectId?: string | null; 
       }
     }
     await Promise.all(Array.from({ length: Math.min(PARALLEL, queue.length || 1) }, worker));
+    release(); // the server checks the file now; the next one can start sending
     useUploads.getState().update(key, { status: 'validating', sent: file.size });
     const result = await complete(st.id);
     remember(key, null);
@@ -158,10 +206,11 @@ export async function uploadFile(file: File, opts: { projectId?: string | null; 
       setTimeout(() => useUploads.getState().remove(key), 1500);
     } else {
       useUploads.getState().update(key, { status: 'error', error: e });
-      if (e instanceof ApiError && ['invalid_media', 'wrong_kind', 'upload_expired'].includes(e.code)) remember(key, null);
+      if (e instanceof ApiError && ['invalid_media', 'wrong_kind', 'upload_expired', 'video_too_long'].includes(e.code)) remember(key, null);
     }
     throw e;
   } finally {
+    release();
     controllers.delete(key);
   }
 }

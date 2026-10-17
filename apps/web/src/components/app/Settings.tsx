@@ -11,6 +11,7 @@ import { useMe, type Me } from '@/lib/me';
 import { AiSettingsForm } from './AiSettings';
 import { useTheme } from './AppRoot';
 import { PerformanceSettings } from './PerformanceSettings';
+import { StorageSettings } from './StorageSettings';
 
 function Section({ id, title, children, lead }: { id?: string; title: string; lead?: ReactNode; children: ReactNode }) {
   return (
@@ -90,6 +91,10 @@ export function SettingsPage() {
 
       <Section id="performance" title={t.perf.title} lead={t.perf.lead}>
         <PerformanceSettings />
+      </Section>
+
+      <Section id="storage" title={t.storage.title} lead={t.storage.lead}>
+        <StorageSettings />
       </Section>
 
       <Section id="data" title={t.settings.data} lead={t.settings.exportDataLead}>

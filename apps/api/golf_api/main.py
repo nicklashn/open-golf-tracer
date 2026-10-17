@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import ipaddress
 import logging
 import secrets
+import sys
 import time
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -16,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import logging_setup, maintenance
 from .config import settings
 from .logging_setup import request_id
-from .routes import account, autovideo, chatgpt, exports, geo, internal, jobs, media, misc, performance, projects, uploads
+from .routes import account, autovideo, chatgpt, disk, exports, geo, internal, jobs, media, misc, performance, projects, uploads
 
 log = logging.getLogger("golf.api")
 
@@ -52,22 +55,85 @@ def foreign_host(request: Request) -> bool:
     return name not in {h.strip().lower() for h in settings().allowed_hosts.split(",") if h.strip()}
 
 
-def migrate() -> None:
-    """Apply Alembic migrations (idempotent)."""
-    from alembic import command
+KEEP_BACKUPS = 5
+
+
+class NewerDataError(RuntimeError):
+    """The database was written by a newer version of the app (an older one was installed over it)."""
+
+
+def _alembic_config():
     from alembic.config import Config
 
     from .config import API_DIR
 
     cfg = Config(str(API_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(API_DIR / "alembic"))
+    return cfg
+
+
+def _backup_sqlite(rev: str) -> Path | None:
+    """A copy of the database before migrations change it: data/backups/db-<rev>-<date>.sqlite
+    (the last KEEP_BACKUPS are kept). VACUUM INTO writes a consistent copy even while the
+    worker or exporter has the file open."""
+    from .db import engine
+
+    eng = engine()
+    if eng.dialect.name != "sqlite" or not eng.url.database or eng.url.database == ":memory:":
+        return None
+    folder = settings().data_dir / "backups"
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = folder / f"db-{rev}-{stamp}.sqlite"
+    n = 1
+    while out.exists():
+        n += 1
+        out = folder / f"db-{rev}-{stamp}-{n}.sqlite"
+    with eng.connect() as conn:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.exec_driver_sql("VACUUM INTO ?", (str(out),))
+    for old in sorted(folder.glob("db-*.sqlite"), key=lambda f: f.stat().st_mtime)[:-KEEP_BACKUPS]:
+        with contextlib.suppress(OSError):
+            old.unlink()
+    log.info("database backed up to %s before migrating from %s", out, rev)
+    return out
+
+
+def migrate() -> None:
+    """Apply Alembic migrations (idempotent). A database that needs migrating is backed up first;
+    one from a newer version stops with NewerDataError instead of a generic failure."""
+    from alembic import command
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    from .db import engine
+
+    cfg = _alembic_config()
+    script = ScriptDirectory.from_config(cfg)
+    head = script.get_current_head()
+    with engine().connect() as conn:
+        current = MigrationContext.configure(conn).get_current_revision()
+    if current is not None and current != head:
+        known = {r.revision for r in script.walk_revisions()}
+        if current not in known:
+            raise NewerDataError(f"{NEWER_DATA}: The data in {settings().data_dir} is from a newer version of Open Golf Tracer "
+                                 f"(database revision {current}, this version knows up to {head}). Install the newest version.")
+        _backup_sqlite(current)
     command.upgrade(cfg, "head")
+
+
+# Printed (and matched by scripts/dev.mjs) when an older app meets newer data.
+NEWER_DATA = "DATA_FROM_NEWER_VERSION"
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     logging_setup.setup(settings().log_level)
-    migrate()
+    try:
+        migrate()
+    except NewerDataError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        raise
 
     async def housekeeping():
         while True:
@@ -134,7 +200,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"error": {"code": "server_error", "message": "Something went wrong on our side. Try again in a moment.", "ref": ref}},
                             status_code=500)
 
-    for r in (account, projects, uploads, media, jobs, autovideo, chatgpt, exports, geo, internal, performance, misc):
+    for r in (account, projects, uploads, media, jobs, autovideo, chatgpt, exports, geo, internal, performance, disk, misc):
         app.include_router(r.router, prefix="/api")
     return app
 
