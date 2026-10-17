@@ -17,11 +17,12 @@ import {
   type Shot,
   type VideoClip,
 } from '@golf/schema';
+import { cleanSpan, dipToBlack } from './clean';
 import { layerDefaults, type LayerNames } from './layers';
 import { placeTitle } from './place';
 import { defaultPutts, type PuttMode } from './plan';
 import { scoreName, toPar, type HoleScore } from './score';
-import { PUTT_PAD_S, puttEnd, puttShort, shortFor } from './shorts';
+import { PUTT_PAD_S, puttEnd, puttShort, shortFor, shortSpan } from './shorts';
 import { summarize } from './summary';
 
 export type VideoKind = 'youtube' | 'highlight';
@@ -30,6 +31,9 @@ type Locale = 'da' | 'en';
 
 /** Seconds kept after each landing in the YouTube edit: long enough to read the stats card. */
 const AFTER_LANDING_S = 3.2;
+/** The same for shots analysed before clean windows (`shot.clean`): nothing says the picture
+ *  stays clean that long (the golfer often walks back to the camera), so a little less. */
+const AFTER_LANDING_UNSURE_S = 2.6;
 
 /** Waits between putts longer than this are cut down to PUTT_PAD_S before the next stroke. */
 export const PUTT_GAP_S = 4;
@@ -56,18 +60,21 @@ export function shownPutts(doc: Project, mode: PuttMode): Shot[] {
  * to the pad before the next stroke (`whole` keeps it, e.g. when a putt was not found).
  * `putts` are of one clip, in order.
  */
-export function puttCuts(putts: Shot[], media: MediaRef, whole = false, tail = PUTT_PAD_S): { a: number; b: number; putts: Shot[] }[] {
-  const out: { a: number; b: number; putts: Shot[] }[] = [];
+export function puttCuts(putts: Shot[], media: MediaRef, whole = false, tail = PUTT_PAD_S): { a: number; b: number; putts: Shot[]; forced: boolean }[] {
+  const out: { a: number; b: number; putts: Shot[]; forced: boolean }[] = [];
   putts.forEach((p, i) => {
     const pad = PUTT_PAD_S * p.slowmo;
     const a = Math.max(0, p.impactTime - pad);
     const b = Math.min(media.duration, puttEnd(p) + (i === putts.length - 1 ? tail : PUTT_PAD_S) * p.slowmo);
+    // Inside the putt's clean window (clean.ts); the roll itself is always kept.
+    const c = cleanSpan(p, a, b, p.impactTime, puttEnd(p));
     const last = out[out.length - 1];
     const prev = putts[i - 1];
-    if (last && (whole || p.impactTime - puttEnd(prev) <= PUTT_GAP_S * p.slowmo || a <= last.b)) {
-      last.b = Math.max(last.b, b);
+    if (last && (whole || p.impactTime - puttEnd(prev) <= PUTT_GAP_S * p.slowmo || c.a <= last.b)) {
+      if (c.b >= last.b) last.forced = c.forced;
+      last.b = Math.max(last.b, c.b);
       last.putts.push(p);
-    } else out.push({ a, b, putts: [p] });
+    } else out.push({ a: c.a, b: c.b, putts: [p], forced: c.forced });
   });
   return out;
 }
@@ -101,13 +108,17 @@ interface Window {
   land: number;
   a: number;
   b: number;
+  /** The clean window ended it early (see clean.ts). */
+  forced: boolean;
 }
 
+/** From `before` the launch to `after` the landing, inside the shot's clean window. */
 function windowOf(shot: Shot, media: MediaRef, before: number, after: number): Window {
   const st = shotStats(shot);
   const launch = shot.impactTime + shot.timing.launchOffset;
   const land = launch + ((st?.flightTimeS ?? 4) / shot.timing.speed) * shot.slowmo;
-  return { shot, media, launch, land, a: Math.max(0, launch - before), b: Math.min(media.duration, land + after) };
+  const span = cleanSpan(shot, Math.max(0, launch - before), Math.min(media.duration, land + after), launch, land);
+  return { shot, media, launch, land, ...span };
 }
 
 const isoDate = (s: string | null | undefined) => (s ? new Date(s.replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) : null);
@@ -158,7 +169,7 @@ function layer<T extends Layer['type']>(
  */
 export function youtubeVideo(doc: Project, locale: Locale, name: string, names: LayerNames = {}, opts: VideoOptions = {}): Project {
   const shots = playedShots(doc);
-  const wins = shots.map((s) => windowOf(s, doc.media[s.mediaId], 3, AFTER_LANDING_S));
+  const wins = shots.map((s) => windowOf(s, doc.media[s.mediaId], 3, s.clean ? AFTER_LANDING_S : AFTER_LANDING_UNSURE_S));
   const scores = opts.scores ?? summarize(doc).holes;
   const scored = new Map(scores.filter((h) => h.strokes !== null && h.par).map((h) => [h.hole, h]));
   const holeOf = (s: Shot) => doc.media[s.mediaId].place?.hole ?? '';
@@ -171,8 +182,9 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
     key: number;
     win?: Window;
     putts?: Shot[];
+    forced: boolean;
   }
-  const segs: Seg[] = wins.map((w) => ({ media: w.media, a: w.a, b: w.b, key: w.shot.impactTime, win: w }));
+  const segs: Seg[] = wins.map((w) => ({ media: w.media, a: w.a, b: w.b, key: w.shot.impactTime, win: w, forced: w.forced }));
   const putts = shownPutts(doc, opts.putts ?? defaultPutts('youtube'));
   greens(putts, doc).forEach((g, i, all) => {
     const media = doc.media[g[0].mediaId];
@@ -180,7 +192,7 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
     const last = g[g.length - 1];
     const ends = scored.has(hole) && last.putt?.holed === true && !all.slice(i + 1).some((x) => holeOf(x[0]) === hole);
     for (const c of puttCuts(g, media, !!hole && !!opts.uncut?.includes(hole), ends ? SCORE_HOLD_S : PUTT_PAD_S))
-      segs.push({ media, a: c.a, b: c.b, key: c.putts[0].impactTime, putts: c.putts });
+      segs.push({ media, a: c.a, b: c.b, key: c.putts[0].impactTime, putts: c.putts, forced: c.forced });
   });
   const rank = new Map<string, number>();
   doc.clips.forEach((c, i) => rank.has(c.mediaId) || rank.set(c.mediaId, i));
@@ -192,10 +204,14 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
   let t = 0;
   let clipStart = 0;
   let cur: VideoClip | null = null;
+  /** Cuts the clean window pulled in: the clip and where its footage ends then. */
+  const forced: { clip: VideoClip; b: number; t: number }[] = [];
   for (const g of segs) {
     const last = clips[clips.length - 1];
-    // Shots close together in one video share a clip instead of jumping back in time.
-    if (last && last.kind === 'video' && last.mediaId === g.media.id && g.a <= last.out + 0.5) {
+    const lastForced = forced.some((f) => f.clip === last && f.b === last.out);
+    // Shots close together in one video share a clip instead of jumping back in time (but not
+    // across a stretch the clean window left out).
+    if (last && last.kind === 'video' && last.mediaId === g.media.id && g.a <= last.out + (lastForced ? 0 : 0.5)) {
       t -= last.out - last.in;
       last.out = Math.max(last.out, g.b);
       t += last.out - last.in;
@@ -213,6 +229,7 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
     }
     const from = cur!.in;
     const T = (x: number) => clipStart + (x - from);
+    if (g.forced) forced.push({ clip: cur!, b: g.b, t: T(g.b) });
     if (g.win) at.push({ shot: g.win.shot, launch: T(g.win.launch), land: T(g.win.land), clipStart, cut: clipStart, putt: false });
     else if (g.putts)
       at.push({ shot: g.putts[0], launch: T(g.putts[0].impactTime), land: T(puttEnd(g.putts[g.putts.length - 1])), clipStart, cut: T(g.a), putt: true });
@@ -327,6 +344,8 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
     }
   });
   if (card.length) layers.push(...scorecard(ctx, card, cardStart, total, course));
+  // A dip to black where the clean window cut a shot short (unless a later shot carried the clip on).
+  for (const f of forced) if (f.clip.out === f.b) layers.push(dipToBlack(base, f.t, f.t >= total - 0.05, names));
   return migrateProject({ ...base, layers });
 }
 
@@ -456,6 +475,8 @@ export function highlightShort(doc: Project, locale: Locale, name: string, names
       );
     }
     if (m.shot.kind === 'putt') continue;
+    // Cut short by the clean window: dip to black into the next shot.
+    if (shortSpan(doc, m.shot).forced) layers.push(dipToBlack(base, m.end, m.end >= t - 0.05, names));
     layers.push(
       layer(
         'statCard',

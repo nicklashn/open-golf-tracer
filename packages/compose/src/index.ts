@@ -1,4 +1,5 @@
 export * from './chronology';
+export * from './clean';
 export * from './compose';
 export * from './layers';
 export * from './match';

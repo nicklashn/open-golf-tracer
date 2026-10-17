@@ -4,19 +4,29 @@
  */
 import { shotHandles } from '@golf/physics';
 import { relayoutTemplate, shotStats } from '@golf/render';
-import { migrateProject, newId, type Clip, type Project, type ReframeKey, type Shot } from '@golf/schema';
+import { migrateProject, newId, timelineDuration, type Clip, type Project, type ReframeKey, type Shot } from '@golf/schema';
+import { cleanSpan, dipToBlack, type Span } from './clean';
 
 const BEFORE = 2.2;
 const AFTER_LAND = 1.2;
+/** After the landing for shots analysed before clean windows (`shot.clean`): a little less. */
+const AFTER_LAND_UNSURE = 0.9;
 const SLOW = 0.4;
 
-export function shortFor(doc: Project, shot: Shot, name: string, locale: 'da' | 'en' = 'en'): Project {
+/** Source seconds of a shot's short: launch, landing and the cut [a, b] inside its clean window. */
+export function shortSpan(doc: Project, shot: Shot): Span & { impact: number; flight: number } {
   const media = doc.media[shot.mediaId];
   const st = shotStats(shot);
   const impact = shot.impactTime + shot.timing.launchOffset;
   const flight = ((st?.flightTimeS ?? 4) / shot.timing.speed) * shot.slowmo;
-  const a = Math.max(0, impact - BEFORE);
-  const b = Math.min(media?.duration ?? impact + flight + AFTER_LAND, impact + flight + AFTER_LAND);
+  const after = shot.clean ? AFTER_LAND : AFTER_LAND_UNSURE;
+  const end = impact + flight + after;
+  return { impact, flight, ...cleanSpan(shot, Math.max(0, impact - BEFORE), Math.min(media?.duration ?? end, end), impact, impact + flight) };
+}
+
+export function shortFor(doc: Project, shot: Shot, name: string, locale: 'da' | 'en' = 'en'): Project {
+  const media = doc.media[shot.mediaId];
+  const { impact, flight, a, b, forced } = shortSpan(doc, shot);
   const slowEnd = Math.min(b, impact + Math.min(1.2, flight * 0.3));
   const slowStart = Math.max(a, impact - 0.25);
   const clips: Clip[] = [];
@@ -81,7 +91,9 @@ export function shortFor(doc: Project, shot: Shot, name: string, locale: 'da' | 
       .map((l) => ({ ...l, start: 0, end: 9999 })),
   });
   // Template graphics are rebuilt for the short's own timing and the 9:16 frame.
-  return relayoutTemplate(doc, short, locale, true);
+  const out = relayoutTemplate(doc, short, locale, true);
+  // Cut short by the clean window: fade out rather than stop on whatever came next.
+  return forced ? migrateProject({ ...out, layers: [...out.layers, dipToBlack(out, timelineDuration(out), true)] }) : out;
 }
 
 /** Seconds a putt rolls when the analysis gave no end. */
@@ -98,8 +110,13 @@ export function puttEnd(putt: Shot): number {
 export function puttShort(doc: Project, putt: Shot, name: string): Project {
   const media = doc.media[putt.mediaId];
   const pad = PUTT_PAD_S * putt.slowmo;
-  const a = Math.max(0, putt.impactTime - pad);
-  const b = Math.min(media?.duration ?? Infinity, puttEnd(putt) + pad);
+  const { a, b } = cleanSpan(
+    putt,
+    Math.max(0, putt.impactTime - pad),
+    Math.min(media?.duration ?? Infinity, puttEnd(putt) + pad),
+    putt.impactTime,
+    puttEnd(putt),
+  );
   const clips: Clip[] = [{ id: newId('c_'), kind: 'video', mediaId: putt.mediaId, in: a, out: Math.max(b, a + 0.5), speed: 1, volume: 1, muted: false }];
   // Framed on the ball at address, then where it was last seen.
   const keys: ReframeKey[] = [];
