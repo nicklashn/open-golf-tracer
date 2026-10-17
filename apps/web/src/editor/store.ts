@@ -6,6 +6,7 @@
  * (dragging a slider or a handle) are merged into one undo step.
  */
 import { applyPatches, enablePatches, produceWithPatches, type Draft, type Patch } from 'immer';
+import { useMemo } from 'react';
 import { create } from 'zustand';
 import { timelineDuration, type Project } from '@golf/schema';
 
@@ -38,7 +39,17 @@ export interface MediaInfo {
   thumbs?: ThumbsInfo | null;
 }
 
-export type Selection = { kind: 'shot'; id: string } | { kind: 'layer'; ids: string[] } | { kind: 'clip'; id: string } | { kind: 'audio'; id: string } | null;
+/**
+ * What is selected. One kind at a time; layers and clips can be several (shift/ctrl-click).
+ * For clips, `id` is the one last clicked (shown in the inspector) and `ids` all of them.
+ */
+export type Selection =
+  { kind: 'shot'; id: string } | { kind: 'layer'; ids: string[] } | { kind: 'clip'; id: string; ids?: string[] } | { kind: 'audio'; id: string } | null;
+
+/** The selected clips (several with shift/ctrl-click). */
+export function selectedClipIds(s: Selection): string[] {
+  return s?.kind === 'clip' ? (s.ids?.length ? s.ids : [s.id]) : [];
+}
 
 export type Tool = 'select' | 'addPoint' | 'addShot' | 'reframe';
 export type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
@@ -233,14 +244,20 @@ function fixSelection() {
           ? doc.clips.some((c) => c.id === selection.id)
           : doc.audioTracks.some((a) => a.id === selection.id);
   if (!exists) useEditor.setState({ selection: null });
+  else if (selection.kind === 'clip' && selection.ids) {
+    const ids = selection.ids.filter((id) => doc.clips.some((c) => c.id === id));
+    if (ids.length !== selection.ids.length) useEditor.setState({ selection: { ...selection, ids } });
+  }
 }
 
 /** The document with live drag params applied (what the preview draws). */
 export function useLiveDoc(): Project {
   const doc = useEditor((s) => s.doc);
   const live = useEditor((s) => s.live);
-  if (!Object.keys(live).length) return doc;
-  return { ...doc, shots: doc.shots.map((s) => (live[s.id] ? { ...s, params: live[s.id] } : s)) };
+  return useMemo(
+    () => (Object.keys(live).length ? { ...doc, shots: doc.shots.map((s) => (live[s.id] ? { ...s, params: live[s.id] } : s)) } : doc),
+    [doc, live],
+  );
 }
 
 export const editor = () => useEditor.getState();

@@ -33,17 +33,23 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
   const [box, setBox] = useState<Size>({ width: 640, height: 360 });
   const [fontsOk, setFontsOk] = useState(false);
   const doc = useLiveDoc();
-  const time = useEditor((s) => s.time);
+  // The editable overlay (handles, layer boxes, clickable paths) follows the playhead only while
+  // paused: during playback the canvas draws every frame and React stays idle.
+  const time = useEditor((s) => (s.playing ? -1 : s.time));
+  const playing = time < 0;
   const selection = useEditor((s) => s.selection);
   const tool = useEditor((s) => s.tool);
 
   const media = primaryMedia(doc);
   const ratio = media ? aspectRatio(doc.format.aspect, media) : 16 / 9;
   const view = fit(box, ratio);
+  const viewRef = useRef({ width: view.width, height: view.height, dpr: 1 });
+  viewRef.current = { width: view.width, height: view.height, dpr: typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1 };
 
   useEffect(() => {
     if (!host.current || !canvas.current) return;
     player = new PlayerEngine(host.current, canvas.current, locale);
+    player.setView(viewRef.current);
     void loadRendererFonts().then(() => setFontsOk(true));
     return () => {
       player?.destroy();
@@ -64,7 +70,12 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
   }, []);
 
   // Coordinate mapping between source pixels and the on-screen preview.
-  const st = useMemo(() => screenTransform({ project: doc, width: view.width }, time), [doc, view.width, time]);
+  const stNow = useMemo(() => (playing ? null : screenTransform({ project: doc, width: view.width }, time)), [doc, view.width, time, playing]);
+  // The mapping only changes when the crop or the clip changes, not with every frame: keep it
+  // stable so the flight paths are not projected again on each scrub step.
+  const stKey = stNow ? `${stNow.mediaId}|${stNow.crop.x}|${stNow.crop.y}|${stNow.tf.scale}` : '';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const st = useMemo(() => stNow, [stKey]);
   const toScreen = useCallback((p: { x: number; y: number }) => (st ? { x: (p.x - st.crop.x) * st.tf.scale, y: (p.y - st.crop.y) * st.tf.scale } : p), [st]);
   const toSource = useCallback((p: { x: number; y: number }) => (st ? { x: p.x / st.tf.scale + st.crop.x, y: p.y / st.tf.scale + st.crop.y } : p), [st]);
 
@@ -115,14 +126,15 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
   // Layers on screen
 
   const env = useMemo(() => {
+    if (playing) return null;
     const oc: OverlayContext = { project: doc, width: view.width, height: view.height, locale, images: new Map() };
     return layerEnv(oc, time);
     // fontsOk: measuring needs the fonts loaded
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc, view.width, view.height, locale, time, fontsOk]);
+  }, [doc, view.width, view.height, locale, time, fontsOk, playing]);
 
   const placed = useMemo(() => {
-    if (!fontsOk) return [];
+    if (!fontsOk || !env) return [];
     return doc.layers.map((l) => ({ l, p: placeLayer(l, time, env) })).filter((x): x is { l: Layer; p: NonNullable<ReturnType<typeof placeLayer>> } => !!x.p);
   }, [doc.layers, time, env, fontsOk]);
 
@@ -203,12 +215,12 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
     const s = useEditor.getState();
     s.setPlaying(false);
     if (tool === 'addPoint' && activeShot && st) {
-      void ops.addPointConstraint(activeShot.id, st.sourceTime, toSource(p));
+      void ops.addPointConstraint(activeShot.id, stNow?.sourceTime ?? st.sourceTime, toSource(p));
       s.setTool('select');
       return;
     }
     if (tool === 'addShot' && st) {
-      onRequestRetrack(st.mediaId, st.sourceTime, toSource(p));
+      onRequestRetrack(st.mediaId, stNow?.sourceTime ?? st.sourceTime, toSource(p));
       s.setTool('select');
       return;
     }
@@ -220,7 +232,7 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
     s.select(null);
   }
 
-  const hasVideo = !!clipAt(doc.clips, time);
+  const hasVideo = useEditor((s) => !!clipAt(s.doc.clips, s.time));
   const cursor = tool === 'addPoint' || tool === 'addShot' ? 'cursor-crosshair' : tool === 'reframe' ? 'cursor-move' : '';
 
   return (

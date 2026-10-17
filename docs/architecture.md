@@ -57,8 +57,15 @@ varierer mellem browsere og Node. Tekst er glyf-konturer fra statiske fonte, så
 browser og exporter giver bit-identiske pixels (`tests/parity`, maks. afvigelse 0).
 
 - **Preview:** `<video>` pr. medie (proxy) placeres med CSS-transform for beskæring/reframing;
-  overlayet tegnes oven på i et canvas med dirty-rects. Tidslinjens ur håndterer klip, hastighed,
-  freeze frames og slow-mo.
+  overlayet tegnes oven på i et canvas med dirty-rects – i en Web Worker med OffscreenCanvas,
+  hvor browseren kan (`editor/overlay.ts`), så rasteriseringen aldrig blokerer tidslinje og træk.
+  Tidslinjens ur håndterer klip, hastighed, freeze frames og slow-mo.
+- **Editoren er let at arbejde i:** kun playhead og tidskode følger uret (playhead via
+  CSS-transform fra et store-abonnement, ikke React-renders); spor og elementer er memoiserede,
+  og filmstrips, bølgeformer og tidsmarkeringer tegnes kun for det synlige stykke. Hovedsporet er
+  sekventielt: trim, slet, flyt og hastighed ripples, og grafik, musik og beskærings-keyframes
+  følger det billede, de hører til (`editor/ripple.ts`). Hver ændring er ét undo-trin (immer-patches).
+  `apps/web/test/editor-perf.test.tsx` holder øje med render-antal og DOM-størrelse i en lang runde.
 - **Eksport:** exporteren bygger en ffmpeg-filtergraf ud fra samme tidslinje (trim, setpts,
   tpad, crop-keyframes, skalering, lyd-mix, HDR/tonemap), renderer kun det område, overlayet
   faktisk bruger, og pipe'r det ind i ffmpeg, som lægger det på originalen. HDR bevares som
