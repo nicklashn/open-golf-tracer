@@ -825,6 +825,7 @@ const da = {
     title: 'Lagerplads',
     lead: 'Hvor meget dine projekter fylder, og hvordan du gør plads.',
     free: '{free} ledigt af {total}',
+    used: 'dine projekter fylder {size}',
     low: 'Der er under {size} ledigt. Gør plads, før du uploader en ny runde.',
     project: 'Projekt',
     originals: 'Originaler',

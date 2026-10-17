@@ -66,7 +66,9 @@ export function StorageSettings() {
   return (
     <div className="space-y-4" data-testid="storage-settings">
       <div>
-        <p className="tabular text-sm font-medium">{f(T.free, { free: bytes(data.free, locale), total: bytes(data.total, locale) })}</p>
+        <p className="tabular text-sm font-medium">
+          {f(T.free, { free: bytes(data.free, locale), total: bytes(data.total, locale) })} · {f(T.used, { size: bytes(used, locale) })}
+        </p>
         {data.free < LOW ? <p className="mt-1 text-[13px] text-accent-fg">{f(T.low, { size: bytes(LOW, locale) })}</p> : null}
       </div>
       {data.projects.length === 0 ? (
@@ -118,9 +120,7 @@ export function StorageSettings() {
           </table>
         </div>
       )}
-      <p className="text-[13px] text-fg-muted">
-        {T.previewsHint} <span className="tabular">({bytes(used, locale)})</span>
-      </p>
+      <p className="text-[13px] text-fg-muted">{T.previewsHint}</p>
       <div className="flex flex-wrap gap-2">
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void act('/storage/previews/delete', { olderThanDays: 30 })}>
           {T.oldPreviews}

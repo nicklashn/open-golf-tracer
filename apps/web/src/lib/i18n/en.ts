@@ -827,6 +827,7 @@ const en: Dict = {
     title: 'Storage',
     lead: 'How much space your projects take, and how to free some up.',
     free: '{free} free of {total}',
+    used: 'your projects take {size}',
     low: 'Less than {size} is free. Free some up before you upload a new round.',
     project: 'Project',
     originals: 'Originals',
