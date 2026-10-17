@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const calls: { path: string; body?: unknown }[] = [];
 let jobs: Record<string, unknown>[] = [];
 let saveOk = true;
+let saveConflict = false;
 let reconnect: (() => void) | undefined;
 
 const question = {
@@ -43,7 +44,10 @@ vi.mock('@/lib/events', () => ({
     reconnect = onReconnect;
   },
 }));
-vi.mock('@/editor/autosave', () => ({ saveNow: async () => saveOk }));
+// The dialog saves with flush(): it never overwrites another window's save.
+vi.mock('@/editor/autosave', () => ({
+  flush: async () => (saveOk ? { ok: true } : { ok: false, reason: saveConflict ? 'conflict' : 'network', message: 'offline' }),
+}));
 vi.mock('@/lib/api', () => ({
   api: async (path: string, opts?: { body?: unknown; method?: string }) => {
     calls.push({ path, body: opts?.body });
@@ -163,6 +167,19 @@ describe('AutoVideoDialog', () => {
     await flush();
     expect(calls.some((c) => c.path === '/autovideo')).toBe(false);
     expect(document.body.textContent).toContain('could not be saved');
+    view.unmount();
+  });
+
+  it('leaves a save conflict to the conflict dialog and does not overwrite it', async () => {
+    saveOk = false;
+    saveConflict = true;
+    const view = mount(<AutoVideoDialog open onOpenChange={() => {}} />);
+    await flush();
+    await act(async () => button(/Make the video/)!.click());
+    await flush();
+    expect(calls.some((c) => c.path === '/autovideo')).toBe(false);
+    expect(document.body.textContent).not.toContain('could not be saved');
+    saveConflict = false;
     view.unmount();
   });
 });
