@@ -35,6 +35,7 @@ def _public(refresh: bool = False) -> dict:
         "tuned": {"summary": tuned.get("summary"), "at": tuned.get("at")} if tuned else None,
         "fallback": data.get("fallback"),
         "cpuOnly": bool(data.get("cpuOnly")),
+        "decodeFailed": performance.decode_failures(data),
         "hardware": hw,
         "ingestFromEnv": "INGEST_PARALLEL" in os.environ,
     }

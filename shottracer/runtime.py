@@ -13,6 +13,8 @@ class Runtime:
     batch: int = 1        # frames per inference call (only for a model with a dynamic batch dimension)
     threads: int = 0      # CPU threads for inference, OpenCV and frame decoding; 0 = all cores
     gpu: bool = True      # False: the detector stays on the CPU (after GPU errors)
+    decoder: str = "auto"  # how ffmpeg decodes video (hwdecode.METHODS); "auto": ffmpeg's own pick
+    decode_failed: tuple[str, ...] = ()   # GPU decoder/codec pairs that failed before (hwdecode.failure_key)
 
 
 _lock = threading.Lock()

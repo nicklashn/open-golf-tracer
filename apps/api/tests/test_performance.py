@@ -137,6 +137,8 @@ def test_endpoints(client):
     '{"profile": "tuned", "tuned": "old format", "rev": 3}',
     '{"profile": "max", "rev": "seven", "fallback": ["max", "balanced"]}',
     '{"profile": "tuned", "tuned": [1, 2], "cpuOnly": true}',
+    '{"profile": "tuned", "tuned": {"analyses": 3, "decoder": 7}, "decodeFailed": ["cuda:hevc:x"]}',
+    '{"profile": "tuned", "tuned": {"analyses": 3, "decoder": "cuda"}, "decodeFailed": {"cuda:hevc:p010le": "old"}}',
     '["balanced"]',
     '',
 ])
@@ -172,3 +174,36 @@ def test_a_failed_read_is_not_remembered(env, monkeypatch):
     performance._cache.clear()
     assert performance.load()["profile"] == "balanced"     # this one read: the safe default
     assert performance.load()["profile"] == "max"
+
+
+def test_the_decoder_from_optimise(env, client, monkeypatch):
+    """Files from before have no decoder: they keep ffmpeg's own pick ("auto"). A GPU decoder that
+    fails in a real analysis is saved, handed to the engine, shown, and cleared by the next Optimise."""
+    from golf_worker import tasks
+    from shottracer import hwdecode, runtime
+
+    (env / "data" / "performance.json").write_text('{"profile": "tuned", "rev": 4, "tuned": {"analyses": 3, "sessions": 1}}')
+    assert performance.effective(GPU_PC)[0].decoder == "auto"
+    assert Perf.from_dict({"decoder": "nvdec-please"}).decoder == "auto"
+    performance.save_tuned(Perf(analyses=2, decoder="d3d11va"), {"decoder": "d3d11va", "parallel": 2})
+    monkeypatch.setattr(performance, "hardware", lambda refresh=False: GPU_PC)
+    tasks.apply_performance()
+    assert runtime.current().decoder == "d3d11va" and runtime.current().decode_failed == ()
+    try:
+        hwdecode.reset()
+        hwdecode.record_failure("d3d11va", "hevc", "yuv420p10le", "Failed setup for format d3d11")   # as decode() does
+        assert list(performance.load()["decodeFailed"]) == ["d3d11va:hevc:yuv420p10le"]
+        assert performance.record_decode_failure("d3d11va:hevc:yuv420p10le", "again") is False
+        tasks.apply_performance()
+        assert runtime.current().decode_failed == ("d3d11va:hevc:yuv420p10le",)
+        hwdecode.reset()   # a new process still skips it
+        assert hwdecode.choose("d3d11va", "hevc", "yuv420p10le", runtime.current().decode_failed) == "sw"
+        s = client.get("/api/performance").json()
+        assert s["effective"]["decoder"] == "d3d11va"
+        assert s["decodeFailed"][0]["method"] == "d3d11va" and s["decodeFailed"][0]["codec"] == "hevc"
+        performance.save_tuned(Perf(decoder="sw"), {})
+        assert "decodeFailed" not in performance.load() and client.get("/api/performance").json()["decodeFailed"] == []
+    finally:
+        hwdecode.reset()
+        hwdecode._listeners.clear()
+        runtime.configure(runtime.Runtime())

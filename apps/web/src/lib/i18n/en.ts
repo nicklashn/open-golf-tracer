@@ -762,11 +762,12 @@ const en: Dict = {
     devices: { DirectML: 'the graphics card (DirectML)', CUDA: 'the graphics card (CUDA)', CPU: 'the CPU' },
     optimize: 'Optimise',
     optimizeLead:
-      'A short test (30–60 s) of the ball finder that saves the fastest safe settings as "Tuned for this PC". It waits for running analyses to finish and holds new ones meanwhile.',
+      'A short test (1–2 min) of the ball finder and video decoding that saves the fastest safe settings as "Tuned for this PC". It waits for running analyses to finish and holds new ones meanwhile.',
     optimizing: 'Optimising …',
     result: '≈ {x}× faster ball finding than Balanced.',
     resultGpu: 'GPU: {gpu} – use up to {n} analyses at once.',
     resultCpu: 'The ball finder runs on the CPU: {n} analysis at a time.',
+    resultDecode: 'Video decoding: {how}, ≈ {fps} frames/s.',
     stop: {
       vram: 'Stopped before 80 % of the graphics memory was in use.',
       error: 'One step failed (e.g. graphics memory full); the last safe step is used. See the details.',
@@ -782,6 +783,13 @@ const en: Dict = {
     details: 'Details of the test',
     trial: '{sessions} session(s) · {batch} frame(s) per call · {callers} at once',
     trialDecode: '{n} video(s) decoded at once',
+    trialDecoder: 'Decoding: {how}, {n} at once',
+    decoderCpu: 'CPU',
+    decoderAuto: 'automatic (ffmpeg picks)',
+    decoderGpu: 'GPU ({name})',
+    decodes: 'decoding: {how}',
+    decodeFailed:
+      'GPU decoding ({method}) failed on a {codec} video {when}, so those videos are now decoded on the CPU. Run Optimise again to try the GPU again.',
     trialFps: '{fps} frames/s',
     trialVram: '{mb} MB graphics memory',
     trialFailed: 'failed',

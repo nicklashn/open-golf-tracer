@@ -6,7 +6,9 @@ watching frames per second and GPU memory. Each of these stops at an error (e.g.
 GPU memory above VRAM_LIMIT or no real gain, and the next one is still tried; the time budget ends
 it all. On a GPU it then measures video decoding side by side, which is most of an analysis once
 the detector is fast (a 3-minute 1080p60 clip with 18 shots: ~100 detector calls, ~10,000
-decoded frames), and picks the number of analyses at once from that.
+decoded frames): on the CPU and with each GPU decoder this ffmpeg has (checked against the CPU's
+frames first), one video and then more side by side. The fastest decoder that works and the
+number of videos it decodes best side by side set the decoder and the analyses at once.
 The best safe step is saved as the "Tuned for this PC" profile.
 """
 from __future__ import annotations
@@ -31,6 +33,9 @@ log = logging.getLogger("golf.worker")
 
 ROOT = Path(__file__).resolve().parents[3]
 BUDGET_S = 45.0
+DECODE_BUDGET_S = 40.0   # for the decoders, after the detector
+DECODE_FINALISTS = 2     # decoders (by speed with one video) also measured side by side
+MAX_DECODE_DIFF = 1.5    # mean grey-level difference to the CPU's frames a GPU decoder may have
 MIN_GAIN = 1.05          # a step must be at least this much faster to count
 BATCHES = (2, 4, 8)
 SESSIONS = (2, 3, 4)      # CUDA only: with DirectML one Run call runs at a time (shottracer.detect)
@@ -52,6 +57,7 @@ class Trial:
     dynamic: bool = False          # the model takes more than one frame per call
     provider: str | None = None    # where the model really ran (a broken GPU driver falls back to the CPU)
     kind: str = "detector"         # or "decode": `callers` videos decoded side by side
+    decoder: str | None = None     # decode trials: how (shottracer.hwdecode: sw, auto, d3d11va, cuda, ...)
 
 
 Measure = Callable[[int, int, int], Trial]   # (sessions, batch, callers)
@@ -122,24 +128,62 @@ def search(measure: Measure, hw: dict[str, Any], dynamic_batch: bool | None = No
 
 
 def search_parallel(measure: Callable[[int], Trial], hw: dict[str, Any], budget_s: float,
-                    clock: Callable[[], float] = time.monotonic) -> tuple[int | None, list[Trial]]:
-    """How many videos decode side by side before it gets no faster (None: not measured)."""
+                    clock: Callable[[], float] = time.monotonic, first: Trial | None = None) -> tuple[int | None, list[Trial]]:
+    """How many videos decode side by side before it gets no faster (None: not measured).
+    `first` is a 1-video trial already made (the returned trials are only the new ones)."""
     t0 = clock()
     cap = min(performance.MAX_ANALYSES, performance._ram_cap(hw, performance.RAM_PER_ANALYSIS_MB))
     trials: list[Trial] = []
-    best: Trial | None = None
-    for k in range(1, cap + 1):
-        if trials and clock() - t0 + 1.5 * trials[-1].seconds > budget_s:
+    best: Trial | None = first if first and not first.error and first.fps else None
+    last = first
+    for k in range(2 if first else 1, cap + 1):
+        if last and clock() - t0 + 1.5 * last.seconds > budget_s:
             break
         tr = measure(k)
         trials.append(tr)
+        last = tr
         if tr.error or not tr.fps or (best and tr.fps < best.fps * MIN_GAIN):  # type: ignore[operator]
             break
         best = tr
     return (best.callers if best else None), trials
 
 
-def recommend(best: Trial, hw: dict[str, Any], parallel: int | None = None) -> Perf:
+def search_decoders(measure: Callable[[str, int], Trial], methods: list[str], hw: dict[str, Any], budget_s: float,
+                    clock: Callable[[], float] = time.monotonic) -> tuple[str | None, int | None, list[Trial]]:
+    """(decoder, videos side by side, every trial). Each method decodes one video first (a GPU
+    decoder whose frames differ from the CPU's fails there); the fastest DECODE_FINALISTS are then
+    measured side by side. A GPU decoder must beat the CPU by MIN_GAIN to be chosen."""
+    t0 = clock()
+    trials: list[Trial] = []
+    singles: dict[str, Trial] = {}
+    for m in methods:
+        if trials and clock() - t0 + 1.5 * trials[-1].seconds > budget_s:
+            break
+        tr = measure(m, 1)
+        trials.append(tr)
+        if not tr.error and tr.fps:
+            singles[m] = tr
+    if not singles:
+        return None, None, trials
+    finalists = sorted(singles, key=lambda m: -(singles[m].fps or 0))[:DECODE_FINALISTS]
+    best: dict[str, Trial] = {}
+    for m in finalists:
+        left = budget_s - (clock() - t0)
+        k, more = search_parallel(lambda n, m=m: measure(m, n), hw, left, clock, first=singles[m])
+        trials += more
+        best[m] = next((t for t in more if t.callers == k and not t.error), singles[m])
+    for m, tr in singles.items():
+        best.setdefault(m, tr)
+    sw = best.get("sw")
+
+    def score(m: str) -> float:
+        fps = best[m].fps or 0.0
+        return fps / MIN_GAIN if m != "sw" and sw is not None else fps   # the CPU wins a near tie
+    pick = max(best, key=score)
+    return pick, best[pick].callers, trials
+
+
+def recommend(best: Trial, hw: dict[str, Any], parallel: int | None = None, decoder: str | None = None) -> Perf:
     """Settings from the best trial. With a GPU, analyses share the detector: the CPU steps of one
     (decoding, tracking) overlap the other's detector calls; `parallel` is how many videos decoded
     side by side still got faster (default 2)."""
@@ -152,7 +196,8 @@ def recommend(best: Trial, hw: dict[str, Any], parallel: int | None = None) -> P
         analyses = 1   # the detector already uses every core
     analyses = max(1, min(performance.MAX_ANALYSES, analyses, ram_cap))
     ingests = performance.for_profile("max", hw).ingests
-    return Perf(analyses=analyses, ingests=ingests, sessions=best.sessions, batch=best.batch, threads=best.threads)
+    return Perf(analyses=analyses, ingests=ingests, sessions=best.sessions, batch=best.batch, threads=best.threads,
+                decoder=decoder if decoder in performance.DECODERS else "auto")
 
 
 def _frames(n: int = 3) -> list[np.ndarray]:
@@ -228,18 +273,66 @@ def measure_detector(frames: list[np.ndarray], gpu: bool = True) -> Measure:
     return measure
 
 
-def measure_decoding() -> Callable[[int], Trial]:
-    """`k` decoders side by side on the demo clip at analysis size, as `k` analyses tracking shots."""
+def _demo() -> Path:
+    return ROOT / "assets" / "demo" / "demo.mp4"
+
+
+def check_decoder(method: str, n: int = 12) -> str | None:
+    """None when `method` decodes the demo clip like the CPU does (same number, size and
+    orientation of frames, practically the same pixels), else what is wrong."""
+    from shottracer import hwdecode, runtime
+    from shottracer.pipeline import ANALYSIS_LONG_SIDE
+    from shottracer.video import probe
+
+    info = probe(_demo())
+    scale = min(1.0, ANALYSIS_LONG_SIDE / info.long_side)
+    start = int(info.fps)
+
+    def grab(m: str) -> list[np.ndarray]:
+        from shottracer.video import decode
+
+        runtime.configure(runtime.Runtime(decoder=m))
+        return [f for _, f in decode(info, start=start, stop=start + n, scale=scale)]
+
+    hwdecode.reset()
+    ref, got = grab("sw"), grab(method)
+    bad = hwdecode.failed()
+    if bad:
+        return "; ".join(f"{k}: {v}" for k, v in bad.items())
+    if len(got) != len(ref) or not ref:
+        return f"{len(got)} frames instead of {len(ref)}"
+    if got[0].shape != ref[0].shape:
+        return f"frames of {got[0].shape} instead of {ref[0].shape}"
+    diff = float(np.mean([np.abs(a.astype(np.int16) - b).mean() for a, b in zip(got, ref)]))
+    if diff > MAX_DECODE_DIFF:
+        return f"the frames differ from the CPU's by {diff:.1f} grey levels on average"
+    return None
+
+
+def measure_decoding(method: str = "auto") -> Callable[[int], Trial]:
+    """`k` decoders side by side on the demo clip at analysis size, as `k` analyses tracking shots.
+    A GPU decoder that falls back to the CPU while measuring fails the trial (its number would be
+    the CPU's)."""
+    from shottracer import hwdecode
+
     def measure(k: int) -> Trial:
+        with hwdecode.muted():   # a decoder failing here is an answer, not a failure to save
+            return trial(k)
+
+    def trial(k: int) -> Trial:
         from shottracer import runtime
         from shottracer.pipeline import ANALYSIS_LONG_SIDE
         from shottracer.video import decode, probe
 
         t0 = time.perf_counter()
-        tr = Trial(0, 0, k, kind="decode")
+        tr = Trial(0, 0, k, kind="decode", decoder=method)
         try:
-            runtime.configure(runtime.Runtime())   # all threads, as the tuned profile (the next job sets its own)
-            info = probe(ROOT / "assets" / "demo" / "demo.mp4")
+            if k == 1 and method in hwdecode.HW_METHODS and (why := check_decoder(method)):
+                raise RuntimeError(why)
+            hwdecode.reset()
+            # All threads, as the tuned profile (the next job sets its own).
+            runtime.configure(runtime.Runtime(decoder=method))
+            info = probe(_demo())
             scale = min(1.0, ANALYSIS_LONG_SIDE / info.long_side)
             n = max(10, int(info.fps * 2))
 
@@ -254,13 +347,31 @@ def measure_decoding() -> Callable[[int], Trial]:
             with ThreadPoolExecutor(max_workers=k) as ex:
                 done = sum(ex.map(work, range(k)))
             tr.fps = done / (time.perf_counter() - t)
-        except Exception as exc:  # noqa: BLE001 - no ffmpeg or no demo clip: the default is used
+            if bad := hwdecode.failed():
+                raise RuntimeError("; ".join(f"{key}: {why}" for key, why in bad.items()))
+        except Exception as exc:  # noqa: BLE001 - no ffmpeg, no demo clip or a broken GPU decoder: not chosen
+            tr.fps = None
             tr.error = f"{type(exc).__name__}: {exc}"[:ERROR_CHARS]
+        finally:
+            hwdecode.reset()
+            runtime.configure(runtime.Runtime())
         tr.seconds = time.perf_counter() - t0
-        log.info("tuner: %d video(s) decoded side by side: %s", k, f"{tr.fps:.1f} frames/s" if tr.fps else tr.error)
+        log.info("tuner: %d video(s) decoded side by side (%s): %s", k, method, f"{tr.fps:.1f} frames/s" if tr.fps else tr.error)
         return tr
 
     return measure
+
+
+def decoders() -> list[str]:
+    """What to measure: the CPU, ffmpeg's own pick (the default before) and each GPU decoder."""
+    from shottracer import hwdecode
+    from shottracer.video import ffmpeg_bin
+
+    try:
+        hw = hwdecode.candidates(ffmpeg_bin())
+    except RuntimeError:
+        hw = []
+    return ["sw", "auto", *hw]
 
 
 def run_tuner(report: Callable[[float, str], bool]) -> dict[str, Any]:
@@ -294,19 +405,19 @@ def run_tuner(report: Callable[[float, str], bool]) -> dict[str, Any]:
     base, best, trials, stop = search(measure, hw, idle_vram_mb=idle)
     if base.provider == "CPUExecutionProvider":
         hw = {**hw, "inference": "CPU"}   # DirectML/CUDA is installed but did not take the model
-    parallel, decoding = None, []
+    parallel, decoder, decoding = None, None, []
     if hw.get("inference") in ("DirectML", "CUDA") and stop != "time":
-        base_decode = measure_decoding()
+        measures: dict[str, Callable[[int], Trial]] = {}
 
-        def decode_k(k: int) -> Trial:
-            if not report(min(0.95, 0.1 + 0.12 * done[0]), f"Testing {k} video(s) decoded at once"):
+        def decode_k(method: str, k: int) -> Trial:
+            if not report(min(0.95, 0.1 + 0.06 * done[0]), f"Testing video decoding ({method}), {k} at once"):
                 raise Canceled()
             done[0] += 1
-            return base_decode(k)
+            return measures.setdefault(method, measure_decoding(method))(k)
 
-        parallel, decoding = search_parallel(decode_k, hw, max(10.0, BUDGET_S - (time.monotonic() - t_start)))
+        decoder, parallel, decoding = search_decoders(decode_k, decoders(), hw, DECODE_BUDGET_S)
         trials += decoding
-    perf = recommend(best, hw, parallel)
+    perf = recommend(best, hw, parallel, decoder)
     gpu_info = (hw.get("gpus") or [None])[0]
     summary = {
         "speedup": round(best.fps / base.fps, 2) if base.fps and best.fps else 1.0,
@@ -314,7 +425,9 @@ def run_tuner(report: Callable[[float, str], bool]) -> dict[str, Any]:
         "inference": hw.get("inference"), "gpu": gpu_info["name"] if gpu_info else None,
         "vramMb": gpu_info["vramMb"] if gpu_info else None, "peakVramMb": max((t.vram_mb or 0 for t in trials), default=0) or None,
         "cpuCores": hw.get("cpuCores"), "ramMb": (hw.get("ram") or {}).get("totalMb"),
-        "dynamicBatch": base.dynamic, "stop": stop, "parallel": parallel, "seconds": round(time.monotonic() - t_start, 1),
+        "dynamicBatch": base.dynamic, "stop": stop, "parallel": parallel, "decoder": decoder,
+        "decodeFps": next((round(t.fps, 1) for t in decoding if t.decoder == decoder and t.callers == parallel and t.fps), None),
+        "seconds": round(time.monotonic() - t_start, 1),
         "trials": [asdict(t) for t in trials],
     }
     performance.save_tuned(perf, summary)

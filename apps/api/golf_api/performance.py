@@ -29,6 +29,9 @@ RAM_PER_ANALYSIS_MB = 3000  # one analysis holds ~4 s of full-HD frames plus the
 RAM_PER_INGEST_MB = 1000
 MAX_ANALYSES = 4          # the worker starts this many analysis threads; the profile says how many work
 MAX_INGESTS = 4
+# How ffmpeg decodes video for analysis (shottracer.hwdecode.METHODS): "auto" lets ffmpeg pick,
+# "sw" is the CPU, the others a GPU decoder Optimise measured faster on this PC.
+DECODERS = ("sw", "auto", "d3d11va", "cuda", "dxva2", "qsv", "vaapi")
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class Perf:
     batch: int = 1        # frames per detector call (models with a dynamic batch dimension only)
     threads: int = 0      # CPU threads for the detector, OpenCV and decoding; 0 = all cores
     gpu: bool = True      # False after repeated GPU errors: the detector runs on the CPU
+    decoder: str = "auto"  # video decoding for analysis (DECODERS); only Optimise picks another
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> Perf:
@@ -51,8 +55,9 @@ class Perf:
             except (TypeError, ValueError):
                 return getattr(cls, key)
 
+        decoder = d.get("decoder")
         return cls(num("analyses", MAX_ANALYSES), num("ingests", MAX_INGESTS), num("sessions", 8), num("batch", 16),
-                   num("threads", cores, 0), bool(d.get("gpu", True)))
+                   num("threads", cores, 0), bool(d.get("gpu", True)), decoder if decoder in DECODERS else "auto")
 
 
 # --- hardware --------------------------------------------------------------------------------
@@ -209,7 +214,7 @@ def load() -> dict[str, Any]:
     except ValueError:
         data = {}
     # A file from an older version or edited by hand must not stop the worker.
-    for key in ("tuned", "fallback"):
+    for key in ("tuned", "fallback", "decodeFailed"):
         if not isinstance(data.get(key), dict):
             data.pop(key, None)
     if data.get("profile") not in PROFILES or (data.get("profile") == "tuned" and not data.get("tuned")):
@@ -265,7 +270,32 @@ def save_tuned(perf: Perf, summary: dict[str, Any]) -> dict[str, Any]:
         data["profile"] = "tuned"
         data.pop("fallback", None)
         data.pop("cpuOnly", None)
+        data.pop("decodeFailed", None)   # measured again just now
         return _save(data)
+
+
+def record_decode_failure(key: str, reason: str) -> bool:
+    """A GPU decoder failed on a real video ("method:codec:pix_fmt", shottracer.hwdecode): those
+    videos are decoded on the CPU from now on, until Optimise measures again. False: known."""
+    with _lock:
+        data = load()
+        failed = data.get("decodeFailed") or {}
+        if key in failed:
+            return False
+        failed[key] = {"at": now(), "reason": reason[:300]}
+        data["decodeFailed"] = failed
+        _save(data)
+        return True
+
+
+def decode_failures(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """The saved GPU decoding failures, for the settings page."""
+    out = []
+    for key, v in (data.get("decodeFailed") or {}).items():
+        method, codec, pix_fmt = (str(key).split(":") + ["", "", ""])[:3]
+        v = v if isinstance(v, dict) else {}
+        out.append({"method": method, "codec": codec, "pixFmt": pix_fmt, "at": v.get("at"), "reason": v.get("reason", "")})
+    return out
 
 
 def effective(hw: dict[str, Any] | None = None) -> tuple[Perf, dict[str, Any]]:
