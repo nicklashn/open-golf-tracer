@@ -21,7 +21,7 @@ export interface JobEvent {
   shots?: unknown[];
   /** Course/hole found from the video's GPS (analysis done), with the GPS itself. */
   place?: { mediaId: string; geo?: { lat: number; lon: number; acc?: number } } & Record<string, unknown>;
-  export?: { id: string; url: string; projectName: string };
+  export?: { id: string; url: string; previewUrl?: string; projectName: string };
 }
 
 /** Server-Sent Events with job progress. Reconnects automatically. */

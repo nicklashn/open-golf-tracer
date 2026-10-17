@@ -17,13 +17,14 @@ import {
   Type,
   Upload,
   UserSquare2,
+  Sparkles,
   Wand2,
   Crosshair,
 } from 'lucide-react';
 import { TEMPLATES } from '@golf/render';
 import { shotStats } from '@golf/render';
 import type { LayerType, Shot } from '@golf/schema';
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
 import { Button } from '@/components/ui/button';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '@/components/ui/menu';
@@ -32,6 +33,7 @@ import { toast } from '@/components/ui/toast';
 import { Tooltip } from '@/components/ui/tooltip';
 import { errorMessage } from '@/lib/api';
 import { useI18n } from '@/lib/i18n/client';
+import { jobMessage } from '@/lib/jobMessage';
 import { uploadFile } from '@/lib/upload';
 import { cn } from '@/lib/cn';
 import { M_TO_YD } from '@golf/schema';
@@ -48,6 +50,13 @@ export function ShotsPanel() {
   const retracking = useEditor((s) => s.retracking);
   const tool = useEditor((s) => s.tool);
   const hidden = shots.filter((s) => !s.visible);
+  // "Clip 2 of 3" while a round is analysed clip by clip.
+  const clips = useEditor((s) => s.doc.clips);
+  const ingesting = useEditor((s) => s.ingesting);
+  const videos = useMemo(() => [...new Set(clips.filter((c) => c.kind === 'video').map((c) => c.mediaId))], [clips]);
+  // Clips still being prepared join the timeline later, but they count already.
+  const total = videos.length + Object.keys(ingesting).filter((id) => !videos.includes(id)).length;
+  const clipNo = analysis.mediaId ? videos.indexOf(analysis.mediaId) + 1 : 0;
   const hiddenOpen = hidden.length === shots.length || (selection?.kind === 'shot' && hidden.some((s) => s.id === selection.id));
 
   return (
@@ -58,17 +67,21 @@ export function ShotsPanel() {
             <Birdie mood="think" size={40} />
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium">{t.mascot.thinking}</p>
-              <p className="truncate text-[12px] text-fg-muted">{analysis.message || t.editor.analysisRunning}</p>
+              <p className="truncate text-[12px] text-fg-muted" data-testid="analysis-message">
+                {total > 1 && clipNo > 0 ? `${f(t.editor.analysisClip, { n: clipNo, total })} · ` : ''}
+                {jobMessage(analysis.message, t) || t.editor.analysisRunning}
+              </p>
             </div>
           </div>
           <ProgressBar className="mt-2.5" value={analysis.progress || null} label={t.jobs.analyze} />
+          <p className="mt-2 text-[12px] leading-snug text-fg-subtle">{t.editor.analysisWait}</p>
         </div>
       ) : null}
 
-      {shots.length === 0 && !analysis.running ? (
-        <div className="flex flex-col items-center rounded-md border border-dashed border-border-strong px-4 py-8 text-center">
+      {hidden.length === shots.length && !analysis.running ? (
+        <div className="flex flex-col items-center rounded-md border border-dashed border-border-strong px-4 py-8 text-center" data-testid="shots-empty">
           <Birdie mood="confused" size={64} />
-          <p className="mt-2 text-[13px] text-fg-muted">{t.shots.emptyDone}</p>
+          <p className="mt-2 text-[13px] text-fg-muted">{shots.length ? t.shots.noneVisible : t.shots.emptyDone}</p>
         </div>
       ) : null}
 
@@ -127,13 +140,13 @@ export function ShotsPanel() {
   );
 }
 
-/** One place to make videos: the "Make video" dialog (YouTube, highlight short, a short per shot). */
+/** The next step once there are shots: "Make a video for me" (YouTube, highlight short, a short per shot). */
 function ShortsButton() {
   const { t } = useI18n();
   return (
     <Button variant="primary" size="sm" onClick={() => useEditor.setState({ makeOpen: true })} data-testid="shots-make">
-      <Wand2 />
-      {t.make.open}
+      <Sparkles />
+      {t.auto.open}
     </Button>
   );
 }

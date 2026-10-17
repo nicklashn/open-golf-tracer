@@ -1,11 +1,12 @@
 'use client';
 
-import { ArrowLeft, Check, CircleAlert, CloudUpload, History, Keyboard, Loader2, Redo2, Sparkles, Undo2, Wand2 } from 'lucide-react';
+import { ArrowLeft, Check, CircleAlert, CloudUpload, History, Keyboard, Loader2, Redo2, Sparkles, Undo2 } from 'lucide-react';
 import { byTimeline, migrateProject, timelineDuration, type Shot } from '@golf/schema';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
+import { UploadTray } from '@/components/app/UploadTray';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/controls';
 import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
@@ -21,7 +22,6 @@ import { saveNow, startAutosave } from './autosave';
 import { ExportDialog, ExportStatus, Onboarding, ShortcutsDialog, VersionsDialog, type ExportRow } from './Dialogs';
 import { filmedDay } from './course';
 import { AutoVideoDialog } from './AutoVideo';
-import { MakeVideoDialog } from './MakeVideo';
 import { Inspector } from './Inspector';
 import { LayersPanel, MediaPanel, ShotsPanel, TemplatesPanel } from './LeftPanels';
 import * as ops from './ops';
@@ -47,11 +47,11 @@ export function Editor({ projectId }: { projectId: string }) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
-  const makeOpen = useEditor((s) => s.makeOpen);
-  const setMakeOpen = useCallback((o: boolean) => useEditor.setState({ makeOpen: o }), []);
+  // "Make a video for me" is the one way to make a video; the store flag lets panels open it too.
+  const autoOpen = useEditor((s) => s.makeOpen);
+  const setAutoOpen = useCallback((o: boolean) => useEditor.setState({ makeOpen: o }), []);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [autoOpen, setAutoOpen] = useState(false);
   const [exports, setExports] = useState<ExportRow[]>([]);
   const [leftTab, setLeftTab] = useState('shots');
   const [onboarding, setOnboarding] = useState(false);
@@ -62,6 +62,10 @@ export function Editor({ projectId }: { projectId: string }) {
   const proxyPending = useEditor((s) => Object.values(s.media).some((m) => m.kind === 'video' && !m.urls.proxy && m.status !== 'failed'));
   const ingesting = useEditor((s) => s.ingesting);
   const desktop = useIsDesktop();
+  // A raw upload (no format chosen, no graphics yet): making the video is the next step, not exporting.
+  const raw = useEditor((s) => s.doc?.format.aspect === 'original' && s.doc.layers.length === 0);
+  /** Analyses still queued or running in this project (a round has one per clip). */
+  const analysing = useRef(new Set<string>());
 
   const load = useCallback(async () => {
     try {
@@ -69,7 +73,9 @@ export function Editor({ projectId }: { projectId: string }) {
       const doc = migrateProject(p.document);
       useEditor.getState().init({ projectId, doc, docVersion: p.docVersion, media: p.media });
       const an = p.processing.find((j) => j.kind === 'analyze');
+      analysing.current = new Set(p.processing.filter((j) => j.kind === 'analyze').map((j) => j.id));
       useEditor.setState({
+        makeOpen: false, // the store outlives a project: a dialog open in the last one stays there
         analysis: { running: !!an, progress: an?.progress ?? 0, message: an?.message ?? '', mediaId: an?.mediaId ?? null },
         ingesting: Object.fromEntries(p.processing.filter((j) => j.kind === 'ingest' && j.mediaId).map((j) => [j.mediaId!, j.progress])),
       });
@@ -139,7 +145,14 @@ export function Editor({ projectId }: { projectId: string }) {
       }
       if (job.kind === 'analyze') {
         const running = job.status === 'queued' || job.status === 'running';
-        useEditor.setState({ analysis: { running, progress: job.progress, message: job.message, mediaId: job.mediaId } });
+        if (running) analysing.current.add(job.id);
+        else analysing.current.delete(job.id);
+        // Between the clips of a round the card stays up: the next clip's analysis is queued.
+        useEditor.setState({
+          analysis: running
+            ? { running, progress: job.progress, message: job.message, mediaId: job.mediaId }
+            : { running: analysing.current.size > 0, progress: 0, message: '', mediaId: null },
+        });
         if (ev.media && (ev.media as MediaInfo).kind === 'video' && !useEditor.getState().doc.media[(ev.media as MediaInfo).id]) {
           useEditor.getState().setMedia(ev.media as MediaInfo);
           ops.attachVideo(ev.media as MediaInfo);
@@ -186,10 +199,27 @@ export function Editor({ projectId }: { projectId: string }) {
             });
           }
         }
-        if (job.status === 'succeeded') {
+        // A failed analysis is never silent: say which clip, and offer the way on.
+        if (job.status === 'failed' && job.mediaId) {
+          const mediaId = job.mediaId;
+          const clip = useEditor.getState().doc.media[mediaId]?.name ?? '';
+          toast.error(f(t.editor.analysisFailed, { name: clip }), t.editor.analysisFailedHint, {
+            duration: 20_000,
+            action: {
+              label: t.common.retry,
+              onClick: () => void api(`/projects/${projectId}/analyze`, { body: { mediaId } }).catch((e) => toast.error(errorMessage(e, t))),
+            },
+          });
+        }
+        // Once, when the last clip of the project is done: the next step, right where the eye is.
+        if (job.status === 'succeeded' && !analysing.current.size && !Object.keys(useEditor.getState().ingesting).length) {
           const n = useEditor.getState().doc.shots.filter((x) => x.visible).length;
-          // The next step, right where the eye is: make the video.
-          toast.success(f(t.editor.analysisFound, { n }), undefined, n ? { action: { label: t.make.open, onClick: () => setMakeOpen(true) } } : {});
+          if (n)
+            toast.success(f(t.editor.analysisFound, { n }), t.editor.analysisNext, {
+              action: { label: t.auto.open, onClick: () => setAutoOpen(true) },
+              duration: 15_000,
+            });
+          else toast.info(t.editor.analysisNone, t.editor.analysisNoneHint, { duration: 10_000 });
         }
       }
       if (job.kind === 'retrack') {
@@ -210,14 +240,21 @@ export function Editor({ projectId }: { projectId: string }) {
         setExports((xs) =>
           xs.map((e) =>
             e.jobId === job.id
-              ? { ...e, status: job.status === 'succeeded' ? 'succeeded' : job.status, progress: job.progress, url: ev.export?.url ?? e.url, error: job.error }
+              ? {
+                  ...e,
+                  status: job.status === 'succeeded' ? 'succeeded' : job.status,
+                  progress: job.progress,
+                  url: ev.export?.url ?? e.url,
+                  previewUrl: ev.export?.previewUrl ?? e.previewUrl,
+                  projectName: ev.export?.projectName ?? e.projectName,
+                  error: job.error,
+                }
               : e,
           ),
         );
-        if (job.status === 'succeeded') toast.success(t.mascot.cheer, undefined, { icon: <Birdie mood="cheer" size={28} /> });
       }
     },
-    [t, f, locale, pullShots, setMakeOpen],
+    [t, f, locale, pullShots, setAutoOpen, projectId],
   );
   useJobEvents(onEvent, state === 'ready' ? projectId : null);
 
@@ -340,15 +377,18 @@ export function Editor({ projectId }: { projectId: string }) {
               <Keyboard />
             </Button>
           </Tooltip>
-          <Button variant="secondary" size="sm" className="ml-2" onClick={() => setAutoOpen(true)} data-testid="open-auto">
+          <Button
+            variant={raw ? 'primary' : 'secondary'}
+            size="sm"
+            className="ml-2"
+            onClick={() => setAutoOpen(true)}
+            data-testid="open-auto"
+            aria-label={t.auto.open}
+          >
             <Sparkles />
             <span className="hidden sm:inline">{t.auto.open}</span>
           </Button>
-          <Button variant="secondary" size="sm" className="ml-2" onClick={() => setMakeOpen(true)} data-testid="open-make">
-            <Wand2 />
-            <span className="hidden sm:inline">{t.make.open}</span>
-          </Button>
-          <Button variant="primary" size="sm" className="ml-2" onClick={() => setExportOpen(true)} data-testid="open-export">
+          <Button variant={raw ? 'secondary' : 'primary'} size="sm" className="ml-2" onClick={() => setExportOpen(true)} data-testid="open-export">
             {t.editor.export}
           </Button>
         </div>
@@ -431,12 +471,20 @@ export function Editor({ projectId }: { projectId: string }) {
       )}
 
       <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onStarted={(e) => setExports((x) => [...x, e])} />
-      <MakeVideoDialog open={makeOpen} onOpenChange={setMakeOpen} />
       <AutoVideoDialog open={autoOpen} onOpenChange={setAutoOpen} />
       <ExportStatus items={exports} onClear={(id) => setExports((x) => x.filter((e) => e.id !== id))} />
       <VersionsDialog open={versionsOpen} onOpenChange={setVersionsOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
-      {onboarding ? <Onboarding onDone={finishOnboarding} /> : null}
+      {onboarding ? (
+        <Onboarding
+          onDone={finishOnboarding}
+          onMake={() => {
+            void finishOnboarding();
+            setAutoOpen(true);
+          }}
+        />
+      ) : null}
+      <UploadTray />
       <ConflictDialog />
       <span className="sr-only" aria-live="polite">
         {timelineDuration(useEditor.getState().doc).toFixed(0)}

@@ -1,6 +1,6 @@
 'use client';
 
-import { Download, Film, Trash2 } from 'lucide-react';
+import { Download, Film, Play, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
@@ -19,6 +19,7 @@ interface Row {
   status: string;
   progress: number;
   url: string | null;
+  previewUrl?: string | null;
   size: number;
   width: number;
   height: number;
@@ -59,11 +60,15 @@ export function ExportsList() {
           ))}
         </div>
       ) : rows.length === 0 ? (
-        <div className="mt-8 flex flex-col items-center rounded-lg border border-dashed border-border-strong px-6 py-14 text-center">
+        <div
+          className="mt-8 flex flex-col items-center rounded-lg border border-dashed border-border-strong px-6 py-14 text-center"
+          data-testid="exports-empty"
+        >
           <Birdie mood="sleep" size={96} />
-          <p className="mt-3 text-sm text-fg-muted">{t.exporter.empty}</p>
+          <h2 className="mt-3 text-base font-semibold">{t.exporter.empty}</h2>
+          <p className="mt-1 max-w-md text-sm text-fg-muted">{t.exporter.emptyLead}</p>
           <Button asChild variant="secondary" className="mt-4">
-            <Link href="/app">{t.nav.projects}</Link>
+            <Link href="/app">{t.exporter.toProjects}</Link>
           </Button>
         </div>
       ) : (
@@ -94,6 +99,14 @@ export function ExportsList() {
                         ? t.jobs.queued
                         : t.jobs.export}
               </Badge>
+              {r.previewUrl ? (
+                <Button asChild size="sm" variant="ghost">
+                  <a href={r.previewUrl} target="_blank" rel="noreferrer" aria-label={`${t.exporter.play}: ${r.projectName}`}>
+                    <Play />
+                    {t.exporter.play}
+                  </a>
+                </Button>
+              ) : null}
               {r.url ? (
                 <Button asChild size="sm" variant="primary">
                   <a href={r.url} download>

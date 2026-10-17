@@ -1,6 +1,7 @@
 'use client';
 
-import { Download, History, RotateCcw } from 'lucide-react';
+import { Download, FolderOpen, History, Play, RotateCcw, Sparkles, X } from 'lucide-react';
+import Link from 'next/link';
 import { outputSize, primaryMedia, type ExportPreset } from '@golf/schema';
 import { useEffect, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
@@ -30,6 +31,8 @@ export interface ExportRow {
   createdAt: string;
   error: string;
   settings: { preset: ExportPreset };
+  projectName?: string;
+  previewUrl?: string | null;
 }
 
 export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean; onOpenChange: (o: boolean) => void; onStarted: (e: ExportRow) => void }) {
@@ -69,7 +72,6 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
       const e = await api<ExportRow>(`/projects/${useEditor.getState().projectId}/exports`, { body });
       onStarted(e);
       onOpenChange(false);
-      toast.info(t.exporter.queued, t.exporter.notify);
     } catch (err) {
       toast.error(t.exporter.failed, errorMessage(err, t));
     } finally {
@@ -164,14 +166,15 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
   );
 }
 
+/** Where the export is, and what to do with it: download (and where the file goes), watch it, or find it later. */
 export function ExportStatus({ items, onClear }: { items: ExportRow[]; onClear: (id: string) => void }) {
   const { t, f } = useI18n();
   if (!items.length) return null;
   return (
-    <div className="fixed bottom-4 right-4 z-40 flex w-[340px] flex-col gap-2" aria-live="polite">
+    <div className="fixed bottom-4 right-4 z-40 flex w-[360px] max-w-[calc(100vw-32px)] flex-col gap-2" aria-live="polite">
       {items.map((e) => (
         <div key={e.id} className="rounded-md border border-border bg-surface-raised p-3 shadow-md" data-testid="export-status">
-          <div className="flex items-center gap-3">
+          <div className="flex items-start gap-3">
             {e.status === 'succeeded' ? <Birdie mood="cheer" size={40} /> : e.status === 'failed' ? <Birdie mood="confused" size={40} /> : null}
             <div className="min-w-0 flex-1 text-sm">
               <p className="font-medium">
@@ -183,32 +186,60 @@ export function ExportStatus({ items, onClear }: { items: ExportRow[]; onClear: 
                       ? t.exporter.queued
                       : f(t.exporter.running, { pct: Math.round(e.progress * 100) })}
               </p>
-              {e.status === 'failed' && e.error ? <p className="truncate text-[12px] text-fg-muted">{e.error}</p> : null}
+              {e.status === 'failed' && e.error ? <p className="line-clamp-2 text-[12px] text-fg-muted">{e.error}</p> : null}
+              {e.status === 'queued' || e.status === 'running' ? <p className="text-[12px] text-fg-muted">{t.exporter.notify}</p> : null}
+              {e.status === 'succeeded' ? (
+                <p className="text-[12px] text-fg-muted" data-testid="export-saved-to">
+                  {f(t.exporter.savedTo, { file: exportFileName(e.projectName) })}
+                </p>
+              ) : null}
             </div>
-            {e.status === 'succeeded' && e.url ? (
-              <Button asChild size="sm" variant="primary">
-                <a href={e.url} download>
-                  <Download />
-                  {t.exporter.download}
-                </a>
-              </Button>
-            ) : e.status === 'queued' || e.status === 'running' ? (
+            {e.status === 'queued' || e.status === 'running' ? (
               <Button size="sm" variant="ghost" onClick={() => e.jobId && void api(`/jobs/${e.jobId}/cancel`, { method: 'POST' }).catch(() => undefined)}>
                 {t.common.cancel}
               </Button>
             ) : (
-              <Button size="sm" variant="ghost" onClick={() => onClear(e.id)}>
-                {t.common.close}
+              <Button size="iconSm" variant="ghost" aria-label={t.common.close} onClick={() => onClear(e.id)}>
+                <X />
               </Button>
             )}
           </div>
           {e.status === 'queued' || e.status === 'running' ? (
             <ProgressBar className="mt-2" value={e.status === 'queued' ? null : e.progress} label={t.jobs.export} />
           ) : null}
+          {e.status === 'succeeded' && e.url ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button asChild size="sm" variant="primary">
+                <a href={e.url} download>
+                  <Download />
+                  {t.exporter.download}
+                </a>
+              </Button>
+              {e.previewUrl ? (
+                <Button asChild size="sm" variant="secondary">
+                  <a href={e.previewUrl} target="_blank" rel="noreferrer">
+                    <Play />
+                    {t.exporter.play}
+                  </a>
+                </Button>
+              ) : null}
+              <Button asChild size="sm" variant="ghost">
+                <Link href="/app/exports">
+                  <FolderOpen />
+                  {t.exporter.allVideos}
+                </Link>
+              </Button>
+            </div>
+          ) : null}
         </div>
       ))}
     </div>
   );
+}
+
+/** The name the browser saves a download under (the API names it after the project). */
+export function exportFileName(projectName: string | undefined): string {
+  return `${(projectName || 'open-golf-tracer').trim().slice(0, 60)}.mp4`;
 }
 
 interface VersionRow {
@@ -363,9 +394,11 @@ export function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenC
   );
 }
 
-export function Onboarding({ onDone }: { onDone: () => void }) {
+/** The first-run tour. It ends in the main action: with shots found, its last button makes the video. */
+export function Onboarding({ onDone, onMake }: { onDone: () => void; onMake?: () => void }) {
   const { t } = useI18n();
   const [step, setStep] = useState(0);
+  const canMake = useEditor((s) => s.doc.shots.some((x) => x.visible));
   const steps = t.onboarding.steps;
   const moods = ['wave', 'point', 'think', 'cheer'] as const;
   const last = step === steps.length - 1;
@@ -384,11 +417,18 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           </div>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={onDone}>
-              {t.common.skip}
+              {last && onMake && canMake ? t.onboarding.finish : t.common.skip}
             </Button>
-            <Button variant="primary" onClick={() => (last ? onDone() : setStep(step + 1))}>
-              {last ? t.onboarding.finish : t.common.next}
-            </Button>
+            {last && onMake && canMake ? (
+              <Button variant="primary" onClick={onMake} data-testid="onboarding-make">
+                <Sparkles />
+                {t.onboarding.makeFirst}
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={() => (last ? onDone() : setStep(step + 1))}>
+                {last ? t.onboarding.finish : t.common.next}
+              </Button>
+            )}
           </div>
         </div>
       </DialogContent>
