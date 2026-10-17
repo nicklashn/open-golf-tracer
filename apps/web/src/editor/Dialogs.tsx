@@ -15,7 +15,7 @@ import { api, errorMessage } from '@/lib/api';
 import { relativeTime } from '@/lib/format';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
-import { saveNow } from './autosave';
+import { flush } from './autosave';
 import { useEditor } from './store';
 import { migrateProject } from '@golf/schema';
 
@@ -59,7 +59,9 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
   async function start() {
     setBusy(true);
     try {
-      await saveNow(true);
+      // The export renders the document sent with it; saving first only must not overwrite
+      // another window's changes (a conflict opens the dialog and stops here).
+      if (!(await flush()).ok && useEditor.getState().saveState === 'conflict') return;
       const body = {
         settings: {
           preset,
@@ -257,6 +259,8 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const projectId = useEditor((s) => s.projectId);
   const [rows, setRows] = useState<VersionRow[] | null>(null);
   const [label, setLabel] = useState('');
+  const [confirming, setConfirming] = useState<VersionRow | null>(null);
+  const [busy, setBusy] = useState(false);
   const load = () =>
     api<{ versions: VersionRow[] }>(`/projects/${projectId}/versions`).then(
       (r) => setRows(r.versions),
@@ -267,26 +271,30 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   async function saveNamed() {
-    await saveNow(true);
+    // A named version is taken of what the server has: save first, never over another window's.
+    if (!(await flush()).ok) return;
     await api(`/projects/${projectId}/versions`, { body: { label } });
     setLabel('');
     void load();
   }
   async function restore(id: string) {
-    if (!confirm(t.versions.restoreConfirm)) return;
-    await saveNow(true);
-    const r = await api<{ docVersion: number; document: unknown }>(`/projects/${projectId}/versions/${id}/restore`, { method: 'POST' });
-    useEditor.setState({
-      doc: migrateProject(r.document),
-      docVersion: r.docVersion,
-      saveState: 'saved',
-      past: [],
-      future: [],
-      revision: useEditor.getState().revision + 1,
-      selection: null,
-    });
-    toast.success(t.versions.restored);
-    onOpenChange(false);
+    setBusy(true);
+    try {
+      // "The current one is saved first" – unless another window saved meanwhile (the conflict
+      // dialog then asks), then nothing is restored.
+      if (!(await flush()).ok) return;
+      const r = await api<{ docVersion: number; document: unknown }>(`/projects/${projectId}/versions/${id}/restore`, { method: 'POST' });
+      useEditor.getState().adopt({ doc: migrateProject(r.document), docVersion: r.docVersion });
+      // In/out points belong to the timeline that was replaced.
+      useEditor.setState({ inPoint: null, outPoint: null, selection: null });
+      toast.success(t.versions.restored);
+      setConfirming(null);
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(errorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -319,7 +327,7 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                   {relativeTime(v.createdAt, locale)} · {f(t.versions.items, { shots: v.shots, layers: v.layers })}
                 </p>
               </div>
-              <Button size="sm" variant="ghost" onClick={() => void restore(v.id)}>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming(v)}>
                 <RotateCcw />
                 {t.versions.restore}
               </Button>
@@ -328,6 +336,19 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
           {rows && !rows.length ? <li className="px-3 py-6 text-center text-sm text-fg-muted">—</li> : null}
         </ul>
       </DialogContent>
+      <Dialog open={!!confirming} onOpenChange={(o) => !o && setConfirming(null)}>
+        <DialogContent title={t.versions.restoreTitle} description={t.versions.restoreConfirm} closeLabel={t.common.close}>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setConfirming(null)}>
+              {t.common.cancel}
+            </Button>
+            <Button variant="primary" loading={busy} onClick={() => confirming && void restore(confirming.id)} data-testid="restore-confirm">
+              <RotateCcw />
+              {t.versions.restore}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

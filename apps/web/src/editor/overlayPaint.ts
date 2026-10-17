@@ -7,8 +7,21 @@ import type { Project } from '@golf/schema';
 
 export interface OverlayFrame {
   doc: Project;
+  /** Flight params of shots whose handle is being dragged (drawn instead of the document's). */
+  live?: Record<string, number[]>;
   t: number;
   hidden: string[];
+}
+
+let cache: { doc: Project; live: Record<string, number[]>; out: Project } | null = null;
+
+/** The document with live drag params applied; the same object while neither changes. */
+export function withLive(doc: Project, live: Record<string, number[]> | undefined): Project {
+  if (!live || !Object.keys(live).length) return doc;
+  if (cache && cache.doc === doc && cache.live === live) return cache.out;
+  const out = { ...doc, shots: doc.shots.map((s) => (live[s.id] ? { ...s, params: live[s.id] } : s)) };
+  cache = { doc, live, out };
+  return out;
 }
 
 /** Renders frames into a 2D context; used directly or inside the worker. */
@@ -21,6 +34,11 @@ export class OverlayPainter {
     private ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
     private locale: 'da' | 'en',
   ) {}
+
+  /** The language of text drawn on graphics (a painter outlives a language switch). */
+  setLocale(locale: 'da' | 'en'): void {
+    this.locale = locale;
+  }
 
   resize(w: number, h: number): void {
     const c = this.ctx.canvas;
@@ -39,7 +57,7 @@ export class OverlayPainter {
     const started = performance.now();
     surface.clear();
     const oc: OverlayContext = {
-      project: f.doc,
+      project: withLive(f.doc, f.live),
       width: surface.w,
       height: surface.h,
       locale: this.locale,

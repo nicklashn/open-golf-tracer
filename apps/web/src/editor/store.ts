@@ -2,15 +2,15 @@
 
 /**
  * Editor state. Every change to the project document goes through `edit()`, which records
- * immer patches – the command pattern behind undo/redo. Rapid edits with the same key
- * (dragging a slider or a handle) are merged into one undo step.
+ * what changed (history.ts: list items by id, so server merges in between cannot shift an undo
+ * onto another shot or clip) – the command pattern behind undo/redo. Rapid edits with the same
+ * key (dragging a slider or a handle) are merged into one undo step.
  */
-import { applyPatches, enablePatches, produceWithPatches, type Draft, type Patch } from 'immer';
+import { produce, type Draft } from 'immer';
 import { useMemo } from 'react';
 import { create } from 'zustand';
-import { timelineDuration, type Project } from '@golf/schema';
-
-enablePatches();
+import { LIMITS, timelineDuration, type Project } from '@golf/schema';
+import { applyOps, diff, type Op } from './history';
 
 export interface ThumbsInfo {
   count: number;
@@ -55,10 +55,44 @@ export function selectedClipIds(s: Selection): string[] {
 export type Tool = 'select' | 'addPoint' | 'addShot' | 'reframe' | 'drawPath';
 export type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
 
+/** Why the last save failed: shown in the save badge with what to do about it. */
+export interface SaveError {
+  /** invalid/too_large/unknown_media wait for the next edit; network/server are retried. */
+  reason: 'invalid' | 'too_large' | 'unknown_media' | 'network' | 'server';
+  message: string;
+  /** invalid: the field the server rejected ("shots/3/params"). */
+  path?: string;
+}
+
+/** A project cap an edit would break (LIMITS in packages/schema); the edit is not applied. */
+export interface LimitHit {
+  what: 'shots' | 'layers' | 'keyframes' | 'clips';
+  max: number;
+}
+
+/** The first cap `next` breaks that `prev` did not. */
+export function limitHit(prev: Project, next: Project): LimitHit | null {
+  if (next.shots.length > LIMITS.shots && next.shots.length > prev.shots.length) return { what: 'shots', max: LIMITS.shots };
+  if (next.layers.length > LIMITS.layers && next.layers.length > prev.layers.length) return { what: 'layers', max: LIMITS.layers };
+  if (next.clips.length > LIMITS.clips && next.clips.length > prev.clips.length) return { what: 'clips', max: LIMITS.clips };
+  if (next.layers !== prev.layers) {
+    const before = new Map(prev.layers.map((l) => [l.id, l.keyframes.length]));
+    for (const l of next.layers)
+      if (l.keyframes.length > LIMITS.keyframes && l.keyframes.length > (before.get(l.id) ?? 0)) return { what: 'keyframes', max: LIMITS.keyframes };
+  }
+  return null;
+}
+
+let onLimit: ((hit: LimitHit) => void) | null = null;
+/** Who tells the user an edit was blocked by a cap (the editor shows a toast). */
+export function onLimitHit(fn: ((hit: LimitHit) => void) | null): void {
+  onLimit = fn;
+}
+
 interface HistoryEntry {
   label: string;
-  patches: Patch[];
-  inverse: Patch[];
+  forward: Op[];
+  inverse: Op[];
   key?: string;
   at: number;
 }
@@ -86,6 +120,7 @@ export interface EditorState {
   zoom: number;
   snapping: boolean;
   saveState: SaveState;
+  saveError: SaveError | null;
   /** Params shown while a handle is dragged, before the drag is committed. */
   live: Record<string, number[]>;
   analysis: AnalysisState;
@@ -96,9 +131,13 @@ export interface EditorState {
   revision: number;
 
   init: (p: { projectId: string; doc: Project; docVersion: number; media: MediaInfo[] }) => void;
-  edit: (label: string, recipe: (d: Draft<Project>) => void, opts?: { key?: string; select?: Selection }) => void;
+  /** Returns false when the edit was blocked by a project cap (the user is told why). */
+  edit: (label: string, recipe: (d: Draft<Project>) => void, opts?: { key?: string; select?: Selection }) => boolean;
   /** Replace the document without history (server merges, e.g. new shots from analysis). */
   silently: (recipe: (d: Draft<Project>) => void) => void;
+  /** The saved document from the server replaces this one (another tab saved, a version was
+   *  restored): history goes, the playhead and selection stay where they still exist. */
+  adopt: (p: { doc: Project; docVersion: number; media?: MediaInfo[] }) => void;
   undo: () => void;
   redo: () => void;
   select: (s: Selection) => void;
@@ -129,6 +168,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   zoom: 80,
   snapping: true,
   saveState: 'saved',
+  saveError: null,
   live: {},
   analysis: { running: false, progress: 0, message: '', mediaId: null },
   makeOpen: false,
@@ -148,6 +188,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       time: 0,
       playing: false,
       saveState: 'saved',
+      saveError: null,
       live: {},
       revision: 0,
       inPoint: null,
@@ -156,18 +197,24 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   edit: (label, recipe, opts = {}) => {
     const { doc, past } = get();
-    const [next, patches, inverse] = produceWithPatches(doc, recipe);
-    if (!patches.length) {
+    const next = produce(doc, recipe);
+    const { forward, inverse } = next === doc ? { forward: [], inverse: [] } : diff(doc, next);
+    if (!forward.length) {
       if (opts.select !== undefined) set({ selection: opts.select });
-      return;
+      return true;
+    }
+    const hit = limitHit(doc, next);
+    if (hit) {
+      onLimit?.(hit);
+      return false;
     }
     const now = Date.now();
     const last = past[past.length - 1];
     let newPast: HistoryEntry[];
     if (opts.key && last && last.key === opts.key && now - last.at < MERGE_MS) {
-      newPast = [...past.slice(0, -1), { ...last, patches: [...last.patches, ...patches], inverse: [...inverse, ...last.inverse], at: now }];
+      newPast = [...past.slice(0, -1), { ...last, forward: [...last.forward, ...forward], inverse: [...inverse, ...last.inverse], at: now }];
     } else {
-      newPast = [...past, { label, patches, inverse, key: opts.key, at: now }].slice(-MAX_HISTORY);
+      newPast = [...past, { label, forward, inverse, key: opts.key, at: now }].slice(-MAX_HISTORY);
     }
     set((s) => ({
       doc: next,
@@ -177,11 +224,29 @@ export const useEditor = create<EditorState>((set, get) => ({
       revision: s.revision + 1,
       ...(opts.select !== undefined ? { selection: opts.select } : {}),
     }));
+    return true;
   },
 
   silently: (recipe) => {
-    const [next, patches] = produceWithPatches(get().doc, recipe);
-    if (patches.length) set((s) => ({ doc: next, revision: s.revision + 1, saveState: s.saveState === 'saved' ? 'dirty' : s.saveState }));
+    const doc = get().doc;
+    const next = produce(doc, recipe);
+    if (next !== doc) set((s) => ({ doc: next, revision: s.revision + 1, saveState: s.saveState === 'saved' ? 'dirty' : s.saveState }));
+  },
+
+  adopt: ({ doc, docVersion, media }) => {
+    set((s) => ({
+      doc,
+      docVersion,
+      ...(media ? { media: { ...s.media, ...Object.fromEntries(media.map((m) => [m.id, m])) } } : {}),
+      past: [],
+      future: [],
+      saveState: 'saved',
+      saveError: null,
+      live: {},
+      revision: s.revision + 1,
+      time: Math.min(s.time, Math.max(0, timelineDuration(doc))),
+    }));
+    fixSelection();
   },
 
   undo: () => {
@@ -189,10 +254,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const e = past[past.length - 1];
     if (!e) return;
     set((s) => ({
-      doc: applyPatches(doc, e.inverse),
+      doc: applyOps(doc, e.inverse),
       past: past.slice(0, -1),
       future: [...future, { ...e, key: undefined }],
-      saveState: 'dirty',
+      saveState: s.saveState === 'conflict' ? 'conflict' : 'dirty',
       revision: s.revision + 1,
       live: {},
     }));
@@ -204,10 +269,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const e = future[future.length - 1];
     if (!e) return;
     set((s) => ({
-      doc: applyPatches(doc, e.patches),
+      doc: applyOps(doc, e.forward),
       future: future.slice(0, -1),
       past: [...past, e],
-      saveState: 'dirty',
+      saveState: s.saveState === 'conflict' ? 'conflict' : 'dirty',
       revision: s.revision + 1,
       live: {},
     }));

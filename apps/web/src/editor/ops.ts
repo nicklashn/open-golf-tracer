@@ -5,12 +5,14 @@ import { CLUBS, fitThrough, frameBox, intoView, offFrameReason, outsideBy, shotH
 import { clipSlot, layerDefaults } from '@golf/compose';
 import { applyTemplate, currentShot, relayoutTemplate, shotStats } from '@golf/render';
 import {
+  LIMITS,
   TRACER_PRESETS,
   byTimeline,
   clipAt,
   clipDuration,
   clipStarts,
   cropAt,
+  migrateProject,
   newId,
   sourceToTimeline,
   timelineDuration,
@@ -27,7 +29,7 @@ import {
   type TracerStyle,
 } from '@golf/schema';
 import type { Draft } from 'immer';
-import { courseMapGeometry, haversine, type CourseData } from './course';
+import { courseMapGeometry, filmedDay, haversine, type CourseData } from './course';
 import { refitter } from './refit';
 import { revealTime } from './reveal';
 import { rippleLinked, timelineRemap } from './ripple';
@@ -405,6 +407,39 @@ export function attachVideo(m: MediaInfo) {
     // Graphics of the clips after it move along.
     rippleLinked(base, d);
   });
+}
+
+/**
+ * Shots the analysis found, merged in without an undo step: ones already there, dismissed or
+ * of a clip not on the timeline are skipped, and no more than the project holds
+ * (LIMITS.shots). Returns the shots added and how many did not fit – the caller says so; a
+ * merge never fails silently.
+ */
+export function mergeServerShots(incoming: unknown[]): { added: Shot[]; dropped: number } {
+  const doc = E().doc;
+  const have = new Set(doc.shots.map((x) => x.id));
+  const fresh = (incoming as Shot[]).filter((x) => x && doc.media[x.mediaId] && !have.has(x.id) && !doc.dismissedShots.includes(x.id));
+  if (!fresh.length) return { added: [], dropped: 0 };
+  const room = Math.max(0, LIMITS.shots - doc.shots.length);
+  const take = fresh.slice(0, room);
+  let added: Shot[];
+  try {
+    added = migrateProject({ ...doc, shots: take }).shots;
+  } catch {
+    // One bad shot does not cost the others.
+    added = take.flatMap((x) => {
+      try {
+        return migrateProject({ ...doc, shots: [x] }).shots;
+      } catch {
+        return [];
+      }
+    });
+  }
+  if (added.length)
+    E().silently((d) => {
+      d.shots = [...d.shots, ...added].sort(byTimeline(d.clips)) as typeof d.shots;
+    });
+  return { added, dropped: fresh.length - added.length };
 }
 
 /** Timeline seconds a little before the shot's launch (where its graphics start). */
@@ -1070,6 +1105,21 @@ export function rename(name: string) {
     },
     { key: 'rename' },
   );
+}
+
+/**
+ * "Round 2 May" becomes "Old Course – 2 May" once the course is known (the name is also the
+ * exported file's and the video's title). Not an undo step: the user did not do it, and an
+ * undo of their own last edit must not bring "Round …" back. A name the user typed stays.
+ */
+export function nameAfterCourse(course: string, locale: 'da' | 'en'): void {
+  const m = /^(?:Runde|Round) (.+)$/.exec(E().doc.name);
+  if (!course || !m) return;
+  // The day it was filmed (from the clips), not when the files were copied.
+  const day = filmedDay(E().doc.media, locale) || m[1];
+  E().silently((d) => {
+    d.name = `${course} – ${day}`.slice(0, 120);
+  });
 }
 
 export function setUnits(units: 'm' | 'yd') {

@@ -40,6 +40,12 @@ class SaveIn(BaseModel):
     force: bool = False
 
 
+class DuplicateIn(BaseModel):
+    # The editor's own document (a save that conflicted, kept as a copy); default: the saved one.
+    document: dict | None = None
+    name: str | None = Field(None, max_length=120)
+
+
 class VersionIn(BaseModel):
     label: str = Field("", max_length=120)
 
@@ -155,9 +161,14 @@ def delete_project(project_id: str, db: Session = Depends(get_db), user: User = 
 
 
 @router.post("/{project_id}/duplicate")
-def duplicate_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def duplicate_project(project_id: str, body: DuplicateIn | None = None, db: Session = Depends(get_db),
+                      user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
-    q = copy_project(db, user, p, merged_document(p), f"{p.name} (copy)")
+    doc = merged_document(p)
+    if body is not None and body.document is not None:
+        doc = validate_document(body.document)
+        _check_media(db, p, doc)
+    q = copy_project(db, user, p, doc, (body.name if body and body.name else None) or f"{p.name} (copy)")
     db.commit()
     return summary(db, q)
 
@@ -198,6 +209,13 @@ def _rename_media(doc: dict, old: str, new: str) -> None:
             layer["props"]["mediaId"] = new
 
 
+def _check_media(db: Session, p: Project, doc: dict) -> None:
+    media_ids = {m.id for m in _project_media(db, p)}
+    unknown = [mid for mid in doc.get("media", {}) if mid not in media_ids]
+    if unknown:
+        raise ApiError(422, "unknown_media", "The project refers to files that do not exist.", {"media": unknown})
+
+
 @router.put("/{project_id}/document")
 def save_document(project_id: str, body: SaveIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
@@ -205,10 +223,7 @@ def save_document(project_id: str, body: SaveIn, db: Session = Depends(get_db), 
         raise ApiError(409, "version_conflict", "The project was changed elsewhere. Reload or overwrite.",
                        {"docVersion": p.doc_version})
     doc = validate_document(body.document)
-    media_ids = {m.id for m in _project_media(db, p)}
-    unknown = [mid for mid in doc.get("media", {}) if mid not in media_ids]
-    if unknown:
-        raise ApiError(422, "unknown_media", "The project refers to files that do not exist.", {"media": unknown})
+    _check_media(db, p, doc)
     p.document = doc
     p.name = (doc.get("name") or p.name)[:120]
     p.doc_version += 1

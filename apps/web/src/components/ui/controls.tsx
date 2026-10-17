@@ -8,6 +8,7 @@ import * as TabsP from '@radix-ui/react-tabs';
 import { Check, ChevronDown } from 'lucide-react';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
+import { useOptionalLocale } from '@/lib/i18n/client';
 
 export function Slider({
   value,
@@ -200,7 +201,19 @@ export function Segmented<T extends string>({
   );
 }
 
-/** Numeric input that commits on blur/Enter and supports arrow keys. */
+/** A number as typed in the user's language: "1,5" in Danish. */
+export function formatNumber(v: number, step: number, locale: string | null): string {
+  const s = String(round(v, step));
+  return locale === 'da' ? s.replace('.', ',') : s;
+}
+
+/** Reads "1,5" and "1.5" alike (a decimal comma or point); NaN when it is not a number. */
+export function parseNumber(raw: string): number {
+  const s = raw.replace(/\s/g, '').replace(',', '.');
+  return s === '' || !/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(s) ? NaN : Number(s);
+}
+
+/** Numeric input that commits on blur/Enter (only when the number changed) and supports arrow keys. */
 export function NumberField({
   value,
   onChange,
@@ -224,15 +237,22 @@ export function NumberField({
   placeholder?: string;
   nullable?: boolean;
 }) {
-  const [text, setText] = useState(value == null ? '' : String(round(value, step)));
+  const locale = useOptionalLocale();
+  const shown = value == null ? '' : formatNumber(value, step, locale);
+  const [text, setText] = useState(shown);
   const id = useId();
-  useEffect(() => setText(value == null ? '' : String(round(value, step))), [value, step]);
+  useEffect(() => setText(shown), [shown]);
   const commit = (raw: string) => {
-    const s = raw.replace(',', '.').trim();
-    if (s === '' && nullable) return onChange(null);
-    const n = Number(s);
-    if (!Number.isFinite(n)) return setText(value == null ? '' : String(round(value, step)));
-    onChange(clamp(n, min, max));
+    // Tabbing through the field is not an edit (no undo step, no refit).
+    if (raw.trim() === shown) return setText(shown);
+    if (raw.trim() === '' && nullable) return value == null ? undefined : onChange(null);
+    const n = parseNumber(raw);
+    if (!Number.isFinite(n)) return setText(shown);
+    const next = clamp(n, min, max);
+    if (next === value) return setText(shown);
+    onChange(next);
+    // A clamped or rounded number shows as it was stored.
+    setText(formatNumber(next, step, locale));
   };
   return (
     <div className={cn('flex h-8 items-center rounded-sm border border-border-strong bg-surface focus-within:border-[var(--focus)]', className)}>
