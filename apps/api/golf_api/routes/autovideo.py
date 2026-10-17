@@ -107,7 +107,7 @@ class AiSettingsIn(BaseModel):
     baseUrl: str = Field("", max_length=300, pattern=r"^(|https?://\S+)$")
     # None keeps the stored key, "" removes it.
     apiKey: str | None = Field(None, max_length=400)
-    maxTokens: int = Field(8000, ge=500, le=200_000)
+    maxTokens: int = Field(16000, ge=500, le=200_000)
     # Still frames from the green when the putt count is unsure; None keeps the stored choice.
     vision: bool | None = None
 

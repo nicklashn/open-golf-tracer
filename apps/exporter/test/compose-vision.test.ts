@@ -76,11 +76,13 @@ function provider(vision: unknown) {
 
 function grabber() {
   const seen: { mediaId: string; times: number[] }[] = [];
-  const frames: FrameGrabber = async (mediaId, times) => {
+  const crops: unknown[] = [];
+  const frames: FrameGrabber = async (mediaId, times, crop) => {
     seen.push({ mediaId, times });
+    crops.push(crop);
     return times.map((_, i) => `/9j/frame${i}`);
   };
-  return { seen, frames };
+  return { seen, frames, crops };
 }
 
 const AI = { provider: 'openai-compatible', model: 'm1', baseUrl: 'http://ai.test/v1', apiKey: 'sk-SECRET-123456789', maxTokens: 20000 };
@@ -116,8 +118,12 @@ describe('compose job: the AI looks at the putting', () => {
     const f = fakeApi({ ...AI, vision: true });
     const log = (m: string, x: Record<string, unknown>) => lines.push(JSON.stringify({ m, ...x }));
     expect(await handleCompose(f.api, { id: 'j', payload: { project_id: 'p', locale: 'da' } }, log, p.doFetch, g.frames)).toBe('asked');
-    // From the first putt −1 s to the last +1 s (no end known: strike + 4 s): 4 … 19 s of clip b.
-    expect(g.seen).toEqual([{ mediaId: 'b', times: [4, 7, 10, 13, 16, 19] }]);
+    // At the putts of clip b: each strike (5, 14 s), each stop (none known: strike + 3 s) and 1 s after the last.
+    expect(g.seen).toEqual([{ mediaId: 'b', times: [5, 8, 14, 17, 18] }]);
+    // Cropped around where the balls were (both at 526, 1472 in the 1080×1920 frame).
+    expect(g.crops[0]).toMatchObject({ x: expect.any(Number), w: expect.any(Number) });
+    const body = JSON.stringify(p.bodies.find((b) => Array.isArray(b.messages[1].content)));
+    expect(body).toContain('putt 2 after');
     expect(p.pictures()).toBe(1);
     const asked = f.calls.find((c) => c.op === 'awaitAnswers')!.args[1] as Asked;
     expect(asked.plan.questions.map((q) => q.id)).toEqual(['retake:s2:s3']);
@@ -166,10 +172,20 @@ describe('compose job: the AI looks at the putting', () => {
     expect(await handleCompose(g.api, { id: 'j', payload: { project_id: 'p', yes: true } }, () => {}, doFetch, broken)).toBe('done');
   });
 
-  it('stays within AI_MAX_TOKENS: no picture is sent when it would not fit', async () => {
+  it('looks at the default plan ceiling: the pictures have an allowance of their own', async () => {
+    const p = provider({ putts: 2, holed: true, confidence: 0.9 });
+    const f = fakeApi({ ...AI, vision: true, maxTokens: 8000 });
+    await handleCompose(f.api, { id: 'j', payload: { project_id: 'p', locale: 'en' } }, () => {}, p.doFetch, grabber().frames);
+    expect(p.pictures()).toBe(1);
+    const asked = f.calls.find((c) => c.op === 'awaitAnswers')!.args[1] as Asked & { usage: { visionTokens?: number; inputTokens: number } };
+    expect(asked.plan.questions.map((q) => q.id)).not.toContain('putts:2');
+    expect(asked.usage.visionTokens).toBe(4050);
+  });
+
+  it('stays within the allowance: no picture is sent when it would not fit', async () => {
     const p = provider({ putts: 2, holed: true, confidence: 0.9 });
     const g = grabber();
-    const f = fakeApi({ ...AI, vision: true, maxTokens: 8000 });
+    const f = fakeApi({ ...AI, vision: true, maxTokens: 8000, visionMaxTokens: 2000 });
     await handleCompose(f.api, { id: 'j', payload: { project_id: 'p', locale: 'en' } }, () => {}, p.doFetch, g.frames);
     expect(p.pictures()).toBe(0);
     expect(g.seen).toHaveLength(0);
