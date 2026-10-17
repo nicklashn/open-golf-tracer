@@ -143,7 +143,7 @@ function agree(x: number | null, y: number | null): number {
   return rel <= 0.15 ? 0.5 : rel > 0.4 ? -1 : 0;
 }
 
-const tracked = (x: ShotSummary) => x.trackPts >= 5 && !x.flags.includes('default_path');
+const tracked = (x: ShotSummary) => x.trackPts >= 5 && !x.flags.includes('default_path') && !x.flags.includes('off_frame');
 
 /**
  * Scores two shots. The log-odds of "one strike" start at -1 and add up the evidence: sound

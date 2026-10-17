@@ -23,7 +23,7 @@ from . import clean as clean_mod
 from . import putt as putt_mod
 from .detect import Ball, BallDetector, feet_roi, get_detector, pick_golfer
 from .impact import Impact, PresenceProbe, ball_left, choose_impact
-from .physics import Flight, default_flight, fit_flight
+from .physics import Flight, default_flight, fit_flight, into_frame, off_frame_reason
 from .render import TracerPath, TracerRenderer, stats_card
 from .track import Candidates, Track, find_candidates, track_ball
 from .video import OverlayCompositor, VideoInfo, decode, load_audio, probe, read_frame
@@ -326,6 +326,8 @@ def _confidence(sh: ShotAnalysis) -> float:
         c *= 0.75
     if sh.verdict:
         c *= 0.4
+    if any(code == "off_frame" for code, _ in sh.codes):
+        c *= 0.5
     return round(float(min(1.0, c)), 3)
 
 
@@ -799,6 +801,17 @@ def _track_and_fit(info: VideoInfo, det: BallDetector, impact: Impact, ball: Bal
             warnings.append(f"The estimate ({stats['carry_m']:.0f} m) was longer than the hole allows; the flight follows the hole.")
             codes.append(("hole_limit", f"{stats['carry_m']:.0f}"))
             stats = flight.stats()
+    off = off_frame_reason(flight, wa, ha)
+    if off:
+        # Apex or landing far outside the picture (or no real landing): nobody could grab the
+        # handles. Draw a plausible in-frame guess from the same start instead, and flag it.
+        _log(f"flight rejected ({off}): drawing an in-frame guess")
+        guess = into_frame(flight, wa, ha, max(wa, ha), fps_a, opt.club)
+        if guess.project(to_ground=True) is not None:
+            flight = guess
+        warnings.append(f"The fitted flight left the picture ({off}); the path is a guess - check it.")
+        codes.append(("off_frame", off))
+        stats = flight.stats()
     if opt.carry and stats and abs(stats["carry_m"] - opt.carry) > 0.15 * opt.carry:
         warnings.append(f"The given carry ({opt.carry:.0f} m) does not fit the track well; the best guess is {stats['carry_m']:.0f} m.")
         codes.append(("carry_mismatch", f"{stats['carry_m']:.0f}"))

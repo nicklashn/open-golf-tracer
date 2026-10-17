@@ -101,6 +101,17 @@ describe('planFromRules', () => {
     expect(shown(prepare(doc, plan, {}).doc)).toEqual(['s1', 's2', 's3']);
   });
 
+  it('asks about a flight the analysis had to guess because it left the picture', () => {
+    const doc = plainRound();
+    doc.shots[0] = { ...doc.shots[0], warnings: [{ code: 'off_frame', detail: 'apex off frame' }] };
+    const q = planFromRules(summarize(doc), '', 'da').questions.find((x) => x.id === 'doubtful')!;
+    expect(q.shotIds).toEqual(['s1']);
+    expect(q.items?.[0].reasons).toEqual(['off_frame']);
+    expect(reasonText('off_frame', 'da')).toContain('Banen er gættet – tjek den');
+    // A guessed flight is not a measured carry: never "longest of the day".
+    expect(summarize(doc).shots[0].tags ?? []).not.toContain('longest');
+  });
+
   it('asks about clips without shots and can use them as mood shots', () => {
     const doc = project(
       [media('a', '2026-06-16T10:00:00+0200', '1'), media('x', '2026-06-16T10:10:00+0200', '1'), media('b', '2026-06-16T10:20:00+0200', '2')],

@@ -15,7 +15,9 @@ import {
   Lock,
   LockOpen,
   Map as MapIcon,
+  Maximize2,
   Minus,
+  PenLine,
   Plus,
   RotateCcw,
   Save,
@@ -44,7 +46,7 @@ import {
   type StatField,
   type TracerStyle,
 } from '@golf/schema';
-import { memo, useEffect, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { ColorField, NumberField, Segmented, Select, Slider, Switch } from '@/components/ui/controls';
 import { Input, Textarea } from '@/components/ui/input';
@@ -186,6 +188,19 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
   const setStyle = (p: Partial<TracerStyle>, key?: string) => ops.setShotStyle(shot.id, { ...p, preset: 'custom' }, key);
   const [mapOpen, setMapOpen] = useState(false);
   const place = useEditor((s) => s.doc.media[shot.mediaId]?.place ?? null);
+  // Handles the preview cannot show (outside the picture or the 9:16 crop).
+  const crop = useEditor((s) => s.doc.format);
+  const outside = useMemo(() => (shot.kind === 'putt' ? [] : ops.handlesOutside(shot)), [shot, crop]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleDraw = () => {
+    const s = useEditor.getState();
+    if (s.tool === 'drawPath') return s.setTool('select');
+    // Drawing needs the shot on screen: go to just before its launch unless its video is showing.
+    if (clipAt(s.doc.clips, s.time)?.clip.mediaId !== shot.mediaId) ops.jumpToShot(shot);
+    s.setTool('drawPath');
+  };
+  const intoView = () => {
+    if (ops.bringIntoView(shot.id)) toast.success(t.tracer.intoViewDone);
+  };
 
   const fmt = (field: StatField) => {
     if (!st) return '–';
@@ -235,8 +250,25 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
       ) : null}
 
       <Section title={t.tracer.section}>
-        <p className="text-[12px] text-fg-muted">{t.tracer.editOnVideo}</p>
+        {outside.length ? (
+          <div
+            className="flex flex-col gap-2 rounded-md border border-[color-mix(in_srgb,var(--color-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--color-warning)_10%,transparent)] p-3"
+            data-testid="offview-notice"
+          >
+            <p className="text-[12px] text-fg">{t.tracer.offView}</p>
+            <Button size="sm" variant="primary" onClick={intoView}>
+              <Maximize2 />
+              {t.tracer.intoView}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-[12px] text-fg-muted">{t.tracer.editOnVideo}</p>
+        )}
         <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant={tool === 'drawPath' ? 'primary' : 'secondary'} aria-pressed={tool === 'drawPath'} onClick={toggleDraw}>
+            <PenLine />
+            {t.tracer.draw}
+          </Button>
           <Button
             size="sm"
             variant={tool === 'addPoint' ? 'primary' : 'secondary'}
@@ -252,8 +284,15 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
             </Button>
           ) : null}
         </div>
+        {tool === 'drawPath' ? <p className="text-[12px] text-fg-muted">{t.tracer.drawHint}</p> : null}
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="ghost" onClick={() => ops.resetShot(shot.id)}>
+          {!outside.length ? (
+            <Button size="sm" variant="ghost" onClick={intoView}>
+              <Maximize2 />
+              {t.tracer.intoView}
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={() => ops.resetShot(shot.id) === 'inView' && toast.info(t.tracer.resetInView)}>
             <RotateCcw />
             {t.shots.reset}
           </Button>

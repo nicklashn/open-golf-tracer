@@ -1,7 +1,7 @@
 'use client';
 
 /** Editor commands. Each one is a single undoable step (see store.edit). */
-import { CLUBS, shotHandles, type Vec2 } from '@golf/physics';
+import { CLUBS, fitThrough, frameBox, intoView, offFrameReason, outsideBy, shotHandles, type Box, type Vec2 } from '@golf/physics';
 import { clipSlot, layerDefaults } from '@golf/compose';
 import { applyTemplate, currentShot, relayoutTemplate, shotStats } from '@golf/render';
 import {
@@ -10,6 +10,7 @@ import {
   clipAt,
   clipDuration,
   clipStarts,
+  cropAt,
   newId,
   sourceToTimeline,
   timelineDuration,
@@ -178,13 +179,94 @@ export function deleteShot(id: string) {
   );
 }
 
-export function resetShot(id: string) {
+const NO_CONSTRAINTS: Shot['constraints'] = { start: null, apex: null, landing: null, points: [], carry: null, curve: null, flightTime: null };
+
+/**
+ * Back to what the analysis found. An auto flight that lies far outside the picture (older
+ * analyses did not catch it) would be unreachable again, so it is pulled into view in the same
+ * undo step. Returns 'inView' then, else 'auto'.
+ */
+export function resetShot(id: string): 'auto' | 'inView' | null {
+  const shot = E().doc.shots.find((s) => s.id === id);
+  if (!shot) return null;
+  const auto: Shot = {
+    ...shot,
+    params: [...shot.auto.params],
+    anchor: { ...shot.auto.anchor },
+    impactTime: shot.auto.impactTime,
+    constraints: NO_CONSTRAINTS,
+    timing: { launchOffset: 0, speed: 1 },
+  };
+  const fixed = offFrameReason(auto, frameBox(auto)) ? intoView(auto, visibleBox(auto), { fps: fpsOf(shot.mediaId), longSide: longSide(shot) }) : null;
   updateShot('Reset shot', id, (s) => {
-    s.params = [...s.auto.params];
-    s.anchor = { ...s.auto.anchor };
-    s.impactTime = s.auto.impactTime;
-    s.constraints = { start: null, apex: null, landing: null, points: [], carry: null, curve: null, flightTime: null };
-    s.timing = { launchOffset: 0, speed: 1 };
+    s.params = fixed ? fixed.params : auto.params;
+    s.anchor = auto.anchor;
+    s.impactTime = auto.impactTime;
+    s.constraints = fixed ? fixed.constraints : { ...NO_CONSTRAINTS };
+    s.timing = { ...auto.timing };
+  });
+  return fixed ? 'inView' : 'auto';
+}
+
+/** The source frame of a shot's video. */
+function frameOf(shot: Shot): Box {
+  const m = E().doc.media[shot.mediaId];
+  return m ? { x: 0, y: 0, w: m.width, h: m.height } : frameBox(shot);
+}
+
+/**
+ * The part of the source frame the preview shows for a shot: the crop (9:16 etc.) at the
+ * playhead when it is on the shot's video, else at the shot's launch; never beyond the frame.
+ */
+export function visibleBox(shot: Shot): Box {
+  const doc = E().doc;
+  const frame = frameOf(shot);
+  const m = doc.media[shot.mediaId];
+  if (!m) return frame;
+  const now = E().time;
+  const hit = clipAt(doc.clips, now);
+  const t = hit && hit.clip.mediaId === shot.mediaId ? now : (shotLaunchTime(doc, shot) ?? now);
+  const c = cropAt(doc, m, t);
+  const x0 = Math.max(frame.x, c.x);
+  const y0 = Math.max(frame.y, c.y);
+  const x1 = Math.min(frame.x + frame.w, c.x + c.w);
+  const y1 = Math.min(frame.y + frame.h, c.y + c.h);
+  return x1 - x0 > 1 && y1 - y0 > 1 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : frame;
+}
+
+/** Handles (start, apex, landing) of a shot that lie outside `box` – what the preview cannot show. */
+export function handlesOutside(shot: Shot, box: Box = visibleBox(shot)): ('start' | 'apex' | 'landing')[] {
+  const h = shotHandles(shot);
+  if (!h) return ['apex', 'landing'];
+  return (['start', 'apex', 'landing'] as const).filter((k) => outsideBy(h[k], box) > 0);
+}
+
+/**
+ * Pulls the whole flight into the visible picture as one undo step: start, apex and landing stay
+ * where they can be seen, the others take a default shot's place from the start point.
+ */
+export function bringIntoView(id: string): boolean {
+  const shot = E().doc.shots.find((s) => s.id === id);
+  if (!shot) return false;
+  const r = intoView(shot, visibleBox(shot), { fps: fpsOf(shot.mediaId), longSide: longSide(shot) });
+  updateShot('Bring into view', id, (s) => {
+    s.params = r.params;
+    s.constraints = r.constraints as Draft<Shot['constraints']>;
+  });
+  return true;
+}
+
+/** Replaces the flight by one through three clicked points (source pixels), as one undo step. */
+export function drawShot(id: string, start: Vec2, apex: Vec2, landing: Vec2) {
+  const shot = E().doc.shots.find((s) => s.id === id);
+  if (!shot) return;
+  // Clicked points replace the old handles and extra points; carry, curve and flight time stay.
+  const base: Shot = { ...shot, constraints: { ...shot.constraints, start, apex: null, landing: null, points: [] } };
+  const r = fitThrough(base, start, apex, landing, { fps: fpsOf(shot.mediaId), longSide: longSide(shot) });
+  updateShot('Draw path', id, (s) => {
+    s.params = r.params;
+    // The user drew what happened: later refits leave the tracked points out.
+    s.constraints = { ...base.constraints, apex, landing, ignoreTrack: true } as Draft<Shot['constraints']>;
   });
 }
 
@@ -344,9 +426,19 @@ interface DragState {
 }
 let drag: DragState | null = null;
 
-export function beginHandleDrag(shotId: string, handle: HandleKind) {
-  const base = E().doc.shots.find((s) => s.id === shotId);
+/**
+ * Starts dragging a handle. `rescue` is the visible box when the handle was grabbed at the edge
+ * (it lies outside the picture): the flight is first pulled into view, so the drag starts from a
+ * sane flight instead of one the fit would need many steps to bring back.
+ */
+export function beginHandleDrag(shotId: string, handle: HandleKind, rescue?: Box) {
+  let base = E().doc.shots.find((s) => s.id === shotId);
   if (!base) return;
+  if (rescue) {
+    const r = intoView(base, rescue, { fps: fpsOf(base.mediaId), longSide: longSide(base) });
+    base = { ...base, params: r.params, constraints: r.constraints };
+    E().setLive(shotId, r.params);
+  }
   drag = { shotId, handle, base, constraints: base.constraints };
 }
 
