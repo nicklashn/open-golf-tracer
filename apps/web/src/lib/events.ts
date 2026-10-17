@@ -4,7 +4,7 @@ import { useEffect, useRef } from 'react';
 
 export interface JobInfo {
   id: string;
-  kind: 'ingest' | 'analyze' | 'retrack' | 'export' | 'compose';
+  kind: 'ingest' | 'analyze' | 'retrack' | 'export' | 'compose' | 'tune';
   status: 'queued' | 'running' | 'awaiting_answers' | 'succeeded' | 'failed' | 'canceled';
   progress: number;
   message: string;

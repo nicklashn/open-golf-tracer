@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import math
-import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -18,6 +17,7 @@ import numpy as np
 from numba import njit
 
 from .detect import Box
+from .runtime import cpu_workers
 
 MAX_PER_FRAME = 25      # kept per frame after weighting
 RAW_PER_FRAME = 200     # considered per frame before weighting
@@ -99,7 +99,7 @@ def find_candidates(frames: list[np.ndarray], times: np.ndarray, t_impact: float
     freq = np.zeros((h, w), np.float32)
     rows = []
     # OpenCV releases the GIL, so threads give a near-linear speed-up here.
-    with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
+    with ThreadPoolExecutor(max_workers=cpu_workers()) as ex:
         for bw, out in ex.map(per_frame, idx):
             freq += bw
             rows += out

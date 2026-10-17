@@ -73,8 +73,8 @@ sættes i kø igen (`maintenance.py`). Fremskridt sendes til browseren med Serve
 
 | Bane | Hvem | Jobs |
 |---|---|---|
-| `media` | Python-worker (`INGEST_PARALLEL` jobs ad gangen, standard 2; 1 ved ≤ 4 CPU-kerner) | `ingest`: probe, poster, proxy (kort GOP), thumbnail-sprite, waveform |
-| `analysis` | Python-worker | `analyze`, `retrack` (shottracer.analyze) |
+| `media` | Python-worker (efter ydelsesprofilen, standard 2 ad gangen; 1 ved ≤ 4 CPU-kerner; `INGEST_PARALLEL` vinder) | `ingest`: probe, poster, proxy (kort GOP), thumbnail-sprite, waveform |
+| `analysis` | Python-worker (efter ydelsesprofilen, standard 1 ad gangen) | `analyze`, `retrack` (shottracer.analyze), `tune` (Optimér) |
 | `export` | Node-exporter | `export` via `/api/internal` (beskyttet af `INTERNAL_TOKEN`) |
 | `compose` | Node-exporter (egen bane, så en lang eksport ikke blokerer) | `compose`: "Lav video for mig" (se nedenfor) |
 
@@ -183,3 +183,36 @@ valideres den med ffprobe (format, varighed, størrelse mod serverens grænser) 
 
 Budgetterne: analyse ≤ videoens længde på GPU, live-refit < 16 ms, overlay-render < 16,7 ms pr.
 1080p-frame og eksport ≈ realtid.
+
+### Ydelsesprofiler og Optimér
+
+Indstillinger → Ydelse vælger en profil, gemt i `DATA_DIR/performance.json` (`golf_api/performance.py`).
+Workeren læser den før hvert claim og hvert job, så et nyt valg gælder fra næste job uden genstart: hver
+bane starter op til 4 tråde, og profilen bestemmer, hvor mange der tager jobs. Analysejobbet giver den
+videre til motoren som `shottracer.runtime.Runtime` (detektor-sessioner, billeder pr. kald, CPU-tråde
+til ONNX Runtime, OpenCV og ffmpeg-afkodning).
+
+| Profil | Analyser / videoer ad gangen | Detektor | CPU |
+|---|---|---|---|
+| Skånsom | 1 / 1 | 1 session | halvdelen af kernerne |
+| Balanceret (standard) | 1 / 2 (1 ved ≤ 4 kerner) | 1 session | alle |
+| Maks | GPU: 3 ved ≥ 10 GB VRAM, 2 ved ≥ 6 GB, ellers 1; CPU: 2 ved ≥ 12 kerner / op til 4 | lige så mange sessioner som analyser (GPU) | alle |
+| Tilpasset denne pc | målt af Optimér | målt | målt |
+
+RAM begrænser altid: ≈ 3 GB pr. analyse (sekunder af full-HD-billeder), 1 GB pr. ingest.
+
+**Optimér** er jobbet `tune` (`golf_worker/tuner.py`, 30–60 s): finder CPU-kerner, RAM
+(`GlobalMemoryStatusEx` / `/proc/meminfo`), GPU og VRAM (`nvidia-smi`) og ONNX Runtimes providers, og kører
+så detektoren på billeder fra demo-klippet – først flere billeder pr. kald (kun hvis modellen har en dynamisk
+batch-dimension; den udgivne er fast 1), så flere sessioner side om side (kun på GPU; på CPU deler de bare
+kernerne). Den stopper ved første af: fejl (fx fuld VRAM), VRAM over 80 % (også *før* et trin, der ud fra
+sidste trins forbrug ikke ville passe), under 5 % gevinst, eller tidsgrænsen. Bedste sikre trin gemmes som
+"Tilpasset denne pc" med målt hastighed i forhold til Balanceret.
+
+**Nødbremse:** fejler en analyse med out-of-memory eller en mistet GPU (DirectML `887A0005` m.fl.,
+`performance.is_device_error`), sænkes den gemte profil ét trin (Tilpasset/Maks → Balanceret → Skånsom →
+kun CPU), detektoren lukkes, og analysen prøves én gang til. Det logges og vises under Indstillinger → Ydelse.
+
+Detektoren (RF-DETR ONNX) kører ét billede pr. kald med den udgivne model; `people()` og `ball()` på samme
+billede deler ét netværkskald, personer i sporingsvinduet findes ved siden af afkodningen, og "kig efter
+bolden"-scanningen læser næste billede, mens netværket kører. Resultaterne er de samme som før.

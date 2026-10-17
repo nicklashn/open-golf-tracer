@@ -1,8 +1,9 @@
 """Worker loop: claims jobs from the database queue and runs them.
 
 Two lanes run in parallel so a long analysis never blocks proxies for the next upload:
-  media lane:    ingest (INGEST_PARALLEL at once, default 2; 1 on machines with 4 cores or fewer)
-  analysis lane: analyze, retrack (GPU)
+  media lane:    ingest (default 2 at once; 1 on machines with 4 cores or fewer)
+  analysis lane: analyze, retrack, tune (GPU; default 1 at once)
+How many run at once comes from Settings → Performance (golf_api.performance), read before each claim.
 
 python -m golf_worker [--once] [--lanes media,analysis]
 """
@@ -23,7 +24,7 @@ for p in (ROOT, ROOT / "apps" / "api"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from golf_api import jobs, logging_setup  # noqa: E402
+from golf_api import jobs, logging_setup, performance  # noqa: E402
 from golf_api.config import settings  # noqa: E402
 from golf_api.db import session_scope  # noqa: E402
 from golf_api.main import migrate  # noqa: E402
@@ -34,18 +35,16 @@ from .tasks import HANDLERS  # noqa: E402
 
 log = logging.getLogger("golf.worker")
 
-LANES = {"media": ["ingest"], "analysis": ["analyze", "retrack"]}
+LANES = {"media": ["ingest"], "analysis": ["analyze", "retrack", "tune"]}
+LANE_MAX = {"media": performance.MAX_INGESTS, "analysis": performance.MAX_ANALYSES}
 HEARTBEAT_S = 15
 
 
 def lane_threads(lane: str) -> int:
-    if lane != "media":
-        return 1
-    try:
-        n = int(os.environ.get("INGEST_PARALLEL", ""))
-    except ValueError:
-        n = 1 if (os.cpu_count() or 1) <= 4 else 2
-    return max(1, n)
+    """How many jobs of this lane may run now (Settings → Performance, or INGEST_PARALLEL);
+    read again before each claim, so a new profile needs no restart."""
+    perf, _ = performance.effective()
+    return max(1, min(LANE_MAX.get(lane, 1), perf.ingests if lane == "media" else perf.analyses))
 
 
 def run_job(job_id: str) -> None:
@@ -104,12 +103,14 @@ def run_job(job_id: str) -> None:
         stop.set()
 
 
-def lane_loop(name: str, kinds: list[str], once: bool, worker_id: str) -> None:
+def lane_loop(name: str, kinds: list[str], once: bool, worker_id: str, slot: int = 0, lane: str = "") -> None:
     idle = 0.5
     while True:
-        with session_scope() as db:
-            j = jobs.claim(db, kinds, f"{worker_id}:{name}")
-            jid = j.id if j else None
+        jid = None
+        if slot < lane_threads(lane or name):
+            with session_scope() as db:
+                j = jobs.claim(db, kinds, f"{worker_id}:{name}")
+                jid = j.id if j else None
         if jid:
             run_job(jid)
             idle = 0.5
@@ -124,6 +125,9 @@ def _warm_detector() -> None:
     try:
         from shottracer.detect import get_detector
 
+        from .tasks import apply_performance
+
+        apply_performance()
         get_detector()
         log.info("ball detector ready")
     except Exception as exc:  # noqa: BLE001 - the first analysis will try (and report) again
@@ -147,9 +151,10 @@ def main(argv: list[str] | None = None) -> int:
         # Load the ball detector now (torch + weights take 20-50 s cold), not when the first
         # video is waiting for its analysis.
         threading.Thread(target=_warm_detector, daemon=True).start()
-    log.info("worker %s starting with lanes: %s", worker_id, ", ".join(f"{ln} x{lane_threads(ln)}" for ln in lanes))
-    threads = [threading.Thread(target=lane_loop, args=(ln if i == 0 else f"{ln}{i + 1}", LANES[ln], a.once, worker_id), daemon=True)
-               for ln in lanes for i in range(lane_threads(ln))]
+    log.info("worker %s starting with lanes: %s", worker_id, ", ".join(f"{ln} x{lane_threads(ln)} (up to {LANE_MAX[ln]})" for ln in lanes))
+    # Up to LANE_MAX threads per lane; the performance profile decides how many of them claim jobs.
+    threads = [threading.Thread(target=lane_loop, args=(ln if i == 0 else f"{ln}{i + 1}", LANES[ln], a.once, worker_id, i, ln), daemon=True)
+               for ln in lanes for i in range(LANE_MAX[ln] if not a.once else lane_threads(ln))]
     for t in threads:
         t.start()
     try:

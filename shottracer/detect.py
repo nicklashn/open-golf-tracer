@@ -7,13 +7,18 @@ the fallback when the network finds nothing.
 from __future__ import annotations
 
 import functools
+import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+
+from . import runtime
+from .runtime import Runtime
 
 PERSON, SPORTS_BALL = 0, 32
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
@@ -180,9 +185,13 @@ class BallDetector:
     """Finds people (to locate the golfer) and the ball at address."""
 
     name = "base"
+    parallel = 1   # inference calls worth running at the same time
 
     def people(self, img: np.ndarray) -> list[Box]:
         raise NotImplementedError
+
+    def people_many(self, imgs: list[np.ndarray]) -> list[list[Box]]:
+        return [self.people(img) for img in imgs]
 
     def ball(self, frame: np.ndarray, golfer: Box | None, allow_blob: bool = True) -> Ball | None:
         raise NotImplementedError
@@ -288,42 +297,119 @@ def ensure_onnx_model() -> Path:
 class OnnxRfDetrBallDetector(RfDetrBallDetector):
     """The same RF-DETR Large, exported to ONNX (scripts/export_onnx.py) and run with ONNX Runtime:
     no PyTorch needed (~40 MB instead of ~4 GB). On Windows the DirectML provider uses any GPU
-    (NVIDIA, AMD, Intel); otherwise the CPU. Pre- and post-processing mirror rfdetr's predict()."""
+    (NVIDIA, AMD, Intel); otherwise the CPU. Pre- and post-processing mirror rfdetr's predict().
+
+    `Runtime.sessions` sessions may run at once (each costs GPU memory); a model exported with a
+    dynamic batch dimension takes up to `Runtime.batch` frames per call (the published one is
+    fixed at 1)."""
 
     name = "rf-detr-onnx"
     RESOLUTION = 704
     MEAN = np.array([0.485, 0.456, 0.406], np.float32)
     STD = np.array([0.229, 0.224, 0.225], np.float32)
     NUM_SELECT = 300
+    CACHE: int = 8   # the last few images: people() and ball() on the same frame run the network once
 
-    def __init__(self, model: Path | None = None):
+    def __init__(self, model: Path | None = None, rt: Runtime | None = None):
+        import os
+
         import onnxruntime as ort
 
+        rt = rt or runtime.current()
         path = model or ensure_onnx_model()
         available = ort.get_available_providers()
-        providers = [p for p in ("DmlExecutionProvider", "CUDAExecutionProvider") if p in available]
-        opts = ort.SessionOptions()
-        if "DmlExecutionProvider" in providers:  # DirectML needs these (ORT docs)
-            opts.enable_mem_pattern = False
-            opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        providers = [p for p in ("DmlExecutionProvider", "CUDAExecutionProvider") if p in available and rt.gpu]
+        n = max(1, rt.sessions)
+
+        def options(gpu: bool):
+            opts = ort.SessionOptions()
+            if gpu and "DmlExecutionProvider" in providers:  # DirectML needs these (ORT docs)
+                opts.enable_mem_pattern = False
+                opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            threads = rt.threads or (max(1, (os.cpu_count() or 4) // n) if n > 1 else 0)
+            opts.intra_op_num_threads = threads
+            if threads:
+                opts.inter_op_num_threads = 1
+            return opts
+
+        sessions = []
         try:
-            self.session = ort.InferenceSession(str(path), opts, providers=[*providers, "CPUExecutionProvider"])
-        except Exception:  # a broken GPU driver must not stop the analysis
-            self.session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-        self.provider = self.session.get_providers()[0]
-        self.input = self.session.get_inputs()[0].name
-        self._run_lock = threading.Lock()  # DirectML sessions do not support concurrent Run calls
+            for _ in range(n):
+                sessions.append(ort.InferenceSession(str(path), options(True), providers=[*providers, "CPUExecutionProvider"]))
+        except Exception:  # a broken GPU driver must not stop the analysis; a full GPU keeps the sessions it has
+            if not sessions:
+                sessions = [ort.InferenceSession(str(path), options(False), providers=["CPUExecutionProvider"])]
+        self._init(sessions, rt.batch)
+
+    def _init(self, sessions: list, batch: int = 1) -> None:
+        self.provider = sessions[0].get_providers()[0] if hasattr(sessions[0], "get_providers") else "CPUExecutionProvider"
+        inp = sessions[0].get_inputs()[0]
+        self.input = inp.name
+        dim = inp.shape[0] if inp.shape else 1
+        self.batch = max(1, batch) if not isinstance(dim, int) else max(1, dim)
+        self.fixed_batch = dim if isinstance(dim, int) else None
+        self.sessions = len(sessions)
+        self._free: queue.SimpleQueue = queue.SimpleQueue()   # one Run call per session at a time (DirectML)
+        for s in sessions:
+            self._free.put(s)
+        self._cache: list = []    # (image, outputs), newest last; by identity, so a frame is never confused with another
+        self._cache_lock = threading.Lock()
         # COCO category ids, as RF-DETR reports them (see _COCO91); only these two are used.
         self.names = {1: "person", 37: "sports ball"}
 
-    def _predict(self, img: np.ndarray, conf: float) -> list[tuple[str, Box]]:
-        h, w = img.shape[:2]
+    @property
+    def parallel(self) -> int:
+        return self.sessions
+
+    def _prep(self, img: np.ndarray) -> np.ndarray:
         # rfdetr: RGB in [0, 1], bilinear resize without antialiasing, ImageNet normalisation.
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
         x = cv2.resize(rgb, (self.RESOLUTION, self.RESOLUTION), interpolation=cv2.INTER_LINEAR)
-        x = ((x - self.MEAN) / self.STD).transpose(2, 0, 1)[None]
-        with self._run_lock:
-            boxes, logits = self.session.run(None, {self.input: np.ascontiguousarray(x, np.float32)})
+        return np.ascontiguousarray(((x - self.MEAN) / self.STD).transpose(2, 0, 1), np.float32)
+
+    def _run(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        s = self._free.get()
+        try:
+            boxes, logits = s.run(None, {self.input: x})
+        finally:
+            self._free.put(s)
+        return boxes, logits
+
+    def _raw_many(self, imgs: list[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
+        """(boxes, logits) per image: cached, batched when the model allows, spread over the sessions."""
+        with self._cache_lock:
+            out: list = [next((r for im, r in self._cache if im is img), None) for img in imgs]
+        todo = [i for i, r in enumerate(out) if r is None]
+        chunks = [todo[j:j + self.batch] for j in range(0, len(todo), self.batch)]
+
+        def run(chunk: list[int]):
+            x = np.stack([self._prep(imgs[i]) for i in chunk])
+            if self.fixed_batch and len(x) < self.fixed_batch:
+                x = np.concatenate([x, np.zeros((self.fixed_batch - len(x), *x.shape[1:]), np.float32)])
+            boxes, logits = self._run(x)
+            return [(boxes[j:j + 1], logits[j:j + 1]) for j in range(len(chunk))]
+
+        if len(chunks) > 1 and self.sessions > 1:
+            with ThreadPoolExecutor(max_workers=min(self.sessions, len(chunks))) as ex:
+                results = list(ex.map(run, chunks))
+        else:
+            results = [run(c) for c in chunks]
+        with self._cache_lock:
+            for chunk, res in zip(chunks, results):
+                for i, r in zip(chunk, res):
+                    out[i] = r
+                    self._cache.append((imgs[i], r))
+            del self._cache[: max(0, len(self._cache) - self.CACHE)]
+        return out
+
+    def _predict(self, img: np.ndarray, conf: float) -> list[tuple[str, Box]]:
+        return self._post(*self._raw_many([img])[0], img.shape[1], img.shape[0], conf)
+
+    def people_many(self, imgs: list[np.ndarray]) -> list[list[Box]]:
+        return [[b for k, b in self._post(bx, lg, img.shape[1], img.shape[0], 0.25) if k == "person"]
+                for img, (bx, lg) in zip(imgs, self._raw_many(imgs))]
+
+    def _post(self, boxes: np.ndarray, logits: np.ndarray, w: int, h: int, conf: float) -> list[tuple[str, Box]]:
         prob = 1 / (1 + np.exp(-logits[0].astype(np.float64)))  # (queries, classes)
         flat = prob.ravel()
         top = np.argsort(-flat, kind="stable")[: self.NUM_SELECT]
@@ -354,20 +440,26 @@ class BlobBallDetector(BallDetector):
 
 
 _detector_lock = threading.Lock()
+_loaded: dict[tuple, BallDetector] = {}
 
 
 def get_detector(weights: str | None = None) -> BallDetector:
-    """The process's detector (loaded once; a lock so a warm-up thread and the first job do
-    not both load the model)."""
+    """The process's detector for the current Runtime (loaded once; a lock so a warm-up thread
+    and the first job do not both load the model). Another Runtime replaces it; the old one's
+    memory goes once no job holds it any more."""
+    rt = runtime.current()
+    key = (weights, rt)
     with _detector_lock:
-        return _make_detector(weights)
+        if key not in _loaded:
+            _loaded.clear()
+            _loaded[key] = _make_detector(weights, rt)
+        return _loaded[key]
 
 
-get_detector.cache_clear = lambda: _make_detector.cache_clear()  # type: ignore[attr-defined]
+get_detector.cache_clear = _loaded.clear  # type: ignore[attr-defined]
 
 
-@functools.cache
-def _make_detector(weights: str | None = None) -> BallDetector:
+def _make_detector(weights: str | None = None, rt: Runtime | None = None) -> BallDetector:
     import importlib
     import importlib.util
     import os
@@ -378,7 +470,7 @@ def _make_detector(weights: str | None = None) -> BallDetector:
     if spec == "yolo" or (weights and not spec):  # explicit YOLO weights (--model) mean YOLO
         return YoloBallDetector(weights)
     if spec in ("rfdetr-onnx", "onnx"):
-        return OnnxRfDetrBallDetector()
+        return OnnxRfDetrBallDetector(rt=rt)
     if spec in ("rfdetr-torch", "torch"):
         return RfDetrBallDetector()
     if spec and spec not in ("rfdetr", "rf-detr"):
@@ -386,5 +478,5 @@ def _make_detector(weights: str | None = None) -> BallDetector:
         return getattr(importlib.import_module(mod), cls)()
     # RF-DETR as ONNX (no PyTorch needed); the PyTorch version only when ONNX Runtime is missing.
     if importlib.util.find_spec("onnxruntime") or not importlib.util.find_spec("rfdetr"):
-        return OnnxRfDetrBallDetector()
+        return OnnxRfDetrBallDetector(rt=rt)
     return RfDetrBallDetector()

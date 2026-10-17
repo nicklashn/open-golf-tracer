@@ -10,6 +10,7 @@ import { useI18n } from '@/lib/i18n/client';
 import { useMe, type Me } from '@/lib/me';
 import { AiSettingsForm } from './AiSettings';
 import { useTheme } from './AppRoot';
+import { PerformanceSettings } from './PerformanceSettings';
 
 function Section({ id, title, children, lead }: { id?: string; title: string; lead?: ReactNode; children: ReactNode }) {
   return (
@@ -85,6 +86,10 @@ export function SettingsPage() {
 
       <Section id="ai" title={t.ai.title} lead={t.ai.lead}>
         <AiSettingsForm />
+      </Section>
+
+      <Section id="performance" title={t.perf.title} lead={t.perf.lead}>
+        <PerformanceSettings />
       </Section>
 
       <Section id="data" title={t.settings.data} lead={t.settings.exportDataLead}>

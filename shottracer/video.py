@@ -6,11 +6,14 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from . import runtime
 
 
 def ffmpeg_bin() -> str:
@@ -100,8 +103,6 @@ class _FrameReader:
                -270: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180, -180: cv2.ROTATE_180}
 
     def __init__(self, path: str):
-        import threading
-
         import av
 
         self.container = av.open(path)
@@ -126,15 +127,17 @@ class _FrameReader:
         self.container.close()
 
 
-_readers: dict[str, _FrameReader] = {}
+_local = threading.local()
 
 
 def _reader(path: str) -> _FrameReader:
-    r = _readers.get(path)
+    """An open file per thread: analyses running side by side never share (or close) one."""
+    readers: dict[str, _FrameReader] = _local.__dict__.setdefault("readers", {})
+    r = readers.get(path)
     if r is None:
-        while len(_readers) >= 2:                     # a worker sees one video at a time
-            _readers.pop(next(iter(_readers))).close()
-        r = _readers[path] = _FrameReader(path)
+        while len(readers) >= 2:                      # a thread sees one video at a time
+            readers.pop(next(iter(readers))).close()
+        r = readers[path] = _FrameReader(path)
     return r
 
 
@@ -171,6 +174,8 @@ def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
     pix = "gray" if gray else "bgr24"
     filters.append(f"format={pix}")
     cmd = [ffmpeg_bin(), "-v", "error", "-hwaccel", "auto"]
+    if runtime.current().threads:
+        cmd += ["-threads", str(runtime.current().threads)]
     if start > 0:
         cmd += ["-ss", f"{(start - 0.5) / info.fps:.6f}"]
     cmd += ["-i", str(info.path)]

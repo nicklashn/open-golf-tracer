@@ -101,7 +101,7 @@ Everything has sensible defaults, and nothing has to be set. To change something
 | `GOLF_DETECTOR` | Ball detector: `rfdetr` (default, ONNX), `rfdetr-torch`, `yolo` or `blob` |
 | `GOLF_HDR_TONEMAP` | `1` tone-maps HDR videos to SDR before analysis |
 | `PROXY_CODEC` | Editor preview codec: `h264` (default) or `vp9` |
-| `INGEST_PARALLEL` | Videos prepared at once (preview, thumbnails, waveform); default 2, or 1 on PCs with 4 CPU cores or fewer |
+| `INGEST_PARALLEL` | Videos prepared at once (preview, thumbnails, waveform); overrides **Settings → Performance**, whose default is 2, or 1 on PCs with 4 CPU cores or fewer |
 | `EXPORT_CPU` | `1` forces CPU encoding even when a GPU encoder exists |
 | `NEXT_PUBLIC_MAP_SATELLITE` | Satellite map in "Measure on map": empty = auto, `1` = always, `0` = never |
 | `LISTEN_HOST`, `ALLOWED_HOSTS` | Network access, see above |
@@ -110,6 +110,22 @@ Everything has sensible defaults, and nothing has to be set. To change something
 
 Restart the app after changing `.env` (rebuild with `npm run build` after changing a
 `NEXT_PUBLIC_` variable).
+
+### Performance
+
+**Settings → Performance** chooses how much of the PC the analysis may use – no restart, it applies
+from the next job:
+
+- **Gentle** – half the CPU cores, one analysis and one video at a time: the PC stays usable.
+- **Balanced** (default) – all cores for one analysis at a time.
+- **Max** – several analyses and videos at once (on a GPU: 3 with ≥ 10 GB graphics memory, 2 with ≥ 6 GB).
+- **Tuned for this PC** – made by **Optimise**, a 30–60 s benchmark of the ball detector that tries more
+  detector sessions side by side and stops at the first error, at 80 % of the graphics memory, or when it
+  gets no faster. It shows the result, e.g. "≈ 2.4× faster ball finding than Balanced; GPU: RTX 5070 –
+  use up to 3 analyses at once".
+
+If an analysis runs out of memory or loses the GPU, it is retried once with the next lower profile, which
+is then kept (shown in the same place). Stored in `data/performance.json`.
 
 ### AI for "Make video for me" (optional)
 
@@ -180,6 +196,8 @@ expires or you disconnect the app in ChatGPT, sign in again.
   on a blurred copy of itself.
 - **Export:** presets for Shorts/Reels/TikTok, YouTube 1080p/4K and original; 30/60 fps; HDR kept or
   tone-mapped; queue with progress.
+- **Performance:** Gentle, Balanced or Max, or **Optimise** to measure what this PC can safely run
+  (detector sessions, analyses at once, within 80 % of the graphics memory); out-of-memory errors step it down.
 - **Settings:** language, units, theme and a data export of all your projects. Every feature is free.
 - English and Danish, light and dark theme, keyboard shortcuts (`?` in the editor), WCAG AA.
 
