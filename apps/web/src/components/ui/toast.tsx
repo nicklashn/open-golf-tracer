@@ -80,7 +80,8 @@ export function Toaster({ closeLabel = 'Luk' }: { closeLabel?: string }) {
           </ToastP.Close>
         </ToastP.Root>
       ))}
-      <ToastP.Viewport className="fixed bottom-4 right-4 z-[70] flex flex-col gap-2 outline-none" />
+      {/* Top right, under the header: the bottom corners hold the upload tray and the export card. */}
+      <ToastP.Viewport className="fixed right-4 top-16 z-[70] flex flex-col gap-2 outline-none" />
     </ToastP.Provider>
   );
 }

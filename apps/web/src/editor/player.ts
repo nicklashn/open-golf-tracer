@@ -3,11 +3,15 @@
 /**
  * Preview engine. Plays the timeline (clips with speed, freezes, cuts) over the proxy
  * videos, positions the video with a CSS transform for the current crop, and draws the
- * overlay (tracers + graphics) with packages/render – the same pixels the export uses.
+ * overlay (tracers + graphics) with packages/render – the same pixels the export uses – on a
+ * worker where the browser allows (overlay.ts).
  */
-import { Surface, fonts, renderOverlay, type ImageData8, type OverlayContext } from '@golf/render';
-import { clipAt, clipStarts, clipDuration, cropAt, timelineDuration, type Project } from '@golf/schema';
+import type { ImageData8 } from '@golf/render';
+import { clipAt, clipStarts, clipDuration, cropAt, timelineDuration } from '@golf/schema';
+import { loadRendererFonts, overlayOutput, type OverlayOutput } from './overlay';
 import { useEditor, type MediaInfo } from './store';
+
+export { loadRendererFonts };
 
 export interface PlayerView {
   /** Output-frame size in CSS pixels as shown on screen. */
@@ -17,19 +21,12 @@ export interface PlayerView {
   dpr: number;
 }
 
-let fontsReady: Promise<void> | null = null;
-export function loadRendererFonts(): Promise<void> {
-  fontsReady ??= fonts.loadAll(async (file) => (await fetch(`/fonts/${file}`)).arrayBuffer());
-  return fontsReady;
-}
-
 const MAX_OVERLAY_LONG_SIDE = 1920;
 
 export class PlayerEngine {
   private videos = new Map<string, HTMLVideoElement>();
   private music = new Map<string, HTMLAudioElement>();
-  private surface: Surface | null = null;
-  private lastDirty: { x: number; y: number; w: number; h: number } | null = null;
+  private out: OverlayOutput;
   private raf = 0;
   private playing = false;
   private freezeStart: { wall: number; t: number } | null = null;
@@ -39,7 +36,6 @@ export class PlayerEngine {
   private lastLive: unknown = null;
   private unsub: (() => void) | null = null;
   private view: PlayerView = { width: 640, height: 360, dpr: 1 };
-  private imageCache = new Map<string, ImageData8>();
   /** Blurred copy of the video behind it ("fill: blur"), drawn small and scaled up by CSS. */
   private backdrop: HTMLCanvasElement | null = null;
   private backdropOn = false;
@@ -49,8 +45,14 @@ export class PlayerEngine {
   constructor(
     private host: HTMLDivElement,
     private canvas: HTMLCanvasElement,
-    private locale: 'da' | 'en',
+    locale: 'da' | 'en',
   ) {
+    this.out = overlayOutput(canvas, locale);
+    this.out.onDrawn = (ms) => {
+      // Marker for tests and the benchmark: first frame with video and overlay on screen.
+      if (!this.canvas.dataset.ready && [...this.videos.values()].some((v) => v.readyState >= 2)) this.canvas.dataset.ready = 'true';
+      this.onFrame?.(ms);
+    };
     this.unsub = useEditor.subscribe((s, prev) => {
       if (s.playing !== prev.playing) {
         if (s.playing) this.play();
@@ -67,6 +69,7 @@ export class PlayerEngine {
   destroy(): void {
     cancelAnimationFrame(this.raf);
     this.unsub?.();
+    this.out.release();
     for (const v of this.videos.values()) {
       v.pause();
       v.removeAttribute('src');
@@ -81,12 +84,7 @@ export class PlayerEngine {
     const ratio = Math.min(v.dpr, MAX_OVERLAY_LONG_SIDE / Math.max(v.width, v.height));
     const w = Math.max(2, Math.round(v.width * ratio));
     const h = Math.max(2, Math.round(v.height * ratio));
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-      this.surface = new Surface(w, h);
-      this.lastDirty = null;
-    }
+    this.out.resize(w, h);
     this.invalidate();
     this.positionVideo(useEditor.getState().time);
   }
@@ -326,36 +324,8 @@ export class PlayerEngine {
   // Overlay
 
   setImage(mediaId: string, img: ImageData8): void {
-    this.imageCache.set(mediaId, img);
+    this.out.setImage(mediaId, img);
     this.invalidate();
-  }
-
-  private renderOverlay(doc: Project, t: number): void {
-    const surface = this.surface;
-    if (!surface || !fonts.size) return;
-    const ctx = this.canvas.getContext('2d');
-    if (!ctx) return;
-    const started = performance.now();
-    surface.clear();
-    const oc: OverlayContext = {
-      project: doc,
-      width: surface.w,
-      height: surface.h,
-      locale: this.locale,
-      images: this.imageCache,
-      hiddenLayerIds: this.hiddenLayerIds,
-    };
-    renderOverlay(surface, oc, t);
-    const d = surface.dirty;
-    if (this.lastDirty) ctx.clearRect(this.lastDirty.x, this.lastDirty.y, this.lastDirty.w, this.lastDirty.h);
-    if (d) {
-      const out = surface.toRGBA(d)!;
-      ctx.putImageData(new ImageData(out.data as unknown as Uint8ClampedArray<ArrayBuffer>, d.w, d.h), d.x, d.y);
-    }
-    this.lastDirty = d ? { ...d } : null;
-    // Marker for tests and the benchmark: first frame with video and overlay on screen.
-    if (!this.canvas.dataset.ready && [...this.videos.values()].some((v) => v.readyState >= 2)) this.canvas.dataset.ready = 'true';
-    this.onFrame?.(performance.now() - started);
   }
 
   private loop(): void {
@@ -375,6 +345,6 @@ export class PlayerEngine {
       const v = this.videos.get(this.activeMedia);
       if (v) this.drawBackdrop(v);
     }
-    this.renderOverlay(doc, s.time);
+    this.out.draw({ doc, t: s.time, hidden: [...this.hiddenLayerIds] });
   }
 }

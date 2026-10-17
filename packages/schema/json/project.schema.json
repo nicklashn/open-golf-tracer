@@ -462,6 +462,25 @@
               "end"
             ]
           },
+          "clean": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              },
+              "to": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
           "confidence": {
             "default": 1,
             "type": "number",

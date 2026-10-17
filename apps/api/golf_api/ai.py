@@ -22,7 +22,7 @@ SERVER_PROVIDERS = ("none", "ollama", "openai-compatible", "anthropic")
 DEFAULTS = {
     "ollama": {"baseUrl": "http://localhost:11434/v1", "model": "llama3.1"},
     "openai-compatible": {"baseUrl": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
-    "anthropic": {"baseUrl": "https://api.anthropic.com", "model": "claude-opus-5-5"},
+    "anthropic": {"baseUrl": "https://api.anthropic.com", "model": "claude-haiku-5-5"},
     # The model is picked from the signed-in account's list.
     "chatgpt": {"baseUrl": chatgpt.API_BASE, "model": ""},
 }

@@ -44,7 +44,7 @@ import {
   type StatField,
   type TracerStyle,
 } from '@golf/schema';
-import { useEffect, useState, type ReactNode } from 'react';
+import { memo, useEffect, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { ColorField, NumberField, Segmented, Select, Slider, Switch } from '@/components/ui/controls';
 import { Input, Textarea } from '@/components/ui/input';
@@ -92,6 +92,8 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
   );
 }
 
+/** The sub-inspectors are memoised: this re-renders on every document change, they only when
+ *  their own shot, layer or clip does. */
 export function Inspector({ onRetrack }: { onRetrack: (shot: Shot) => void }) {
   const selection = useEditor((s) => s.selection);
   const doc = useLiveDoc();
@@ -118,7 +120,7 @@ export function Inspector({ onRetrack }: { onRetrack: (shot: Shot) => void }) {
 // ---------------------------------------------------------------------------------------------
 // Shot / tracer
 
-function PuttInspector({ shot }: { shot: Shot }) {
+const PuttInspector = memo(function PuttInspector({ shot }: { shot: Shot }) {
   const { t, f } = useI18n();
   const holed = shot.putt?.holed ?? null;
   const value = holed === null ? 'unknown' : holed ? 'yes' : 'no';
@@ -149,11 +151,11 @@ function PuttInspector({ shot }: { shot: Shot }) {
       </Section>
     </div>
   );
-}
+});
 
 const CLUB_OPTIONS: Club[] = ['auto', 'driver', 'wood', 'longIron', 'midIron', 'shortIron', 'wedge'];
 
-function ShotInspector({ shot, onRetrack }: { shot: Shot; onRetrack: (shot: Shot) => void }) {
+const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: Shot; onRetrack: (shot: Shot) => void }) {
   const { t, f, locale } = useI18n();
   const units = useEditor((s) => s.doc.units);
   const tool = useEditor((s) => s.tool);
@@ -456,7 +458,7 @@ function ShotInspector({ shot, onRetrack }: { shot: Shot; onRetrack: (shot: Shot
       </Section>
     </div>
   );
-}
+});
 
 /** Slider that applies once on release (for expensive refits). */
 function CommitSlider({
@@ -549,14 +551,17 @@ function MyStyles({ shot }: { shot: Shot }) {
 const ANIMS: AnimPreset[] = ['none', 'fade', 'slideUp', 'slideLeft', 'slideRight', 'pop', 'typewriter', 'wipe'];
 const EASINGS: Easing[] = ['easeInOut', 'linear', 'easeIn', 'easeOut', 'hold'];
 
-function LayerInspector({ layer }: { layer: Layer }) {
+const LayerInspector = memo(function LayerInspector({ layer }: { layer: Layer }) {
   const { t } = useI18n();
-  const time = useEditor((s) => s.time);
-  const total = useEditor((s) => timelineDuration(s.doc));
-  const lt = time - layer.start;
+  // Only which keyframe is under the playhead matters here, not every playhead tick.
+  const keyState = useEditor((s) => layerKeyState(layer, s.time));
+  const [curIdx, onIdx] = keyState.split(':').map(Number);
+  // Whole seconds: only a field limit (setLayerTiming clamps exactly), so trims do not re-render this.
+  const total = useEditor((s) => Math.ceil(timelineDuration(s.doc)));
   const sorted = [...layer.keyframes].sort((a, b) => a.t - b.t);
-  const cur = sorted.filter((k) => k.t <= lt + 1e-6).pop() ?? sorted[0];
-  const onKey = layer.keyframes.length > 1 && sorted.some((k) => Math.abs(k.t - lt) < 1 / 60);
+  const cur = sorted[curIdx] ?? sorted[0];
+  const onKey = onIdx >= 0;
+  const now = () => useEditor.getState().time;
   const P = (patch: Record<string, unknown>) => ops.updateLayerProps(layer.id, patch);
 
   return (
@@ -611,7 +616,7 @@ function LayerInspector({ layer }: { layer: Layer }) {
               value={Math.round(cur.x * 1000) / 10}
               step={0.5}
               unit="%"
-              onChange={(v) => v != null && ops.setLayerTransform(layer.id, time, { x: v / 100 })}
+              onChange={(v) => v != null && ops.setLayerTransform(layer.id, now(), { x: v / 100 })}
             />
           </Row>
           <Row label="Y">
@@ -620,7 +625,7 @@ function LayerInspector({ layer }: { layer: Layer }) {
               value={Math.round(cur.y * 1000) / 10}
               step={0.5}
               unit="%"
-              onChange={(v) => v != null && ops.setLayerTransform(layer.id, time, { y: v / 100 })}
+              onChange={(v) => v != null && ops.setLayerTransform(layer.id, now(), { y: v / 100 })}
             />
           </Row>
           <Row label={t.layers.scale}>
@@ -630,7 +635,7 @@ function LayerInspector({ layer }: { layer: Layer }) {
               min={5}
               max={2000}
               unit="%"
-              onChange={(v) => v != null && ops.setLayerTransform(layer.id, time, { scale: v / 100 })}
+              onChange={(v) => v != null && ops.setLayerTransform(layer.id, now(), { scale: v / 100 })}
             />
           </Row>
           <Row label={t.layers.rotation}>
@@ -640,12 +645,12 @@ function LayerInspector({ layer }: { layer: Layer }) {
               min={-3600}
               max={3600}
               unit="°"
-              onChange={(v) => v != null && ops.setLayerTransform(layer.id, time, { rotation: v })}
+              onChange={(v) => v != null && ops.setLayerTransform(layer.id, now(), { rotation: v })}
             />
           </Row>
         </div>
         <Row label={t.layers.opacity} value={`${Math.round(cur.opacity * 100)} %`}>
-          <Slider label={t.layers.opacity} value={cur.opacity} onChange={(v) => ops.setLayerTransform(layer.id, time, { opacity: v }, 'opacity')} />
+          <Slider label={t.layers.opacity} value={cur.opacity} onChange={(v) => ops.setLayerTransform(layer.id, now(), { opacity: v }, 'opacity')} />
         </Row>
         <div className="flex items-center gap-1">
           {(
@@ -659,7 +664,7 @@ function LayerInspector({ layer }: { layer: Layer }) {
             ] as const
           ).map(([how, Icon, label]) => (
             <Tooltip key={how} label={label}>
-              <Button size="iconSm" variant="ghost" aria-label={label} onClick={() => alignOne(layer, how, time)}>
+              <Button size="iconSm" variant="ghost" aria-label={label} onClick={() => alignOne(layer, how, now())}>
                 <Icon />
               </Button>
             </Tooltip>
@@ -670,7 +675,7 @@ function LayerInspector({ layer }: { layer: Layer }) {
       <Section
         title={t.layers.keyframes}
         action={
-          <Button size="sm" variant="link" disabled={onKey} onClick={() => ops.addKeyframe(layer.id, time)}>
+          <Button size="sm" variant="link" disabled={onKey} onClick={() => ops.addKeyframe(layer.id, now())}>
             <Diamond className="size-3.5" />
             {t.layers.addKeyframe}
           </Button>
@@ -679,10 +684,7 @@ function LayerInspector({ layer }: { layer: Layer }) {
         {layer.keyframes.length < 2 ? <p className="text-[12px] text-fg-muted">{t.layers.keyframeHint}</p> : null}
         <ul className="flex flex-col gap-1.5">
           {sorted.map((k, i) => (
-            <li
-              key={`${k.t}-${i}`}
-              className={cn('flex items-center gap-2 rounded-sm px-1.5 py-1 text-[12px]', Math.abs(k.t - lt) < 1 / 60 && 'bg-red-500/10')}
-            >
+            <li key={`${k.t}-${i}`} className={cn('flex items-center gap-2 rounded-sm px-1.5 py-1 text-[12px]', k === sorted[onIdx] && 'bg-red-500/10')}>
               <button
                 type="button"
                 className="tabular w-14 text-left font-medium hover:text-accent-fg"
@@ -763,6 +765,17 @@ function LayerInspector({ layer }: { layer: Layer }) {
       </Section>
     </div>
   );
+});
+
+/** "index of the keyframe in effect:index of the keyframe under the playhead (-1: none)" in time
+ *  order – a primitive, so the inspector re-renders only when it changes, not on every tick. */
+export function layerKeyState(layer: Layer, time: number): string {
+  const lt = time - layer.start;
+  const sorted = [...layer.keyframes].sort((a, b) => a.t - b.t);
+  let idx = 0;
+  for (let i = 0; i < sorted.length; i++) if (sorted[i].t <= lt + 1e-6) idx = i;
+  const on = layer.keyframes.length > 1 ? sorted.findIndex((k) => Math.abs(k.t - lt) < 1 / 60) : -1;
+  return `${idx}:${on}`;
 }
 
 function alignOne(layer: Layer, how: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom', time: number) {
@@ -777,23 +790,23 @@ function alignOne(layer: Layer, how: 'left' | 'center' | 'right' | 'top' | 'midd
 
 function MultiLayerInspector({ ids }: { ids: string[] }) {
   const { t } = useI18n();
-  const time = useEditor((s) => s.time);
+  const time = () => useEditor.getState().time;
   return (
     <div>
       <Section title={`${ids.length} ${t.layers.title.toLowerCase()}`}>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="secondary" onClick={() => ops.alignLayers(ids, 'center', {}, time)}>
+          <Button size="sm" variant="secondary" onClick={() => ops.alignLayers(ids, 'center', {}, time())}>
             <AlignCenterVertical />
             {t.layers.alignCenter}
           </Button>
-          <Button size="sm" variant="secondary" onClick={() => ops.alignLayers(ids, 'middle', {}, time)}>
+          <Button size="sm" variant="secondary" onClick={() => ops.alignLayers(ids, 'middle', {}, time())}>
             <AlignCenterHorizontal />
             {t.layers.alignMiddle}
           </Button>
-          <Button size="sm" variant="secondary" disabled={ids.length < 3} onClick={() => ops.distributeLayers(ids, 'x', time)}>
+          <Button size="sm" variant="secondary" disabled={ids.length < 3} onClick={() => ops.distributeLayers(ids, 'x', time())}>
             {t.layers.distributeH}
           </Button>
-          <Button size="sm" variant="secondary" disabled={ids.length < 3} onClick={() => ops.distributeLayers(ids, 'y', time)}>
+          <Button size="sm" variant="secondary" disabled={ids.length < 3} onClick={() => ops.distributeLayers(ids, 'y', time())}>
             {t.layers.distributeV}
           </Button>
         </div>
@@ -1181,7 +1194,7 @@ function FontRow({ font, weight, onChange }: { font: FontId; weight?: number; on
 // ---------------------------------------------------------------------------------------------
 // Clips, music, project
 
-function ClipInspector({ id }: { id: string }) {
+const ClipInspector = memo(function ClipInspector({ id }: { id: string }) {
   const { t } = useI18n();
   const clip = useEditor((s) => s.doc.clips.find((c) => c.id === id));
   const count = useEditor((s) => s.doc.clips.length);
@@ -1232,9 +1245,9 @@ function ClipInspector({ id }: { id: string }) {
       </Section>
     </div>
   );
-}
+});
 
-function AudioInspector({ id }: { id: string }) {
+const AudioInspector = memo(function AudioInspector({ id }: { id: string }) {
   const { t } = useI18n();
   const a = useEditor((s) => s.doc.audioTracks.find((x) => x.id === id));
   if (!a) return null;
@@ -1276,14 +1289,19 @@ function AudioInspector({ id }: { id: string }) {
       </Button>
     </Section>
   );
+});
+
+/** The playhead in seconds, rounded – its own component so ticks re-render only this text. */
+function PlayheadSeconds() {
+  const s = useEditor((st) => Math.round(st.time * 10) / 10);
+  return <>{s.toFixed(1)}</>;
 }
 
-function ProjectInspector() {
+const ProjectInspector = memo(function ProjectInspector() {
   const { t, locale } = useI18n();
   const format = useEditor((s) => s.doc.format);
   const audio = useEditor((s) => s.doc.audio);
   const units = useEditor((s) => s.doc.units);
-  const time = useEditor((s) => s.time);
   const hasClip = useEditor((s) => !!clipAt(s.doc.clips, s.time));
   const tool = useEditor((s) => s.tool);
   return (
@@ -1357,7 +1375,7 @@ function ProjectInspector() {
             </div>
             {format.reframe.keyframes.length ? (
               <p className="tabular text-[12px] text-fg-subtle">
-                {format.reframe.keyframes.length} keyframes · {time.toFixed(1)} s
+                {format.reframe.keyframes.length} keyframes · <PlayheadSeconds /> s
               </p>
             ) : null}
           </>
@@ -1389,4 +1407,4 @@ function ProjectInspector() {
       </Section>
     </div>
   );
-}
+});

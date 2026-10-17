@@ -5,6 +5,7 @@ import { demoProject, roundProject, stable, withStableIds } from './fixtures';
 
 // Recorded from the editor's generators before they moved here (apps/web/src/editor/generate.ts
 // and shorts.ts at bc92ba8), with the same deterministic ids: the move must not change a byte.
+// Since then: shorter tails after the landing for shots without a clean window (clean.ts).
 const golden = JSON.parse(readFileSync(new URL('./fixtures/golden.json', import.meta.url), 'utf8'));
 const NAMES = {
   text: 'Text',

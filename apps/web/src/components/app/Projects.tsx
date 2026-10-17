@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, Copy, Film, MoreHorizontal, Pencil, Play, Plus, Sparkles, Trash2, UploadCloud } from 'lucide-react';
+import { AlertTriangle, Copy, Film, MoreHorizontal, Pencil, Play, Sparkles, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -13,6 +13,7 @@ import { Badge, ProgressBar, Skeleton } from '@/components/ui/misc';
 import { toast } from '@/components/ui/toast';
 import { api, errorMessage } from '@/lib/api';
 import { useJobEvents, type JobInfo } from '@/lib/events';
+import { jobMessage } from '@/lib/jobMessage';
 import { bytes, duration, relativeTime } from '@/lib/format';
 import { useI18n } from '@/lib/i18n/client';
 import { useMe } from '@/lib/me';
@@ -89,8 +90,8 @@ export function ProjectsPage() {
           const res = await uploadFile(file, { kind: 'video' });
           if (res.projectId) void load();
           if (vids.length === 1 && res.projectId) router.push(`/app/projects/${res.projectId}`);
-        } catch (e) {
-          toast.error(t.upload.failed, errorMessage(e, t));
+        } catch {
+          // The upload tray shows what went wrong, with the file's name.
         }
       }),
     );
@@ -120,8 +121,8 @@ export function ProjectsPage() {
             opened = true;
             router.push(`/app/projects/${p.id}`);
           }
-        } catch (e) {
-          toast.error(t.upload.failed, errorMessage(e, t));
+        } catch {
+          // Shown in the upload tray, which follows into the editor.
         }
       }),
     );
@@ -130,7 +131,7 @@ export function ProjectsPage() {
   async function demo() {
     setDemoBusy(true);
     try {
-      const p = await api<ProjectSummary>('/projects/demo', { method: 'POST' });
+      const p = await api<ProjectSummary>(`/projects/demo?locale=${locale}`, { method: 'POST' });
       router.push(`/app/projects/${p.id}`);
     } catch (e) {
       toast.error(errorMessage(e, t));
@@ -161,14 +162,19 @@ export function ProjectsPage() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-[-0.02em]">{t.projects.title}</h1>
         <div className="flex gap-2">
-          <Button variant="secondary" onClick={demo} loading={demoBusy}>
-            <Sparkles />
-            {t.projects.tryDemo}
-          </Button>
-          <Button variant="primary" onClick={() => fileInput.current?.click()}>
-            <Plus />
-            {t.projects.newVideo}
-          </Button>
+          {projects?.length ? (
+            <Button variant="secondary" onClick={demo} loading={demoBusy}>
+              <Sparkles />
+              {t.projects.tryDemo}
+            </Button>
+          ) : null}
+          {/* With no projects the empty state below carries the same button, bigger. */}
+          {projects?.length !== 0 ? (
+            <Button variant="primary" onClick={() => fileInput.current?.click()}>
+              <UploadCloud />
+              {t.projects.newVideo}
+            </Button>
+          ) : null}
           <input
             ref={fileInput}
             type="file"
@@ -263,16 +269,34 @@ export function ProjectsPage() {
   );
 }
 
+/** The first thing a new user sees: what the app does in three steps, and the two ways to start. */
 function EmptyState({ onBrowse, onDemo, demoBusy }: { onBrowse: () => void; onDemo: () => void; demoBusy: boolean }) {
   const { t, f, locale } = useI18n();
   const me = useMe((s) => s.me);
   const [b1, b2] = t.projects.dropLead.split('{browse}');
   return (
-    <div className="mt-8 flex flex-col items-center rounded-lg border-2 border-dashed border-border-strong bg-bg-subtle px-6 py-16 text-center">
-      <Birdie mood="sleep" size={112} />
+    <div
+      className="mt-8 flex flex-col items-center rounded-lg border-2 border-dashed border-border-strong bg-bg-subtle px-6 py-12 text-center"
+      data-testid="projects-empty"
+    >
+      <Birdie mood="wave" size={96} />
       <h2 className="mt-4 text-xl font-semibold">{t.projects.emptyTitle}</h2>
-      <p className="mt-2 max-w-md text-sm text-fg-muted">{t.projects.emptyLead}</p>
-      <p className="mt-6 text-sm">
+      <p className="mt-2 text-sm text-fg-muted">{t.projects.emptyLead}</p>
+      <ol className="mt-4 grid max-w-3xl gap-3 text-left sm:grid-cols-3">
+        {t.projects.emptySteps.map((step, i) => (
+          <li key={i} className="flex gap-3 rounded-md border border-border bg-surface p-3 text-[13px] leading-snug">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent text-[12px] font-semibold text-white" aria-hidden>
+              {i + 1}
+            </span>
+            <span>{step}</span>
+          </li>
+        ))}
+      </ol>
+      <Button className="mt-6" variant="primary" size="lg" onClick={onBrowse}>
+        <UploadCloud />
+        {t.projects.pickVideos}
+      </Button>
+      <p className="mt-3 text-sm">
         {b1}
         <button type="button" onClick={onBrowse} className="font-medium text-accent-fg underline-offset-4 hover:underline">
           {t.projects.browse}
@@ -280,10 +304,13 @@ function EmptyState({ onBrowse, onDemo, demoBusy }: { onBrowse: () => void; onDe
         {b2}
       </p>
       {me ? <p className="mt-1 text-[12px] text-fg-subtle">{f(t.projects.formats, { size: bytes(me.limits.max_upload_bytes, locale) })}</p> : null}
-      <Button className="mt-6" variant="secondary" onClick={onDemo} loading={demoBusy}>
-        <Sparkles />
-        {t.projects.tryDemo}
-      </Button>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-sm text-fg-muted">
+        <span>{t.projects.orDemo}</span>
+        <Button variant="secondary" onClick={onDemo} loading={demoBusy}>
+          <Sparkles />
+          {t.projects.tryDemo}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -346,15 +373,20 @@ function ProjectCard({ p, onChanged }: { p: ProjectSummary; onChanged: () => voi
               {duration(p.duration)}
             </span>
           ) : null}
-          {p.isDemo ? (
-            <span className="absolute left-2 top-2">
-              <Badge>{t.projects.demoBadge}</Badge>
+          {p.isDemo || p.aspect === '16:9' || p.aspect === '9:16' ? (
+            <span className="absolute left-2 top-2 flex gap-1">
+              {p.isDemo ? <Badge>{t.projects.demoBadge}</Badge> : null}
+              {/* A made video (YouTube or a short) tells itself apart from the clips it came from. */}
+              {p.aspect === '16:9' || p.aspect === '9:16' ? <Badge>{p.aspect}</Badge> : null}
             </span>
           ) : null}
           {job ? (
             <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-gray-950/90 to-transparent p-3 pt-8">
-              <p className="text-[12px] font-medium text-white">{job.kind === 'ingest' ? t.projects.processing : t.projects.analyzing}</p>
-              <ProgressBar className="mt-1.5 bg-white/20" value={job.status === 'queued' ? null : job.progress} label={job.message} />
+              <p className="text-[12px] font-medium text-white">
+                {job.kind === 'ingest' ? t.projects.processing : t.projects.analyzing}
+                <span className="font-normal text-white/80"> {jobMessage(job.message, t)}</span>
+              </p>
+              <ProgressBar className="mt-1.5 bg-white/20" value={job.status === 'queued' ? null : job.progress} label={jobMessage(job.message, t)} />
             </div>
           ) : null}
           {p.failed ? (

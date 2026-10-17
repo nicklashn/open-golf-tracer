@@ -5,8 +5,8 @@
 import { TEMPLATES } from '@golf/render';
 import type { WarningCode } from '@golf/schema';
 import { compareShots, sameShotPairs, strikeGroups, type ShotMatch } from './match';
-import { puttQuestionId, REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type PuttMode, type ReasonCode } from './plan';
-import type { ClipSummary, RoundSummary, ShotSummary, StrokeSummary } from './summary';
+import { defaultPutts, puttQuestionId, REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type PuttMode, type ReasonCode } from './plan';
+import type { ClipSummary, HighlightTag, RoundSummary, ShotSummary, StrokeSummary } from './summary';
 
 type Locale = 'da' | 'en';
 
@@ -21,47 +21,102 @@ export interface Preference {
   kind: PlanKind | null;
   /** "only good shots": doubtful shots and retakes default to being left out. */
   goodOnly: boolean;
+  /** "the best shots": only the highlights (see `highlightScore`) are kept. */
+  best: boolean;
   template: string | null;
   title: string | null;
   /** Which putts to show, when the wish says. */
   putts: PuttMode | null;
 }
 
-const has = (text: string, words: string[]) => words.some((w) => text.includes(w));
+/** One thing the rules understood in the wish, for the apps to show as a chip. */
+export type PreferenceChip =
+  | { key: 'kind'; value: PlanKind }
+  | { key: 'goodOnly' }
+  | { key: 'best' }
+  | { key: 'template'; value: string }
+  | { key: 'putts'; value: PuttMode }
+  | { key: 'title'; value: string };
+
+const KINDS: [PlanKind, string[]][] = [
+  ['shorts', ['hvert slag', 'hver slag', 'each shot', 'every shot', 'per shot', 'pr. slag', 'per slag', 'one short per', 'en short per']],
+  ['highlight', ['short', 'reel', 'tiktok', 'lodret', 'vertical', 'portrait', 'highlight', 'stående', '9:16']],
+  ['youtube', ['youtube', 'hele runden', 'whole round', 'full round', 'lang video', 'long video', 'vandret', 'landscape', '16:9']],
+];
+const GOOD = ['kun gode slag', 'kun de gode slag', 'kun gode', 'kun de gode', 'only good shots', 'only the good shots', 'only good', 'only the good'];
+const BEST = ['best shots', 'bedste slag', 'de bedste', 'only the best', 'kun de bedste', 'highlights', 'top shots'];
+const TEMPLATE_WORDS: [string, string[]][] = [
+  ['minimal', ['rolig', 'enkel', 'minimal', 'calm', 'simple', 'clean', 'diskret', 'subtle']],
+  ['tv', [' tv', 'tv-', 'broadcast', 'fjernsyn']],
+  ['neon', ['neon']],
+  ['holeInOne', ['hole in one', 'hole-in-one']],
+];
+const PUTT_WORDS: [PuttMode, string[]][] = [
+  ['none', ['uden putt', 'ingen putt', 'no putt', 'without putt', 'skip putt', 'skip the putt', 'uden putning', 'no putting', 'without putting']],
+  [
+    'holed',
+    ['putts der går i', 'putt der går i', 'putts, der går i', 'putts i hul', 'holed putt', 'putts that drop', 'putts that go in', 'putts that went in'],
+  ],
+  ['all', ['alle putts', 'all putts', 'all the putts', 'med putts', 'with putts', 'include putts', 'hele putningen', 'every putt']],
+];
+/** Small words that carry no wish of their own (Danish and English). */
+const FILLER = new Set(
+  (
+    'a an the of and or with for to in on at by my me i want would like please make some it is be just also so that this from as ' +
+    'video film clip clips round golf golfrunde og en et af med til fra i på min mit mine mig lav laver gerne jeg vil have den det de der som kan ' +
+    'du venligst tak runde runden runder også bare så om lidt være skal meget stil style look'
+  ).split(' '),
+);
+
+/**
+ * The wish read with plain keywords (Danish and English), with what was understood and the
+ * words that were not (shown to the user before the video is made when there is no AI).
+ */
+export function explainPreference(text: string): { preference: Preference; understood: PreferenceChip[]; unknown: string[] } {
+  const t = ` ${text.toLocaleLowerCase()} `;
+  const covered: [number, number][] = [];
+  const has = (words: string[]) => {
+    let hit = false;
+    for (const w of words)
+      for (let i = t.indexOf(w); i >= 0; i = t.indexOf(w, i + 1)) {
+        covered.push([i, i + w.length]);
+        hit = true;
+      }
+    return hit;
+  };
+  const first = <T>(lists: [T, string[]][]): T | null => lists.map(([v, w]) => (has(w) ? v : null)).find((v) => v !== null) ?? null;
+  const kind = first(KINDS);
+  const good = has(GOOD);
+  const best = has(BEST);
+  const template = first(TEMPLATE_WORDS);
+  const putts = first(PUTT_WORDS);
+  const quoted = text.match(/["“”«]([^"“”»]{2,120})["“”»]/);
+  if (quoted?.index !== undefined) covered.push([quoted.index + 1, quoted.index + 1 + quoted[0].length]);
+  const preference: Preference = { kind, goodOnly: good || best, best, template, title: quoted ? quoted[1].trim() : null, putts };
+
+  const understood: PreferenceChip[] = [];
+  if (kind) understood.push({ key: 'kind', value: kind });
+  if (best) understood.push({ key: 'best' });
+  else if (good) understood.push({ key: 'goodOnly' });
+  if (template) understood.push({ key: 'template', value: template });
+  if (putts) understood.push({ key: 'putts', value: putts });
+  if (preference.title) understood.push({ key: 'title', value: preference.title });
+
+  const unknown: string[] = [];
+  for (const m of t.matchAll(/[\p{L}\p{N}][\p{L}\p{N}'’:-]*/gu)) {
+    const a = m.index;
+    const b = a + m[0].length;
+    if (covered.some(([x, y]) => a < y && b > x)) continue;
+    const w = m[0].replace(/[-'’:]+$/, '');
+    if (w.length < 2 || FILLER.has(w) || unknown.includes(w)) continue;
+    unknown.push(w);
+  }
+  return { preference, understood, unknown: unknown.slice(0, 20) };
+}
 
 /** Reads the free-text preference with plain keywords; anything not recognised keeps the default. */
 export function readPreference(text: string): Preference {
-  const t = ` ${text.toLocaleLowerCase()} `;
-  let kind: PlanKind | null = null;
-  if (has(t, ['hvert slag', 'hver slag', 'each shot', 'every shot', 'per shot', 'pr. slag', 'per slag', 'one short per', 'en short per'])) kind = 'shorts';
-  else if (has(t, ['short', 'reel', 'tiktok', 'lodret', 'vertical', 'portrait', 'highlight', 'stående', '9:16'])) kind = 'highlight';
-  else if (has(t, ['youtube', 'hele runden', 'whole round', 'full round', 'lang video', 'long video', 'vandret', 'landscape', '16:9'])) kind = 'youtube';
-  const goodOnly = has(t, [
-    'kun gode',
-    'kun de gode',
-    'only good',
-    'only the good',
-    'best shots',
-    'bedste slag',
-    'de bedste',
-    'only the best',
-    'kun de bedste',
-  ]);
-  let template: string | null = null;
-  if (has(t, ['rolig', 'enkel', 'minimal', 'calm', 'simple', 'clean', 'diskret', 'subtle'])) template = 'minimal';
-  else if (has(t, [' tv', 'tv-', 'broadcast', 'fjernsyn'])) template = 'tv';
-  else if (has(t, ['neon'])) template = 'neon';
-  else if (has(t, ['hole in one', 'hole-in-one'])) template = 'holeInOne';
-  let putts: PuttMode | null = null;
-  if (has(t, ['uden putt', 'ingen putt', 'no putt', 'without putt', 'skip putt', 'skip the putt', 'uden putning', 'no putting', 'without putting']))
-    putts = 'none';
-  else if (
-    has(t, ['putts der går i', 'putt der går i', 'putts, der går i', 'putts i hul', 'holed putt', 'putts that drop', 'putts that go in', 'putts that went in'])
-  )
-    putts = 'holed';
-  else if (has(t, ['alle putts', 'all putts', 'all the putts', 'med putts', 'with putts', 'include putts', 'hele putningen', 'every putt'])) putts = 'all';
-  const quoted = text.match(/["“”«]([^"“”»]{2,120})["“”»]/);
-  return { kind, goodOnly, template, title: quoted ? quoted[1].trim() : null, putts };
+  return explainPreference(text).preference;
 }
 
 const L = {
@@ -121,6 +176,9 @@ const L = {
     puttN: (n: number) => `${n === 4 ? '4+' : n} ${n === 1 ? 'putt' : 'putts'}, i hul`,
     notHoled: 'Ikke i hul / ikke filmet til ende',
     at: (n: number, time: string) => `Klip ${n} · ${time}`,
+    longest: (m: number) => `Dagens længste: ${m} m`,
+    close: 'Indspil tæt på',
+    bestOnly: (n: number, of: number) => `Kun de bedste slag: ${n} af ${of} (birdies, længste slag og tætte indspil først).`,
   },
   en: {
     hole: (h: string) => `hole ${h}`,
@@ -178,6 +236,9 @@ const L = {
     puttN: (n: number) => `${n === 4 ? '4+' : n} ${n === 1 ? 'putt' : 'putts'}, holed`,
     notHoled: 'Not holed / not filmed to the end',
     at: (n: number, time: string) => `Clip ${n} · ${time}`,
+    longest: (m: number) => `Longest of the day: ${m} m`,
+    close: 'Close approach',
+    bestOnly: (n: number, of: number) => `Only the best shots: ${n} of ${of} (birdies, the longest shot and close approaches first).`,
   },
 };
 
@@ -218,6 +279,34 @@ export function itemPlace(item: Pick<PlanItem, 'clip' | 't'>, locale: Locale = '
 /** A rough quality score for "only the best": confident, tracked shots win. */
 export function shotScore(s: ShotSummary): number {
   return s.confidence - (isDoubtful(s) ? 1 : 0) - s.flags.length * 0.05;
+}
+
+/** What each highlight adds to a shot's rank for "the best shots" (see summary.ts tagHighlights). */
+export const TAG_BONUS: Record<HighlightTag, number> = { eagle: 3, birdie: 2, longest: 1.5, close: 1.5, long_putt: 1.5 };
+/** Shots kept for "the best shots" besides every tagged one. */
+export const BEST_N = 6;
+
+/** Golf quality first (eagle, birdie, longest, close approach), then the analysis' confidence. */
+export function highlightScore(s: ShotSummary): number {
+  return shotScore(s) + (s.tags ?? []).reduce((n, t) => n + TAG_BONUS[t], 0);
+}
+
+/** The best shots of a round: every tagged, undoubted one, filled up to BEST_N by `highlightScore`. */
+export function bestShots(shots: ShotSummary[]): ShotSummary[] {
+  const ranked = shots.filter((x) => !isDoubtful(x)).sort((a, b) => highlightScore(b) - highlightScore(a));
+  const tagged = ranked.filter((x) => x.tags?.length);
+  const keep = new Set([...tagged, ...ranked.slice(0, Math.max(0, BEST_N - tagged.length))]);
+  return shots.filter((x) => keep.has(x));
+}
+
+/** A line for the shots worth a word: the longest measured carry, a close approach. */
+export function highlightTexts(shots: ShotSummary[], locale: Locale): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const x of shots) {
+    if (x.tags?.includes('longest') && x.carryM !== null) out[x.id] = L[locale].longest(x.carryM);
+    else if (x.tags?.includes('close')) out[x.id] = L[locale].close;
+  }
+  return out;
 }
 
 /** The better angle of one strike: a confident, long track, filmed the way the video is shown. */
@@ -427,8 +516,9 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
   //   id `putts:<hole>`; options '1', '2', '3' = that many putts, the last holed; '4' = four or
   //   more, the last holed; 'notHoled' = the last did not drop (or was not filmed to the end).
   // The answer sets the hole's score and the putts shown (the last N of those found).
+  // Asked for the YouTube video's score, and wherever putts are shown (shorts show none by default).
   const putts = pref.putts ?? null;
-  if (kind === 'youtube' || putts !== 'none')
+  if (kind === 'youtube' || (putts ?? defaultPutts(kind)) !== 'none')
     for (const h of s.holes) {
       if (!h.puttsUnsure) continue;
       const list = s.putts.filter((p) => p.hole === h.hole);
@@ -445,11 +535,21 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
     }
 
   const template = pref.template && templatesFor().includes(pref.template) ? pref.template : null;
+  let included = s.shots.filter((x) => !dropped.has(x.id));
+  if (pref.best && included.length > BEST_N) {
+    const kept = bestShots(included);
+    if (kept.length && kept.length < included.length) {
+      notes.push(T.bestOnly(kept.length, included.length));
+      included = kept;
+    }
+  }
+  const texts = highlightTexts(included, locale);
   return VideoPlan.parse({
     kind,
     template,
     ...(putts ? { putts } : {}),
-    includeShotIds: s.shots.filter((x) => !dropped.has(x.id)).map((x) => x.id),
+    includeShotIds: included.map((x) => x.id),
+    ...(Object.keys(texts).length ? { shotTexts: texts } : {}),
     title: pref.title ?? defaultTitle(s, locale),
     questions: questions.slice(0, 12),
     notes: notes.slice(0, 10).map((n) => n.slice(0, 300)),

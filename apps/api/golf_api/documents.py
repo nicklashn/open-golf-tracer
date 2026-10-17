@@ -17,7 +17,7 @@ from .models import Media, Project
 SCHEMA_VERSION = 1
 MAX_DOC_BYTES = 5 * 1024 * 1024
 SHOT_KEYS = {"id", "mediaId", "source", "kind", "impactTime", "confidence", "warnings", "camera", "anchor", "track", "params",
-             "rmsPx", "auto", "constraints", "timing", "slowmo", "club", "style", "visible", "label", "sound", "putt"}
+             "rmsPx", "auto", "constraints", "timing", "slowmo", "club", "style", "visible", "label", "sound", "putt", "clean"}
 
 
 @functools.cache

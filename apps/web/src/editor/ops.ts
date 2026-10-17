@@ -27,7 +27,8 @@ import {
 import type { Draft } from 'immer';
 import { courseMapGeometry, haversine, type CourseData } from './course';
 import { refitter } from './refit';
-import { useEditor, type MediaInfo } from './store';
+import { rippleLinked, timelineRemap } from './ripple';
+import { useEditor, type MediaInfo, type Selection } from './store';
 
 const E = () => useEditor.getState();
 
@@ -215,6 +216,7 @@ export function setFill(fill: 'crop' | 'blur') {
  * the server).
  */
 export function attachVideo(m: MediaInfo) {
+  const base = E().doc;
   E().silently((d) => {
     if (d.media[m.id]) return;
     d.media[m.id] = {
@@ -234,6 +236,8 @@ export function attachVideo(m: MediaInfo) {
     };
     const clip = { id: newId('c_'), kind: 'video' as const, mediaId: m.id, in: 0, out: m.duration, speed: 1, volume: 1, muted: false };
     d.clips.splice(clipSlot(d, m.id), 0, clip as Draft<Clip>);
+    // Graphics of the clips after it move along.
+    rippleLinked(base, d);
   });
 }
 
@@ -336,53 +340,96 @@ export function handlesFor(shot: Shot) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Clips (main track is always sequential: removing a clip ripples the rest)
+// Clips. The main track is always sequential: removing or shortening a clip ripples the rest,
+// and graphics, music and crop keyframes move with the picture they belong to (rippleLinked).
 
-function clipIndexAt(doc: Project, t: number) {
-  const hit = clipAt(doc.clips, t);
-  return hit ? { hit, i: hit.index, start: clipStarts(doc.clips)[hit.index] } : null;
+/**
+ * One undoable change to the main track. `base` is the document the linked items are computed
+ * from (the drag's start for drags, else the current one); the playhead follows its picture
+ * unless the caller drives it (`keepTime`, e.g. the live trim preview).
+ */
+function editTimeline(
+  label: string,
+  recipe: (d: Draft<Project>) => void,
+  opts: { key?: string; select?: Selection; base?: Project; dropInside?: boolean; keepTime?: boolean } = {},
+) {
+  const base = opts.base ?? E().doc;
+  const before = E().doc.clips;
+  E().edit(
+    label,
+    (d) => {
+      recipe(d);
+      rippleLinked(base, d, { dropInside: opts.dropInside });
+    },
+    { key: opts.key, select: opts.select },
+  );
+  const after = E().doc.clips;
+  if (opts.keepTime || after === before) return;
+  const map = timelineRemap(before, after);
+  const s = E();
+  s.set({ inPoint: s.inPoint == null ? null : map(s.inPoint), outPoint: s.outPoint == null ? null : map(s.outPoint, true) });
+  s.setTime(map(s.time));
+}
+
+/** Cuts the clip under timeline time t in two; returns the index of the clip that starts at t. */
+function cutDraft(d: Draft<Project>, t: number, minLen = 0.05): number | null {
+  const hit = clipAt(d.clips as Clip[], t);
+  if (!hit) return null;
+  const start = clipStarts(d.clips as Clip[])[hit.index];
+  const local = t - start;
+  const dur = clipDuration(hit.clip);
+  if (local < minLen) return hit.index;
+  if (dur - local < minLen) return hit.index + 1;
+  const c = d.clips[hit.index];
+  if (c.kind === 'video') {
+    const cut = c.in + local * c.speed;
+    d.clips.splice(hit.index + 1, 0, { ...c, id: newId('c_'), in: cut });
+    c.out = cut;
+  } else {
+    d.clips.splice(hit.index + 1, 0, { ...c, id: newId('c_'), duration: dur - local });
+    c.duration = local;
+  }
+  return hit.index + 1;
 }
 
 export function splitAt(t: number): boolean {
   const doc = E().doc;
-  const c = clipIndexAt(doc, t);
-  if (!c) return false;
-  const { hit, i, start } = c;
-  const local = t - start;
-  const d = clipDuration(hit.clip);
-  if (local < 0.05 || d - local < 0.05) return false;
-  E().edit('Cut', (draft) => {
-    const clip = draft.clips[i];
-    if (clip.kind === 'video') {
-      const cut = clip.in + local * clip.speed;
-      const second = { ...clip, id: newId('c_'), in: cut };
-      clip.out = cut;
-      draft.clips.splice(i + 1, 0, second);
-    } else {
-      const second = { ...clip, id: newId('c_'), duration: d - local };
-      clip.duration = local;
-      draft.clips.splice(i + 1, 0, second);
-    }
+  const hit = clipAt(doc.clips, t);
+  if (!hit) return false;
+  const local = t - clipStarts(doc.clips)[hit.index];
+  if (local < 0.05 || clipDuration(hit.clip) - local < 0.05) return false;
+  E().edit('Cut', (d) => {
+    cutDraft(d, t);
   });
   return true;
 }
 
-export function deleteClip(id: string) {
+/** Ripple delete: the clips go, everything after closes the gap. One clip always stays. */
+export function deleteClips(ids: string[]): boolean {
   const doc = E().doc;
-  if (doc.clips.length <= 1) return;
-  E().edit(
-    'Delete clip',
+  const keep = doc.clips.filter((c) => !ids.includes(c.id));
+  if (!keep.length || keep.length === doc.clips.length) return false;
+  editTimeline(
+    ids.length > 1 ? 'Delete clips' : 'Delete clip',
     (d) => {
-      d.clips = d.clips.filter((c) => c.id !== id);
+      d.clips = d.clips.filter((c) => !ids.includes(c.id));
     },
-    { select: null },
+    { select: null, dropInside: true },
   );
-  E().setTime(Math.min(E().time, timelineDuration(E().doc)));
+  return true;
 }
 
-export function trimClip(id: string, edge: 'in' | 'out', sourceTime: number, key = 'trim') {
+export function deleteClip(id: string) {
+  deleteClips([id]);
+}
+
+/**
+ * Trims a video clip's edge to a source time. During a drag, pass the document from the drag's
+ * start as `base` (linked items are placed from it) and `keepTime` (the caller shows the edge).
+ */
+export function trimClip(id: string, edge: 'in' | 'out', sourceTime: number, key = 'trim', drag?: { base: Project }) {
   const media = E().media;
-  E().edit(
+  editTimeline(
     'Trim',
     (d) => {
       const c = d.clips.find((x) => x.id === id);
@@ -391,23 +438,42 @@ export function trimClip(id: string, edge: 'in' | 'out', sourceTime: number, key
       if (edge === 'in') c.in = Math.max(0, Math.min(sourceTime, c.out - 0.1));
       else c.out = Math.min(dur, Math.max(sourceTime, c.in + 0.1));
     },
-    { key: `${key}:${id}:${edge}` },
+    { key: `${key}:${id}:${edge}`, base: drag?.base, keepTime: !!drag },
   );
 }
 
-export function setFreezeDuration(id: string, duration: number) {
-  E().edit(
+/**
+ * Ripple trim to the playhead (Q / W): drops the part of the clip under the playhead before it
+ * (start) or after it (end).
+ */
+export function trimToPlayhead(edge: 'start' | 'end'): boolean {
+  const { doc, time } = E();
+  const hit = clipAt(doc.clips, time);
+  if (!hit) return false;
+  const start = clipStarts(doc.clips)[hit.index];
+  const local = time - start;
+  const dur = clipDuration(hit.clip);
+  if (local < 0.05 || dur - local < 0.05) return false;
+  const c = hit.clip;
+  if (c.kind === 'video') trimClip(c.id, edge === 'start' ? 'in' : 'out', hit.sourceTime, 'trim-playhead');
+  else if (edge === 'end') setFreezeDuration(c.id, local);
+  else setFreezeDuration(c.id, dur - local);
+  return true;
+}
+
+export function setFreezeDuration(id: string, duration: number, drag?: { base: Project }) {
+  editTimeline(
     'Freeze length',
     (d) => {
       const c = d.clips.find((x) => x.id === id);
       if (c?.kind === 'freeze') c.duration = Math.max(0.1, Math.min(60, duration));
     },
-    { key: `freeze:${id}` },
+    { key: `freeze:${id}`, base: drag?.base, keepTime: !!drag },
   );
 }
 
 export function setClipProps(id: string, patch: Partial<{ speed: number; volume: number; muted: boolean }>, key = 'clip') {
-  E().edit(
+  editTimeline(
     'Cut',
     (d) => {
       const c = d.clips.find((x) => x.id === id);
@@ -417,11 +483,14 @@ export function setClipProps(id: string, patch: Partial<{ speed: number; volume:
   );
 }
 
+/** Moves a clip to another place in the order; its graphics go with it. */
 export function moveClip(from: number, to: number) {
-  if (from === to) return;
-  E().edit('Move clip', (d) => {
+  const n = E().doc.clips.length;
+  const dest = Math.max(0, Math.min(n - 1, to));
+  if (from === dest || from < 0 || from >= n) return;
+  editTimeline('Move clip', (d) => {
     const [c] = d.clips.splice(from, 1);
-    d.clips.splice(Math.max(0, Math.min(d.clips.length, to)), 0, c);
+    d.clips.splice(dest, 0, c);
   });
 }
 
@@ -435,22 +504,13 @@ export function slowmoAroundShot(shot: Shot, speed = 0.4) {
   const after = Math.min(1.6, (st?.flightTimeS ?? 3) * shot.slowmo * 0.35);
   const a = Math.max(0, launch - before);
   const b = launch + after;
-  E().edit('Slow-mo around the shot', (d) => {
-    // Operate on source times so the edit is independent of existing splits.
-    const cutAt = (t: number) => {
+  editTimeline('Slow-mo around the shot', (d) => {
+    const at = (t: number) => {
       const hit = clipAt(d.clips as Clip[], t);
-      if (!hit || hit.clip.kind !== 'video') return;
-      const start = clipStarts(d.clips as Clip[])[hit.index];
-      const local = t - start;
-      if (local < 0.02 || clipDuration(hit.clip) - local < 0.02) return;
-      const c = d.clips[hit.index];
-      if (c.kind !== 'video') return;
-      const cut = c.in + local * c.speed;
-      d.clips.splice(hit.index + 1, 0, { ...c, id: newId('c_'), in: cut });
-      c.out = cut;
+      return hit && hit.clip.kind === 'video' ? cutDraft(d, t, 0.02) : null;
     };
-    cutAt(b);
-    cutAt(a);
+    at(b);
+    at(a);
     const mid = clipAt(d.clips as Clip[], a + 0.01);
     if (mid && mid.clip.kind === 'video') {
       const c = d.clips[mid.index];
@@ -460,17 +520,33 @@ export function slowmoAroundShot(shot: Shot, speed = 0.4) {
   return true;
 }
 
-/** Freeze frame at the playhead (the tracer keeps flying over the frozen picture). */
+/** Freeze frame at the playhead (the tracer keeps flying over the frozen picture). One undo step. */
 export function freezeAt(t: number, duration = 2) {
   const doc = E().doc;
   const hit = clipAt(doc.clips, t);
   if (!hit) return;
-  splitAt(t);
-  const after = E().doc;
-  const idx = clipAt(after.clips, t + 1e-3)?.index ?? hit.index + 1;
-  E().edit('Freeze frame', (d) => {
+  editTimeline('Freeze frame', (d) => {
+    const idx = cutDraft(d, t) ?? hit.index + 1;
     d.clips.splice(idx, 0, { id: newId('c_'), kind: 'freeze', mediaId: hit.clip.mediaId, at: hit.sourceTime, duration });
   });
+}
+
+/** Shifts layers in time (Alt+arrows), keeping their length. */
+export function shiftLayers(ids: string[], dt: number) {
+  const dur = timelineDuration(E().doc);
+  E().edit(
+    'Move layer',
+    (d) => {
+      for (const l of d.layers) {
+        if (!ids.includes(l.id) || l.locked) continue;
+        const len = l.end - l.start;
+        const s = Math.max(0, Math.min(dur - Math.min(len, dur), l.start + dt));
+        l.start = s;
+        l.end = s + len;
+      }
+    },
+    { key: `shift:${ids.join(',')}` },
+  );
 }
 
 // ---------------------------------------------------------------------------------------------

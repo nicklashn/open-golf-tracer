@@ -11,7 +11,7 @@ import { holeScores } from './score';
 import { puttShort, shortFor } from './shorts';
 import { byHole, roundMedia } from './chronology';
 import { clipOrder, summarize } from './summary';
-import { highlightShort, playedShots, shownPutts, youtubeVideo } from './videos';
+import { highlightShort, playedShots, shownPutts, unsurePuttHoles, youtubeVideo } from './videos';
 
 type Locale = 'da' | 'en';
 
@@ -28,10 +28,16 @@ export interface ComposeOptions {
 /**
  * The project as the plan and answers want it before a generator runs: shots left out are
  * hidden (per-shot choices win over a question's answer), clips are in playing order, clips without GPS get the hole the user picked.
- * Putts: an answer to `putts:<hole>` keeps the last N found and says whether the last went in;
- * `uncut` lists the holes with more putts than were found (their putting is not shortened).
+ * Putts keep the analysis' visibility (unsure ones stay hidden); an answer to `putts:<hole>`
+ * shows the last N found (all for "4+") and says whether the last went in. `uncut` lists the
+ * holes with more putts than were found (their putting is not shortened), `settled` the holes
+ * whose putts question was answered (by the user or the vision step; a default does not count).
  */
-export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined): { doc: Project; broll: string[]; uncut: string[] } {
+export function prepare(
+  doc: Project,
+  plan: VideoPlan,
+  answers: PlanAnswers | null | undefined,
+): { doc: Project; broll: string[]; uncut: string[]; settled: string[] } {
   const a = resolveAnswers(plan, answers);
   const summary = summarize(doc);
   const byId = new Map(summary.shots.map((s) => [s.id, s]));
@@ -55,17 +61,27 @@ export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | nu
       for (const id of question.shotIds) if (id !== chosen) keep.delete(id);
     }
   }
-  const putts = new Map(summary.putts.map((p) => [p.id, { visible: true, holed: p.holed }]));
+  const shown = new Map(doc.shots.map((s) => [s.id, s.visible]));
+  const putts = new Map(summary.putts.map((p) => [p.id, { visible: shown.get(p.id) ?? true, holed: p.holed }]));
   const uncut: string[] = [];
+  const settled: string[] = [];
   for (const h of summary.holes) {
-    const choice = a[puttQuestionId(h.hole)];
+    const id = puttQuestionId(h.hole);
+    const choice = a[id];
     const ids = summary.putts.filter((p) => p.hole === h.hole).map((p) => p.id);
     if (!choice || !ids.length) continue;
+    const answered = answers?.[id] === choice;
+    if (answered) settled.push(h.hole);
     if (choice === 'notHoled') putts.get(ids[ids.length - 1])!.holed = false;
     else {
       const n = Number(choice);
       if (n > ids.length) uncut.push(h.hole);
-      if (n < 4) for (const id of ids.slice(0, Math.max(0, ids.length - n))) putts.get(id)!.visible = false;
+      ids.forEach((pid, i) => {
+        const p = putts.get(pid)!;
+        // Answered: the last N found are the putts. A default only hides the extra ones.
+        if (i < ids.length - n && n < 4) p.visible = false;
+        else if (answered) p.visible = true;
+      });
       putts.get(ids[ids.length - 1])!.holed = true;
     }
   }
@@ -105,7 +121,7 @@ export function prepare(doc: Project, plan: VideoPlan, answers: PlanAnswers | nu
     return p ? { ...s, visible: p.visible, putt: { end: s.putt?.end ?? s.impactTime, holed: p.holed } } : s;
   });
   const broll = a.noShots === 'broll' ? (q('noShots')?.clipIds ?? []) : [];
-  return { doc: migrateProject({ ...doc, media, clips, shots }), broll, uncut };
+  return { doc: migrateProject({ ...doc, media, clips, shots }), broll, uncut, settled };
 }
 
 /** Clips without shots as short mood shots, each placed before the first cut of a later clip. */
@@ -154,24 +170,27 @@ function withTemplateLook(doc: Project, template: string | null): Project {
 
 /** Builds the video(s) the plan describes. Empty when no shot is left to show. */
 export function compose(source: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined, opts: ComposeOptions): ComposedVideo[] {
-  const { doc: prepared, broll, uncut } = prepare(source, plan, answers);
+  const { doc: prepared, broll, uncut, settled } = prepare(source, plan, answers);
   const doc = withTemplateLook(prepared, plan.template);
   const names = opts.names ?? {};
   const putts = plan.putts ?? defaultPutts(plan.kind);
-  if (!playedShots(doc).length && !shownPutts(doc, putts).length) return [];
+  // Scores from the project as filmed (a shot left out of the video is still a stroke), with the answers.
+  const scores = holeScores(summarize(source), resolveAnswers(plan, answers));
+  // Putting the analysis is unsure of is only shown once someone answered how many putts there were.
+  const skipPutts = unsurePuttHoles(scores, settled);
+  const puttShots = shownPutts(doc, putts, skipPutts);
+  if (!playedShots(doc).length && !puttShots.length) return [];
   if (plan.kind === 'shorts')
-    return [...playedShots(doc), ...shownPutts(doc, putts)].sort(byTimeline(doc.clips)).map((shot, i) => {
+    return [...playedShots(doc), ...puttShots].sort(byTimeline(doc.clips)).map((shot, i) => {
       const name = `${plan.title} – ${i + 1}`;
       const short = shot.kind === 'putt' ? puttShort(doc, shot, name) : shortFor(doc, shot, name, opts.locale);
       const total = timelineDuration(short);
       const one = migrateProject({ ...short, layers: short.layers.map((l) => ({ ...l, end: Math.min(l.end, total) })) });
       return { name: one.name, document: one };
     });
-  // Scores from the project as filmed (a shot left out of the video is still a stroke), with the answers.
-  const scores = holeScores(summarize(source), resolveAnswers(plan, answers));
   const video =
     plan.kind === 'youtube'
-      ? withBroll(youtubeVideo(doc, opts.locale, plan.title, names, { putts, scores, uncut }), doc, broll)
-      : highlightShort(doc, opts.locale, plan.title, names, { putts });
+      ? withBroll(youtubeVideo(doc, opts.locale, plan.title, names, { putts, scores, uncut, skipPutts }), doc, broll)
+      : highlightShort(doc, opts.locale, plan.title, names, { putts, skipPutts });
   return [{ name: plan.title, document: withShotTexts(video, plan, opts) }];
 }

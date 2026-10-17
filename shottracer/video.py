@@ -157,13 +157,16 @@ def sdr_for_analysis() -> bool:
 
 
 def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
-           crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False):
+           crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
+           rate: float | None = None):
     """Yield (index, frame) via an ffmpeg pipe – GPU decoding, crop and resize happen in ffmpeg.
 
-    crop = (x, y, w, h) in display (rotated) pixels; scale applies after the crop.
+    crop = (x, y, w, h) in display (rotated) pixels; scale applies after the crop. With `rate`
+    the frames are resampled to that many per second (the index then counts samples from
+    `start`, `rate` per second) and `stop` limits the duration.
     """
     w, h = (crop[2], crop[3]) if crop else (info.width, info.height)
-    filters = []
+    filters = [f"fps={rate:g}"] if rate else []
     if crop:
         filters.append(f"crop={crop[2]}:{crop[3]}:{crop[0]}:{crop[1]}")
     if scale != 1.0:
@@ -180,7 +183,7 @@ def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
         cmd += ["-ss", f"{(start - 0.5) / info.fps:.6f}"]
     cmd += ["-i", str(info.path)]
     if stop is not None:
-        cmd += ["-frames:v", str(stop - start)]
+        cmd += ["-t", f"{(stop - start) / info.fps:.6f}"] if rate else ["-frames:v", str(stop - start)]
     cmd += ["-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", ",".join(filters),
             "-f", "rawvideo", "-pix_fmt", pix, "-"]
     ch = 1 if gray else 3

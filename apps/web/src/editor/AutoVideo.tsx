@@ -7,12 +7,25 @@
  * particular shots show each one as a card (a short loop around the strike) that can be kept or
  * removed on its own, or opened in the editor.
  */
-import { CHATGPT_USAGE_URL, clock, shotAnswerKey, type PlanItem, type PlanQuestion, type ShotChoice } from '@golf/compose';
-import { sourcePath } from '@golf/render';
-import type { Shot } from '@golf/schema';
-import { Check, Copy, ExternalLink, Loader2, Pause, Play, Sparkles, SquarePen } from 'lucide-react';
+import {
+  CHATGPT_USAGE_URL,
+  clock,
+  explainPreference,
+  planFromRules,
+  shotAnswerKey,
+  summarize,
+  videoTokenEstimate,
+  type PlanItem,
+  type PlanQuestion,
+  type PreferenceChip,
+  type ShotChoice,
+} from '@golf/compose';
+import { sourcePath, TEMPLATES } from '@golf/render';
+import type { Project, Shot } from '@golf/schema';
+import { Check, Clapperboard, Copy, ExternalLink, Loader2, MonitorPlay, Pause, Play, Smartphone, Sparkles, SquarePen } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Birdie } from '@/components/mascot/Birdie';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/controls';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -22,6 +35,7 @@ import { api, errorMessage } from '@/lib/api';
 import { aiPrivacy, ChatGptPlanNote, ManageUsage, type AiSettingsInfo } from '@/components/app/AiSettings';
 import { useJobEvents, type JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
+import { jobMessage } from '@/lib/jobMessage';
 import { cn } from '@/lib/cn';
 import { saveNow } from './autosave';
 import * as ops from './ops';
@@ -50,6 +64,9 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
   }, [doc]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [preference, setPreference] = useState('');
+  const [kind, setKind] = useState<Kind>('youtube');
+  const analysing = useEditor((s) => s.analysis.running);
+  const shotCount = clips.reduce((n, c) => n + c.shots, 0);
   const [job, setJob] = useState<JobInfo | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
@@ -89,7 +106,9 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
     try {
       await saveNow(true);
       const mediaIds = picked.size === clips.length ? [] : [...picked];
-      setJob(await api<JobInfo>('/autovideo', { body: { projectId, preference, locale, names: t.layers.types, mediaIds } }));
+      // The format picked on a card leads; the free text adds to it ("only good shots" …).
+      const wish = [T.kindPhrase[kind], preference.trim()].filter(Boolean).join('. ');
+      setJob(await api<JobInfo>('/autovideo', { body: { projectId, preference: wish, locale, names: t.layers.types, mediaIds } }));
     } catch (e) {
       setError(errorMessage(e, t));
     } finally {
@@ -101,7 +120,8 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
     if (!job) return;
     setBusy(true);
     try {
-      const body = useDefaults ? {} : answers;
+      // Send every answer, defaults included: putting is only shown on holes someone answered.
+      const body = useDefaults ? Object.fromEntries(questions.map((q) => [q.id, q.default])) : answers;
       setJob(await api<JobInfo>(`/jobs/${job.id}/answers`, { body: { answers: body } }));
     } catch (e) {
       setError(errorMessage(e, t));
@@ -129,23 +149,32 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
         <div data-testid="auto-video" className="flex flex-col gap-5">
           {!job || job.status === 'canceled' ? (
             <>
-              <ClipPicker clips={clips} picked={picked} onChange={setPicked} locale={locale} />
+              <KindPicker value={kind} onChange={setKind} />
+              {clips.length > 1 ? <ClipPicker clips={clips} picked={picked} onChange={setPicked} locale={locale} /> : null}
               <Field label={T.preference} hint={T.preferenceHint}>
                 {(p) => (
                   <Textarea {...p} value={preference} onChange={(e) => setPreference(e.target.value)} placeholder={T.placeholder} maxLength={1000} rows={3} />
                 )}
               </Field>
+              {ai && ai.effective.provider === 'none' ? <PreferenceChips text={preference} /> : null}
+              {ai && ai.effective.provider !== 'none' ? <TokenLine doc={doc} picked={picked} preference={preference} ai={ai.effective} /> : null}
               <p className="text-[12px] text-fg-muted" data-testid="auto-privacy">
                 {aiPrivacy(t, ai?.effective)}
               </p>
               {ai?.effective.provider === 'chatgpt' ? <ChatGptPlanNote className="-mt-3" /> : null}
+              {!shotCount || analysing ? (
+                <p className="rounded-md bg-surface-sunken p-3 text-[13px]" role="status" data-testid="auto-warning">
+                  {shotCount ? T.stillAnalysing : analysing ? T.noShotsYet : t.shots.noneVisible}
+                </p>
+              ) : null}
               {error ? (
                 <p role="alert" className="text-sm text-accent-fg">
                   {error}
                 </p>
               ) : null}
-              <div className="flex justify-end">
-                <Button variant="primary" onClick={() => void start()} loading={busy} data-testid="auto-start">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-[12px] text-fg-muted">{T.footer}</p>
+                <Button variant="primary" onClick={() => void start()} loading={busy} data-testid="auto-start" disabled={!shotCount}>
                   <Sparkles />
                   {T.start}
                 </Button>
@@ -155,7 +184,7 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
             <div className="flex flex-col gap-3" role="status" aria-live="polite">
               <div className="flex items-center gap-2 text-sm">
                 <Loader2 className="size-4 animate-spin" aria-hidden />
-                {job.message || T.working}
+                {jobMessage(job.message, t) || T.working}
               </div>
               <ProgressBar value={job.progress || null} label={T.working} />
               <div className="flex justify-end">
@@ -217,7 +246,7 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
               </div>
             </form>
           ) : job.status === 'succeeded' ? (
-            <Done result={result} onAgain={reset} />
+            <Done result={result} onAgain={reset} onOpen={() => onOpenChange(false)} />
           ) : (
             <div className="flex flex-col gap-3">
               <p role="alert" className="text-sm">
@@ -234,6 +263,82 @@ export function AutoVideoDialog({ open, onOpenChange }: { open: boolean; onOpenC
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** What the rules understood of the wish (there is no AI to read the rest), as chips. */
+function PreferenceChips({ text }: { text: string }) {
+  const { t, f, locale } = useI18n();
+  const T = t.aiPlan;
+  const e = useMemo(() => explainPreference(text), [text]);
+  if (!text.trim()) return null;
+  const label = (c: PreferenceChip): string => {
+    switch (c.key) {
+      case 'kind':
+        return T.kind[c.value];
+      case 'goodOnly':
+        return T.goodOnly;
+      case 'best':
+        return T.best;
+      case 'template':
+        return f(T.template, { name: TEMPLATES.find((x) => x.id === c.value)?.name[locale] ?? c.value });
+      case 'putts':
+        return T.putts[c.value];
+      case 'title':
+        return f(T.title, { title: c.value });
+    }
+  };
+  const chip = 'rounded-full border px-2 py-0.5';
+  return (
+    <div className="-mt-2 flex flex-col gap-1.5 text-[12px]" data-testid="auto-understood" aria-live="polite">
+      <p className="flex flex-wrap items-center gap-1.5">
+        <span className="text-fg-muted">{e.understood.length ? T.understood : T.nothingUnderstood}</span>
+        {e.understood.map((c) => (
+          <span key={`${c.key}:${'value' in c ? c.value : ''}`} className={cn(chip, 'border-border-strong bg-surface-sunken')}>
+            {label(c)}
+          </span>
+        ))}
+      </p>
+      {e.unknown.length ? (
+        <p className="flex flex-wrap items-center gap-1.5" data-testid="auto-not-understood">
+          <span className="text-fg-muted">{T.notUnderstood}</span>
+          {e.unknown.map((w) => (
+            <span key={w} className={cn(chip, 'border-dashed border-border text-fg-muted')}>
+              {w}
+            </span>
+          ))}
+          <span className="text-fg-muted">{T.notUnderstoodHint}</span>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** About how many tokens the video will use with the AI, and a warning when the ceiling is too low. */
+function TokenLine({ doc, picked, preference, ai }: { doc: Project; picked: Set<string>; preference: string; ai: AiSettingsInfo['effective'] }) {
+  const { t, f, locale } = useI18n();
+  const wish = useDeferredValue(preference);
+  const e = useMemo(() => {
+    try {
+      const media = Object.fromEntries(Object.entries(doc.media).filter(([id, m]) => picked.has(id) || m.kind !== 'video'));
+      const sub = { ...doc, media, clips: doc.clips.filter((c) => picked.has(c.mediaId)), shots: doc.shots.filter((s) => picked.has(s.mediaId)) };
+      const s = summarize(sub);
+      return videoTokenEstimate(s, wish, planFromRules(s, wish, locale), { vision: ai.vision });
+    } catch {
+      return null;
+    }
+  }, [doc, picked, wish, locale, ai.vision]);
+  if (!e || !picked.size) return null;
+  const n = (v: number) => (Math.ceil(v / 100) * 100).toLocaleString(locale === 'da' ? 'da-DK' : 'en-GB');
+  return (
+    <div className="-mt-2 text-[12px]" data-testid="auto-tokens-estimate">
+      <p className="text-fg-muted">{f(t.aiPlan.dialogEstimate, { total: n(e.total) })}</p>
+      {e.needed > ai.maxTokens ? (
+        <p role="status" className="text-accent-fg">
+          {f(t.aiPlan.dialogTooLow, { max: n(ai.maxTokens) })}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -539,21 +644,27 @@ function ShotLoop({ item, shot, label }: { item: PlanItem; shot: Shot | undefine
   );
 }
 
-function Done({ result, onAgain }: { result: Result; onAgain: () => void }) {
+function Done({ result, onAgain, onOpen }: { result: Result; onAgain: () => void; onOpen: () => void }) {
   const { t, f } = useI18n();
   const T = t.auto;
   const [copied, setCopied] = useState(false);
   const projects = result.projects ?? [];
   return (
     <div className="flex flex-col gap-4" data-testid="auto-done">
-      <h3 className="font-semibold">{projects.length > 1 ? f(T.doneMany, { n: projects.length }) : projects.length ? T.doneTitle : T.noVideo}</h3>
+      <div className="flex items-center gap-3">
+        <Birdie mood={projects.length ? 'cheer' : 'confused'} size={48} className="shrink-0" />
+        <div>
+          <h3 className="font-semibold">{projects.length > 1 ? f(T.doneMany, { n: projects.length }) : projects.length ? T.doneTitle : T.noVideo}</h3>
+          <p className="text-[13px] text-fg-muted">{projects.length ? T.doneNext : T.noVideoHint}</p>
+        </div>
+      </div>
       {projects.length ? (
         <ul className="flex flex-col gap-2">
-          {projects.map((p) => (
+          {projects.map((p, i) => (
             <li key={p.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
               <span className="truncate">{p.name}</span>
-              <Button asChild size="sm" variant="secondary">
-                <Link href={`/app/projects/${p.id}`}>
+              <Button asChild size="sm" variant={i === 0 ? 'primary' : 'secondary'}>
+                <Link href={`/app/projects/${p.id}`} aria-label={`${T.openProject}: ${p.name}`} onClick={onOpen}>
                   <ExternalLink />
                   {T.openProject}
                 </Link>
@@ -565,7 +676,15 @@ function Done({ result, onAgain }: { result: Result; onAgain: () => void }) {
       {result.notes?.length ? (
         <ul className="list-disc pl-5 text-[13px] text-fg-muted">
           {result.notes.map((n) => (
-            <li key={n}>{n}</li>
+            <li key={n}>
+              {n}
+              {n.includes(CHATGPT_USAGE_URL) ? (
+                <>
+                  {' '}
+                  <ManageUsage />
+                </>
+              ) : null}
+            </li>
           ))}
         </ul>
       ) : null}
@@ -602,5 +721,42 @@ function Done({ result, onAgain }: { result: Result; onAgain: () => void }) {
         </Button>
       </div>
     </div>
+  );
+}
+
+type Kind = 'youtube' | 'highlight' | 'shorts';
+
+/** The three kinds of video as cards (a radio group); the free text below adds to the pick. */
+function KindPicker({ value, onChange }: { value: Kind; onChange: (k: Kind) => void }) {
+  const { t } = useI18n();
+  const T = t.make;
+  const name = useId();
+  const kinds: { id: Kind; icon: ReactNode; title: string; text: string }[] = [
+    { id: 'youtube', icon: <MonitorPlay className="size-6" />, title: T.youtube, text: T.youtubeHint },
+    { id: 'highlight', icon: <Smartphone className="size-6" />, title: T.highlight, text: T.highlightHint },
+    { id: 'shorts', icon: <Clapperboard className="size-6" />, title: T.perShot, text: T.perShotHint },
+  ];
+  return (
+    <fieldset>
+      <legend className="mb-2 text-[13px] font-medium">{t.auto.format}</legend>
+      <div className="grid gap-2 sm:grid-cols-3" data-testid="auto-kinds">
+        {kinds.map((k) => (
+          <label
+            key={k.id}
+            className={cn(
+              'flex cursor-pointer flex-col gap-1.5 rounded-lg border bg-surface p-3 text-left transition-colors focus-within:ring-2 focus-within:ring-[var(--focus)] hover:bg-surface-sunken',
+              value === k.id ? 'border-2 border-accent' : 'border-border',
+            )}
+          >
+            <input type="radio" name={name} value={k.id} checked={value === k.id} onChange={() => onChange(k.id)} className="sr-only" />
+            <span className={cn(value === k.id ? 'text-accent-fg' : 'text-fg-muted')} aria-hidden>
+              {k.icon}
+            </span>
+            <span className="text-sm font-semibold">{k.title}</span>
+            <span className="text-[12px] leading-snug text-fg-muted">{k.text}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
   );
 }

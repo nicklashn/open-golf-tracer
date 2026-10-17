@@ -112,10 +112,10 @@ def create_project(body: CreateIn, db: Session = Depends(get_db), user: User = D
 
 
 @router.post("/demo")
-def create_demo(db: Session = Depends(get_db), user: User = Depends(current_user)):
+def create_demo(locale: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
     from ..demo import create_demo_project
 
-    p = create_demo_project(db, user)
+    p = create_demo_project(db, user, locale)
     return summary(db, p)
 
 

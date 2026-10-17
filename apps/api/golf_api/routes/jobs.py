@@ -71,7 +71,8 @@ def _snapshot(user_id: str, project_id: str | None, since: dt.datetime | None) -
             if j.kind == "export" and j.status == "succeeded":
                 e = db.scalars(select(Export).where(Export.job_id == j.id)).first()
                 if e:
-                    ev["export"] = {"id": e.id, "url": export_url(e), "projectName": e.project_name}
+                    ev["export"] = {"id": e.id, "url": export_url(e), "previewUrl": export_url(e, download=False),
+                                    "projectName": e.project_name}
             if j.kind == "analyze" and j.status == "running" and j.project_id and j.media_id:
                 p = db.get(Project, j.project_id)
                 if p:

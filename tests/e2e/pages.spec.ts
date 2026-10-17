@@ -29,3 +29,12 @@ test('danish locale', async ({ page, context }) => {
   await page.goto('/app');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Projekter');
 });
+
+test('a Danish browser gets Danish on the first visit', async ({ browser }) => {
+  const context = await browser.newContext({ locale: 'da-DK' });
+  const page = await context.newPage();
+  await page.goto('/app');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Projekter');
+  await expect(page.getByRole('link', { name: 'Mine videoer' })).toBeVisible();
+  await context.close();
+});

@@ -137,11 +137,11 @@ you turn that on (`AI_VISION`, below).
 | Variable | Default | Meaning |
 |---|---|---|
 | `AI_PROVIDER` | `none` | `none` (fixed rules), `ollama` (local, nothing leaves the PC), `openai-compatible` (OpenAI, OpenRouter, LM Studio …) or `anthropic` (ChatGPT plan: in the app only, see below) |
-| `AI_MODEL` | provider default | e.g. `llama3.1`, `gpt-4o-mini`, `claude-opus-5-5` |
+| `AI_MODEL` | provider default | e.g. `llama3.1`, `gpt-4o-mini`, `claude-haiku-5-5` |
 | `AI_BASE_URL` | provider default | e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://openrouter.ai/api/v1` |
 | `AI_API_KEY` | – | Never sent to the browser, logged, or stored in projects or the data export |
-| `AI_MAX_TOKENS` | `8000` | Token ceiling per video (in + out, all calls); above it the job stops with a clear error |
-| `AI_VISION` | `0` | `1` = when the putt count on a hole is unsure, the model looks at 6 still frames from the green (max 768 px) instead of asking you. Needs a model that can see images; one call per hole, at most 6 per video, about 5 000 tokens each (counted in `AI_MAX_TOKENS`). With Ollama the frames stay on the PC; with a cloud provider they are sent there. Answers below 0.7 confidence are asked as usual |
+| `AI_MAX_TOKENS` | `16000` | Token ceiling for the plan calls of one video (in + out); above it the plan is made by fixed rules and a note says why – the video is still made. Settings → AI shows about how many tokens a full round needs |
+| `AI_VISION` | `0` | `1` = when the putt count on a hole is unsure, the model looks at up to 8 still frames from the green instead of asking you: taken at each putt the analysis found (strike, where the ball stopped, 1 s after the last) and cropped around ball, cup and player (max 768 px). The model answers simple questions per frame and the app counts. Needs a model that can see images (Ollama's default `llama3.1` cannot: use e.g. `llama3.2-vision`); one call per hole, at most 6 per video, up to about 7 000 tokens each, from a separate allowance of 30 000 tokens on top of `AI_MAX_TOKENS`. With Ollama the frames stay on the PC; with a cloud provider they are sent there. Answers below 0.7 confidence are asked as usual |
 
 The same can be chosen in the app under **Settings → AI** (with "Test connection"); otherwise the
 `.env` defaults are used. Token usage is shown when the video is done.

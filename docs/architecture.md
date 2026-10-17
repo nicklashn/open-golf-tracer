@@ -57,8 +57,15 @@ varierer mellem browsere og Node. Tekst er glyf-konturer fra statiske fonte, så
 browser og exporter giver bit-identiske pixels (`tests/parity`, maks. afvigelse 0).
 
 - **Preview:** `<video>` pr. medie (proxy) placeres med CSS-transform for beskæring/reframing;
-  overlayet tegnes oven på i et canvas med dirty-rects. Tidslinjens ur håndterer klip, hastighed,
-  freeze frames og slow-mo.
+  overlayet tegnes oven på i et canvas med dirty-rects – i en Web Worker med OffscreenCanvas,
+  hvor browseren kan (`editor/overlay.ts`), så rasteriseringen aldrig blokerer tidslinje og træk.
+  Tidslinjens ur håndterer klip, hastighed, freeze frames og slow-mo.
+- **Editoren er let at arbejde i:** kun playhead og tidskode følger uret (playhead via
+  CSS-transform fra et store-abonnement, ikke React-renders); spor og elementer er memoiserede,
+  og filmstrips, bølgeformer og tidsmarkeringer tegnes kun for det synlige stykke. Hovedsporet er
+  sekventielt: trim, slet, flyt og hastighed ripples, og grafik, musik og beskærings-keyframes
+  følger det billede, de hører til (`editor/ripple.ts`). Hver ændring er ét undo-trin (immer-patches).
+  `apps/web/test/editor-perf.test.tsx` holder øje med render-antal og DOM-størrelse i en lang runde.
 - **Eksport:** exporteren bygger en ffmpeg-filtergraf ud fra samme tidslinje (trim, setpts,
   tpad, crop-keyframes, skalering, lyd-mix, HDR/tonemap), renderer kun det område, overlayet
   faktisk bruger, og pipe'r det ind i ffmpeg, som lægger det på originalen. HDR bevares som
@@ -112,21 +119,31 @@ samme fra kommandolinjen via det offentlige API (upload, jobs, eksport).
 `packages/compose/src/ai.ts`: AI'en tænker, koden arbejder.
 
 - Modellen får kun `summaryText(summary)`, brugerens tekst, regel-planen og (andet kald) svarene.
-  Aldrig video eller projektdokumentet.
+  Aldrig video eller projektdokumentet, og aldrig klippenes filnavne (de hedder "clip n" – også i
+  regel-planens spørgsmål, se `withoutFileNames`).
+- Resuméet har golf-highlights fra fakta (`tagHighlights` i `summary.ts`): birdie/eagle (kun huller med
+  fuld score), længste målte carry, tæt indspil og langt holet putt. Reglerne bruger dem til "de bedste
+  slag" (`bestShots`) og korte tekster til slagene – også uden AI.
+- Faktavagt (`facts.ts`): tal i titel, slagtekster og beskrivelse skal være fakta fra resuméet (ikke
+  `~`-gæt); ellers fjernes teksten (titlen falder tilbage til regel-planens).
 - Valgfrit (`AI_VISION` / Indstillinger → AI, slået fra som standard): er analysen i tvivl om antallet af
-  putts på et hul (spørgsmålet `putts:<hul>`), tager exporteren 6 JPEG-stillbilleder (maks. 768 px) af
-  greenen med ffmpeg direkte til hukommelsen (`frames.ts`), og `resolvePuttsWithVision` (`vision.ts`) spørger
-  modellen om `{putts, holed, confidence}`. Ét kald pr. hul, maks. 6 pr. video, i samme token-loft (med plads
-  til kaldet efter svarene). Ved confidence ≥ 0,7 udfyldes svaret og spørgsmålet fjernes (med en note);
-  ellers – eller ved fejl, f.eks. en model uden billeder – spørges brugeren som før.
+  putts på et hul (spørgsmålet `putts:<hul>`), tager exporteren op til 8 JPEG-stillbilleder (maks. 768 px)
+  ved de fundne putts – hvert slag, hvor bolden stoppede og 1 s efter det sidste – beskåret omkring bold,
+  hul og spiller, med ffmpeg direkte til hukommelsen (`frames.ts`). `resolvePuttsWithVision` (`vision.ts`)
+  stiller modellen enkle spørgsmål pr. billede (slag? bold i hullet?), og koden tæller (`countFromFrames`).
+  Ét kald pr. hul, maks. 6 pr. video, fra en egen pulje (`DEFAULT_VISION_TOKENS`) oven i `AI_MAX_TOKENS`.
+  Ved confidence ≥ 0,7 udfyldes svaret og spørgsmålet fjernes (med en note); ellers – eller ved fejl,
+  f.eks. en model uden billeder – spørges brugeren som før.
 - Fast systemprompt først i hvert kald (prompt caching; Anthropic får `cache_control`), uden dynamisk indhold.
 - Svaret er en lille JSON-plan (structured output, hvor udbyderen kan), som `mergeAiPlan` lægger oven på
   regel-planen inden for rammerne: kun slag fra regel-planen, samme spørgsmål og valgmuligheder (kun
   ny ordlyd/standard), kun tilladte skabeloner. Valideres med zod.
 - Højst 2 kald pr. video: planen, og ét mere efter svarene, hvis der var spørgsmål. Ugyldigt svar → ét
   nyt forsøg med valideringsfejlen; fejler det igen, bruges regel-planen med en note.
-- Tokens tælles pr. job (også hen over ventetiden på svar) og logges; over `AI_MAX_TOKENS` stopper jobbet
-  med en tydelig fejl, før kaldet sendes.
+- Tokens tælles pr. job (også hen over ventetiden på svar) og logges. Ville et plankald gå over
+  `AI_MAX_TOKENS`, sendes det ikke: planen laves af reglerne (eller den første AI-plan bruges med
+  svarene), og en note siger hvorfor – AI'en får aldrig videoen til at fejle. Stillbilleder har deres
+  egen pulje (`DEFAULT_VISION_TOKENS`) oven i loftet.
 - Adaptere på ren `fetch`: OpenAI-kompatibel (`/chat/completions`, JSON-schema med fald tilbage til
   JSON-mode) og Anthropic Messages API (`/v1/messages`, effort `low`). Timeout, ét retry ved netværksfejl,
   tydelige fejl (afvist nøgle, ukendt model, Ollama kører ikke).

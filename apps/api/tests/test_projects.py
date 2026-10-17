@@ -157,3 +157,24 @@ def test_place_from_analysis_reaches_the_document(client, tiny_video):
     set_place({"course": "Testbane", "hole": "17", "par": 5, "fromTee": 0, "toGreen": 447, "line": [], "margin": 30})
     media = client.get(f"/api/projects/{pid}").json()["document"]["media"][mid]
     assert media["place"]["hole"] == "17" and "margin" not in media["place"]
+
+
+def test_sample_project_is_named_in_the_apps_language(client):
+    da = client.post("/api/projects/demo", params={"locale": "da"}).json()
+    assert da["name"] == "Eksempel: drive på rangen" and da["isDemo"]
+    en = client.post("/api/projects/demo", params={"locale": "en"}).json()
+    assert en["name"] == "Example: drive at the range"
+
+
+def test_finished_export_can_be_watched_as_well_as_downloaded(client, tiny_video):
+    from golf_api.db import session_scope
+    from golf_api.models import Export
+
+    pid = upload(client, tiny_video)["projectId"]
+    e = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}}).json()
+    assert e["url"] is None and e["previewUrl"] is None
+    with session_scope() as db:
+        row = db.get(Export, e["id"])
+        row.status, row.storage_key = "succeeded", "x/exports/e.mp4"
+    done = client.get(f"/api/exports/{e['id']}").json()
+    assert done["url"] and done["previewUrl"] and done["url"] != done["previewUrl"]

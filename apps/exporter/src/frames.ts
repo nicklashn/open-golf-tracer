@@ -12,6 +12,8 @@ export interface FrameOptions {
   q?: number;
   hdr?: boolean;
   timeoutMs?: number;
+  /** Only this region of the frame (pixels of the file), scaled up to `maxSide` at most. */
+  crop?: { x: number; y: number; w: number; h: number } | null;
 }
 
 function grab(path: string, t: number, vf: string, q: number, timeoutMs: number): Promise<Buffer> {
@@ -57,7 +59,9 @@ function grab(path: string, t: number, vf: string, q: number, timeoutMs: number)
 /** One base64 JPEG per time that has a picture (times past the end are skipped). */
 export async function grabFrames(path: string, times: number[], opts: FrameOptions = {}): Promise<string[]> {
   const side = opts.maxSide ?? 768;
-  const scale = `scale=w='min(${side},iw)':h='min(${side},ih)':force_original_aspect_ratio=decrease`;
+  const c = opts.crop;
+  const crop = c ? `crop=${Math.round(c.w)}:${Math.round(c.h)}:${Math.round(c.x)}:${Math.round(c.y)},` : '';
+  const scale = `${crop}scale=w='min(${side},iw)':h='min(${side},ih)':force_original_aspect_ratio=decrease`;
   const vf = opts.hdr ? `${encoders().tonemap},${scale},format=yuvj420p` : `${scale},format=yuvj420p`;
   const frames: string[] = [];
   for (const t of times) {

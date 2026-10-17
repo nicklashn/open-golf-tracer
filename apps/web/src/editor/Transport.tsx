@@ -18,23 +18,32 @@ export function frameStep(dir: 1 | -1, frames = 1) {
   s.setTime(s.time + (dir * frames) / fps / speed);
 }
 
+/** The running timecode: the only part of the transport that changes on every playhead tick. */
+function Timecode() {
+  const label = useEditor((s) => {
+    const hit = clipAt(s.doc.clips, s.time);
+    const fps = hit ? fpsOf(hit.clip.mediaId) : 30;
+    return `${timecode(s.time, fps, true)}|${timecode(timelineDuration(s.doc), fps, true)}`;
+  });
+  const [now, total] = label.split('|');
+  return (
+    <div className="tabular w-36 text-[13px] text-fg">
+      {now} <span className="text-fg-subtle">/ {total}</span>
+    </div>
+  );
+}
+
 export function Transport() {
   const { t } = useI18n();
-  const time = useEditor((s) => s.time);
   const playing = useEditor((s) => s.playing);
-  const doc = useEditor((s) => s.doc);
+  const total = useEditor((s) => timelineDuration(s.doc));
   const inPoint = useEditor((s) => s.inPoint);
   const outPoint = useEditor((s) => s.outPoint);
-  const total = timelineDuration(doc);
-  const hit = clipAt(doc.clips, time);
-  const fps = hit ? fpsOf(hit.clip.mediaId) : 30;
   const set = useEditor.getState();
 
   return (
     <div className="flex h-11 shrink-0 items-center gap-1 border-t border-border px-3">
-      <div className="tabular w-36 text-[13px] text-fg">
-        {timecode(time, fps, true)} <span className="text-fg-subtle">/ {timecode(total, fps, true)}</span>
-      </div>
+      <Timecode />
       <div className="flex flex-1 items-center justify-center gap-0.5">
         <Tooltip label={t.shortcuts.items.inOut} shortcut="Home">
           <Button variant="ghost" size="iconSm" aria-label="Start" onClick={() => set.setTime(inPoint ?? 0)}>

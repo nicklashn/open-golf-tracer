@@ -22,7 +22,7 @@ def test_defaults_come_from_env(client, monkeypatch):
     s = client.get("/api/ai/settings").json()
     assert s["provider"] == "server"
     assert s["effective"] == {"provider": "ollama", "model": "qwen2.5", "baseUrl": "http://localhost:11434/v1", "source": "server",
-                              "keyMasked": "", "maxTokens": 8000, "cloud": False, "vision": False}
+                              "keyMasked": "", "maxTokens": 16000, "cloud": False, "vision": False}
     assert s["vision"] is False
 
 
@@ -31,7 +31,7 @@ def test_own_settings_key_masked_and_never_leaked(client, caplog):
     r = client.put("/api/ai/settings", json={"provider": "anthropic", "model": "", "baseUrl": "", "apiKey": KEY, "maxTokens": 6000})
     assert r.status_code == 200, r.text
     s = r.json()
-    assert s["effective"]["provider"] == "anthropic" and s["effective"]["model"] == "claude-opus-5-5" and s["effective"]["cloud"]
+    assert s["effective"]["provider"] == "anthropic" and s["effective"]["model"] == "claude-haiku-5-5" and s["effective"]["cloud"]
     assert s["keyMasked"] == "sk-…6789"
 
     # The exporter gets the key for a job of this user …
@@ -97,7 +97,7 @@ def test_vision_is_off_by_default_and_round_trips(client, monkeypatch):
     assert r.json()["vision"] is False and r.json()["effective"]["vision"] is False
     r = client.put("/api/ai/settings", json={"provider": "server", "maxTokens": 9000, "vision": True})
     assert r.json()["effective"] | {"keyMasked": ""} == {"provider": "ollama", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1",
-                                                         "source": "server", "keyMasked": "", "maxTokens": 8000, "cloud": False,
+                                                         "source": "server", "keyMasked": "", "maxTokens": 16000, "cloud": False,
                                                          "vision": True}
 
     job = client.post("/api/ai/test").json()
