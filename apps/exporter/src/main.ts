@@ -83,7 +83,7 @@ async function lane(kinds: string[], run: (job: { id: string; kind: string; payl
       try {
         await api.fail(job.id, canceled ? 'Annulleret af brugeren' : String(e instanceof Error ? e.message : e), !canceled);
       } catch (e2) {
-        log('kunne ikke melde fejl', { error: String(e2) });
+        log('could not report the failure', { error: String(e2) });
       }
     }
   }
@@ -96,7 +96,7 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 
-log('exporter starter', { worker, api: api.base, lanes: ['export', 'compose'] });
+log('exporter starting', { worker, api: api.base, lanes: ['export', 'compose'] });
 void lane(['export'], handle);
 void lane(['compose', 'ai_test'], async (job) => {
   try {

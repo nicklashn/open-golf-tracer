@@ -203,6 +203,35 @@ expires or you disconnect the app in ChatGPT, sign in again.
 - **Settings:** language, units, theme and a data export of all your projects. Every feature is free.
 - English and Danish, light and dark theme, keyboard shortcuts (`?` in the editor), WCAG AA.
 
+## Backup and restore
+
+Everything the app keeps is in its data folder: `%LOCALAPPDATA%\Programs\Open Golf Tracer\data`
+for the Windows installer, `data/` in a source checkout. **Settings → About** shows the path and
+opens it.
+
+- **Back up:** stop the app (close the black window, or Ctrl+C), then copy the whole `data` folder
+  to another disk or a cloud folder. It holds the database (projects, settings), the uploaded
+  videos, exports and logs. Keep the copy private: the AI key and the ChatGPT sign-in, if you set
+  them up, are stored in the database too.
+- **Restore:** stop the app, put the copied `data` folder back in place of the current one, and start
+  the app. Use the same or a newer app version than the one that made the copy; a newer version
+  updates the database by itself when it starts.
+- **Settings → Your data → Download my data** is a JSON export of your projects and settings for
+  reading or moving to another tool. It is not a backup: it has no videos and cannot be imported
+  back into the app.
+
+## Logs, bug reports and updates
+
+- The launcher writes everything the app prints to `data/logs/app-YYYYMMDD.log` (the last 7 days are
+  kept), so the messages are still there after the window is closed. Keys and tokens are masked.
+- Found a bug? **Settings → About → Save diagnostics** saves a zip with the version, your PC
+  (OS, GPU, FFmpeg), the performance settings, recent log lines and job summaries, with keys and
+  tokens removed. Attach it to a [bug report](https://github.com/nicklashn/open-golf-tracer/issues/new?template=bug.yml).
+  Security problems: see [SECURITY.md](SECURITY.md).
+- Once a day the app asks GitHub whether a newer version exists and shows a small banner if so.
+  Turn it off under **Settings → About**. What is sent: [docs/privacy.md](docs/privacy.md).
+- What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
 ## Licence
 
 Open Golf Tracer is open source under the **MIT licence** – see [LICENSE](LICENSE). You may use,

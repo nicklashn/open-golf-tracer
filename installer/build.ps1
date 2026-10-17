@@ -160,6 +160,9 @@ Remove-Item (Join-Path $stage 'apps\web\.next\cache') -Recurse -Force -ErrorActi
 # web and exporter are started from their own folders, so their copies would only take up space.
 foreach ($ws in 'web', 'exporter') { [IO.Directory]::Delete((Join-Path $stage "node_modules\@golf\$ws")) }
 
+# THIRD_PARTY_NOTICES.txt from what is now in the stage (runtime\, site-packages, node_modules) - scripts/third_party_notices.py
+Step 'Third-party notices'; Invoke-Native $stagePy @((Join-Path $stage 'scripts\third_party_notices.py'), '--root', $stage)
+
 if ($StageOnly) { Write-Host "`nStage ready: $stage" -ForegroundColor Green; return }
 
 Step "Inno Setup -> installer\dist (version $Version)"

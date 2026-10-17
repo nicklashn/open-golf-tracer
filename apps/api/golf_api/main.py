@@ -13,9 +13,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import logging_setup, maintenance
+from . import about, logging_setup, maintenance
 from .config import settings
 from .logging_setup import request_id
+from .routes import about as about_routes
 from .routes import account, autovideo, chatgpt, exports, geo, internal, jobs, media, misc, performance, projects, uploads
 
 log = logging.getLogger("golf.api")
@@ -74,7 +75,7 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.to_thread(maintenance.run_once)
             except Exception:  # never let housekeeping kill the API
-                log.exception("vedligeholdelse fejlede")
+                log.exception("housekeeping failed")
             await asyncio.sleep(30)
 
     task = asyncio.create_task(housekeeping())
@@ -83,7 +84,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Open Golf Tracer API", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json",
+    app = FastAPI(title="Open Golf Tracer API", version=about.app_version(), lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json",
                   redoc_url=None)
 
     @app.middleware("http")
@@ -134,7 +135,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"error": {"code": "server_error", "message": "Something went wrong on our side. Try again in a moment.", "ref": ref}},
                             status_code=500)
 
-    for r in (account, projects, uploads, media, jobs, autovideo, chatgpt, exports, geo, internal, performance, misc):
+    for r in (account, projects, uploads, media, jobs, autovideo, chatgpt, exports, geo, internal, performance, about_routes, misc):
         app.include_router(r.router, prefix="/api")
     return app
 
