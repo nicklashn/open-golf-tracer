@@ -425,6 +425,22 @@ export type HoleInfoProps = z.infer<typeof HoleInfoProps>;
 export type DistanceProps = z.infer<typeof DistanceProps>;
 
 // ---------------------------------------------------------------------------------------------
+// Score corrections
+
+/**
+ * What the user knows better than the clips about one hole: its par, the strokes it took
+ * (all of them, putts included) and the putts. A field left out keeps what the analysis found.
+ * Putts settle the hole's putts question (the last one went in); strokes give the hole a score
+ * even when not every stroke was filmed.
+ */
+export const HoleEdit = z.object({
+  par: z.number().int().min(2).max(7).optional(),
+  strokes: z.number().int().min(1).max(20).optional(),
+  putts: z.number().int().min(0).max(10).optional(),
+});
+export type HoleEdit = z.infer<typeof HoleEdit>;
+
+// ---------------------------------------------------------------------------------------------
 // Project
 
 export const Project = z.object({
@@ -455,6 +471,8 @@ export const Project = z.object({
   layers: z.array(Layer).max(300).default([]),
   audioTracks: z.array(AudioClip).max(20).default([]),
   audio: z.object({ originalVolume: z.number().min(0).max(2).default(1), muted: z.boolean().default(false) }).default({ originalVolume: 1, muted: false }),
+  /** The user's corrections to the score, by hole ('7'), see `HoleEdit`. Optional: older projects have none. */
+  scoreEdits: z.record(z.string().min(1).max(8), HoleEdit).optional(),
 });
 export type Project = z.infer<typeof Project>;
 export type ProjectInput = z.input<typeof Project>;

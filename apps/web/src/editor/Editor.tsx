@@ -26,10 +26,14 @@ import { Inspector } from './Inspector';
 import { LayersPanel, MediaPanel, ShotsPanel, TemplatesPanel } from './LeftPanels';
 import * as ops from './ops';
 import { Preview, player } from './Preview';
+import { ScorePanel } from './ScorePanel';
 import { useEditor, type MediaInfo } from './store';
 import { Timeline } from './Timeline';
 import { Transport, frameStep } from './Transport';
 import { useShortcuts } from './shortcuts';
+
+/** Five tabs in the 280 px left panel: a little tighter than the default. */
+const TAB = 'px-1.5 text-[12px]';
 
 interface Loaded {
   document: unknown;
@@ -287,6 +291,17 @@ export function Editor({ projectId }: { projectId: string }) {
     }
   }
 
+  // A shot to show whose clip is no longer on the timeline: say so, and offer to put it back.
+  useEffect(() => {
+    ops.onShotMissing((shot) =>
+      toast.info(t.shots.notOnTimeline, t.shots.notOnTimelineHint, {
+        duration: 10_000,
+        action: { label: t.shots.putBack, onClick: () => ops.restoreShot(shot) && ops.jumpToShot(shot) },
+      }),
+    );
+    return () => ops.onShotMissing(null);
+  }, [t]);
+
   useShortcuts({
     enabled: state === 'ready' && !exportOpen && !versionsOpen,
     onHelp: () => setShortcutsOpen(true),
@@ -407,15 +422,29 @@ export function Editor({ projectId }: { projectId: string }) {
           <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_320px]">
             <aside className="flex min-h-0 flex-col border-r border-border bg-surface" aria-label={t.editor.panels.shots}>
               <Tabs value={leftTab} onValueChange={setLeftTab} className="flex min-h-0 flex-1 flex-col">
-                <TabsList label={t.editor.panels.shots} className="px-2">
-                  <TabsTrigger value="shots">{t.editor.panels.shots}</TabsTrigger>
-                  <TabsTrigger value="layers">{t.editor.panels.layers}</TabsTrigger>
-                  <TabsTrigger value="templates">{t.editor.panels.templates}</TabsTrigger>
-                  <TabsTrigger value="media">{t.editor.panels.media}</TabsTrigger>
+                <TabsList label={t.editor.panels.shots} className="gap-0 px-1">
+                  <TabsTrigger value="shots" className={TAB}>
+                    {t.editor.panels.shots}
+                  </TabsTrigger>
+                  <TabsTrigger value="score" className={TAB}>
+                    {t.editor.panels.score}
+                  </TabsTrigger>
+                  <TabsTrigger value="layers" className={TAB}>
+                    {t.editor.panels.layers}
+                  </TabsTrigger>
+                  <TabsTrigger value="templates" className={TAB}>
+                    {t.editor.panels.templates}
+                  </TabsTrigger>
+                  <TabsTrigger value="media" className={TAB}>
+                    {t.editor.panels.media}
+                  </TabsTrigger>
                 </TabsList>
                 <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
                   <TabsContent value="shots">
                     <ShotsPanel />
+                  </TabsContent>
+                  <TabsContent value="score">
+                    <ScorePanel />
                   </TabsContent>
                   <TabsContent value="layers">
                     <LayersPanel />
@@ -452,12 +481,16 @@ export function Editor({ projectId }: { projectId: string }) {
           <Tabs defaultValue="shots" className="flex min-h-0 flex-1 flex-col">
             <TabsList label={t.editor.panels.shots} className="px-2">
               <TabsTrigger value="shots">{t.editor.panels.shots}</TabsTrigger>
+              <TabsTrigger value="score">{t.editor.panels.score}</TabsTrigger>
               <TabsTrigger value="layers">{t.editor.panels.layers}</TabsTrigger>
               <TabsTrigger value="props">{t.editor.panels.properties}</TabsTrigger>
             </TabsList>
             <div className="min-h-0 flex-1 overflow-y-auto">
               <TabsContent value="shots">
                 <ShotsPanel />
+              </TabsContent>
+              <TabsContent value="score">
+                <ScorePanel />
               </TabsContent>
               <TabsContent value="layers">
                 <LayersPanel />

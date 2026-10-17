@@ -192,7 +192,9 @@ describe('putts in the videos', () => {
 describe('the score of a hole', () => {
   it('is given when every stroke was filmed, from the tee to a holed putt', () => {
     const s = summarize(fullHole());
-    expect(s.holes).toEqual([{ hole: '7', par: 4, counted: 4, putts: 2, strokes: 4, why: [], puttsUnsure: false }]);
+    expect(s.holes).toEqual([
+      { hole: '7', par: 4, counted: 4, putts: 2, strokes: 4, why: [], puttsUnsure: false, edited: [], shotIds: ['drive', 'approach', 'p1', 'p2'] },
+    ]);
     expect(summaryText(s)).toContain('score (hole:strokes/par putts, ?=not every stroke filmed) 7:4/4 2p total 4/4');
     expect(scoreName(3, 4, 'da')).toBe('Birdie');
     expect(scoreName(6, 3, 'en')).toBe('+3');
@@ -337,5 +339,51 @@ describe('asking about putts', () => {
     expect(puttsUnsure([p({})])).toBe(false);
     expect(puttsUnsure([p({ flags: ['putt_count_unsure'] })])).toBe(true);
     expect(puttsUnsure([p({ holed: null })])).toBe(true);
+  });
+});
+
+describe('score corrections from the scorecard', () => {
+  const edited = (doc: Project, edits: Project['scoreEdits']) => migrateProject({ ...doc, scoreEdits: edits });
+
+  it('lets the putts settle unsure putting: a score, no question, the putts shown', () => {
+    const doc = edited(fullHole(true, { confidence: 0.4 }), { '7': { putts: 1 } });
+    const s = summarize(doc);
+    expect(s.holes[0]).toMatchObject({ strokes: 3, putts: 1, puttsUnsure: false, why: [], edited: ['putts'] });
+    const plan = planFromRules(s, '', 'en');
+    expect(plan.questions.some((q) => q.id === 'putts:7')).toBe(false);
+    const prepared = prepare(doc, plan, null);
+    expect(prepared.settled).toEqual(['7']);
+    expect(prepared.doc.shots.filter((x) => x.kind === 'putt').map((x) => [x.id, x.visible, x.putt?.holed])).toEqual([
+      ['p1', false, false],
+      ['p2', true, true],
+    ]);
+    const v = compose(doc, plan, null, { locale: 'en' })[0].document;
+    expect(texts(v)).toContain('Hole 7 · Par 4 · Birdie');
+    expect(texts(v)).toContain('7\n4\n3');
+  });
+
+  it('gives an open hole a score from the strokes, and tells the AI it came from the user', () => {
+    const gap = project([media('tee', 0, 0), media('green', 9, 2 * CARRY)], [shot('drive', 'tee', 5), putt('p1', 'green', 5, 9, true)]);
+    expect(summarize(gap).holes[0].strokes).toBeNull();
+    const s = summarize(edited(gap, { '7': { strokes: 5 } }));
+    expect(s.holes[0]).toMatchObject({ strokes: 5, counted: 5, why: [], edited: ['strokes'] });
+    expect(summaryText(s)).toContain('7:5/4 1p (by user) total 5/4');
+    expect(texts(youtubeVideo(edited(gap, { '7': { strokes: 5 } }), 'en', 'YT'))).toContain('Total\n4\n5 (+1)');
+  });
+
+  it('sets a par the map did not know, and needs one for a score', () => {
+    const noPar = (doc: Project) =>
+      migrateProject({ ...doc, media: Object.fromEntries(Object.entries(doc.media).map(([k, m]) => [k, { ...m, place: { ...m.place!, par: null } }])) });
+    expect(summarize(noPar(fullHole())).holes[0]).toMatchObject({ par: null, strokes: null, why: ['no_par'] });
+    expect(summarize(edited(noPar(fullHole()), { '7': { par: 5 } })).holes[0]).toMatchObject({ par: 5, strokes: 4, why: [] });
+    expect(summarize(edited(noPar(fullHole()), { '7': { strokes: 6 } })).holes[0]).toMatchObject({ strokes: null, counted: 6, why: ['no_par'] });
+  });
+
+  it('is optional in the document and checked', () => {
+    expect(fullHole().scoreEdits).toBeUndefined();
+    expect(() => migrateProject({ ...fullHole(), scoreEdits: { '7': { strokes: 0 } } })).toThrow();
+    expect(() => migrateProject({ ...fullHole(), scoreEdits: { '7': { par: 4.5 } } })).toThrow();
+    expect(edited(fullHole(), { '7': {} }).scoreEdits).toEqual({ '7': {} });
+    expect(summarize(edited(fullHole(), { '7': {} })).holes[0].edited).toEqual([]);
   });
 });

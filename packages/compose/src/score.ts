@@ -12,8 +12,12 @@
  *   check: the camera kept filming;
  * - nothing on the hole is in doubt (a retake, a maybe-same shot, unsure putts).
  * Otherwise the hole has no score ('–'); it is never guessed.
+ *
+ * The user's corrections (`Project.scoreEdits`, carried as `RoundSummary.edits`) win over all of
+ * this: a par, the putts (the last one holed: the putts question is settled) or the strokes of
+ * the hole (a score even when not every stroke was filmed).
  */
-import type { GeoPoint } from '@golf/schema';
+import type { GeoPoint, HoleEdit } from '@golf/schema';
 import { sameShotPairs, strikeGroups, type ShotMatch } from './match';
 import { haversine } from './place';
 import { puttQuestionId } from './plan';
@@ -60,11 +64,16 @@ export interface HoleScore {
   /** The score: `counted` when every stroke was filmed, else null. */
   strokes: number | null;
   why: ScoreGap[];
-  /** The putts are in doubt (asked as `putts:<hole>`, see rules.ts). */
+  /** The putts are in doubt (asked as `putts:<hole>`, see rules.ts); false once the user set them. */
   puttsUnsure: boolean;
+  /** What the user corrected on this hole (`Project.scoreEdits`). */
+  edited: (keyof HoleEdit)[];
+  /** The strokes' shot ids in round order (the first angle of a full strike). */
+  shotIds: string[];
 }
 
 interface Stroke {
+  id: string;
   kind: 'full' | 'short' | 'putt';
   /** The shots of one full strike (several angles), empty for chips and putts. */
   full: ShotSummary[];
@@ -73,6 +82,8 @@ interface Stroke {
   t: number;
   clipIds: string[];
 }
+
+const EDIT_KEYS = ['par', 'strokes', 'putts'] as const;
 
 const practice = (flags: readonly string[], confidence: number) => flags.includes('no_track') && confidence < LOW_CONFIDENCE;
 const traced = (x: ShotSummary) => x.carryM !== null && x.trackPts >= 5 && !x.flags.includes('default_path') && !x.flags.includes('no_track');
@@ -89,10 +100,19 @@ function strokesByHole(s: RoundSummary, same: ShotMatch[]): Map<string, Stroke[]
   for (const g of strikeGroups(s, same)) {
     const real = g.filter((x) => !practice(x.flags, x.confidence));
     if (real.length)
-      all.push({ kind: 'full', full: real, hole: real[0].hole, clip: real[0].clip, t: real[0].t, clipIds: [...new Set(real.map((x) => x.clipId))] });
+      all.push({
+        id: real[0].id,
+        kind: 'full',
+        full: real,
+        hole: real[0].hole,
+        clip: real[0].clip,
+        t: real[0].t,
+        clipIds: [...new Set(real.map((x) => x.clipId))],
+      });
   }
   for (const x of [...s.chips, ...s.putts])
-    if (x.kind === 'putt' || !practice(x.flags, x.confidence)) all.push({ kind: x.kind, full: [], hole: x.hole, clip: x.clip, t: x.t, clipIds: [x.clipId] });
+    if (x.kind === 'putt' || !practice(x.flags, x.confidence))
+      all.push({ id: x.id, kind: x.kind, full: [], hole: x.hole, clip: x.clip, t: x.t, clipIds: [x.clipId] });
   all.sort((a, b) => a.clip - b.clip || a.t - b.t);
   const out = new Map<string, Stroke[]>();
   for (const x of all) if (x.hole) out.set(x.hole, [...(out.get(x.hole) ?? []), x]);
@@ -188,8 +208,10 @@ export function holeScores(s: RoundSummary, answers?: Readonly<Record<string, st
     );
   const out: HoleScore[] = [];
   for (const [hole, strokes] of strokesByHole(s, same)) {
+    const edit = s.edits?.[hole] ?? {};
+    const edited = EDIT_KEYS.filter((k) => edit[k] !== undefined);
     const why = checkLegs(s, strokes);
-    const par = s.clips.find((c) => c.hole === hole && c.par)?.par ?? null;
+    const par = edit.par ?? s.clips.find((c) => c.hole === hole && c.par)?.par ?? null;
     if (!par) why.add('no_par');
     const first = strokes[0];
     const fromTee = first.kind === 'putt' ? Infinity : Math.min(...first.clipIds.map((id) => clip.get(id)?.fromTee ?? Infinity));
@@ -202,16 +224,26 @@ export function holeScores(s: RoundSummary, answers?: Readonly<Record<string, st
     let n: number | null = putts.length;
     let holed = putts[putts.length - 1]?.holed ?? null;
     const answer = answers?.[puttQuestionId(hole)];
-    if (answer === 'notHoled') holed = false;
-    else if (answer && /^[1-4]$/.test(answer)) {
-      // '4' is "4 or more": the count is only known when at least four were found.
-      const k = Number(answer);
-      n = k < 4 ? k : putts.length >= 4 ? putts.length : null;
-      holed = true;
+    if (edit.putts !== undefined) {
+      // The user counted them: the hole was finished with that many putts.
+      n = edit.putts;
+    } else {
+      if (answer === 'notHoled') holed = false;
+      else if (answer && /^[1-4]$/.test(answer)) {
+        // '4' is "4 or more": the count is only known when at least four were found.
+        const k = Number(answer);
+        n = k < 4 ? k : putts.length >= 4 ? putts.length : null;
+        holed = true;
+      }
+      if ((unsure && !answer) || n === null) why.add('putts_unsure');
+      if (strokes[strokes.length - 1].kind !== 'putt' || holed !== true) why.add('not_holed');
     }
-    if ((unsure && !answer) || n === null) why.add('putts_unsure');
-    if (strokes[strokes.length - 1].kind !== 'putt' || holed !== true) why.add('not_holed');
-    const counted = strokes.filter((x) => x.kind !== 'putt').length + (n ?? 4);
+    let counted = strokes.filter((x) => x.kind !== 'putt').length + (n ?? 4);
+    if (edit.strokes !== undefined) {
+      // The user's count of the whole hole: nothing filmed is left in doubt, except a missing par.
+      counted = edit.strokes;
+      for (const g of SCORE_GAPS) if (g !== 'no_par') why.delete(g);
+    }
     out.push({
       hole,
       par,
@@ -219,10 +251,25 @@ export function holeScores(s: RoundSummary, answers?: Readonly<Record<string, st
       putts: n ?? 4,
       strokes: why.size ? null : counted,
       why: SCORE_GAPS.filter((g) => why.has(g)),
-      puttsUnsure: unsure,
+      puttsUnsure: unsure && edit.putts === undefined,
+      edited,
+      shotIds: strokes.map((x) => x.id),
     });
   }
   return out;
+}
+
+/**
+ * The holes that count for a score: all of them once putts were filmed or the user corrected a
+ * hole, else none (without putts on video no hole can be complete).
+ */
+export function scoredHoles(s: Pick<RoundSummary, 'holes' | 'putts'>): HoleScore[] {
+  return s.putts.length || s.holes.some((h) => h.edited.length) ? s.holes : [];
+}
+
+/** The putts question's answer an edit gives (`putts:<hole>` → '1'…'4'), or null. */
+export function editedPuttAnswer(edit: HoleEdit | undefined): string | null {
+  return edit?.putts ? String(Math.min(4, edit.putts)) : null;
 }
 
 const NAMES = {

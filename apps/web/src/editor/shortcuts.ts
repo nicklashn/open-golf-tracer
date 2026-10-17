@@ -14,9 +14,8 @@ export function stepShot(dir: 1 | -1): boolean {
   const s = useEditor.getState();
   const cues = s.doc.shots
     .filter((x) => x.visible)
-    .map((x) => ({ x, t: ops.shotLaunchTime(s.doc, x) }))
-    .filter((c): c is { x: (typeof s.doc.shots)[number]; t: number } => c.t != null)
-    .map((c) => ({ x: c.x, t: Math.max(0, c.t - 0.6) }));
+    .map((x) => ({ x, t: ops.shotCueTime(s.doc, x) }))
+    .filter((c): c is { x: (typeof s.doc.shots)[number]; t: number } => c.t != null);
   const to = stepTo(
     cues.map((c) => c.t),
     s.time,

@@ -3132,6 +3132,34 @@
           "type": "boolean"
         }
       }
+    },
+    "scoreEdits": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "par": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 7
+          },
+          "strokes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "putts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          }
+        }
+      }
     }
   },
   "required": [
