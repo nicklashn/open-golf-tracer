@@ -145,3 +145,88 @@ def test_real_model_parallel_sessions_match_one_session():
     b = [two._predict(img, 0.01) for img in imgs]
     assert [[(k, x.x1, x.y1, x.conf) for k, x in d] for d in a] == [[(k, x.x1, x.y1, x.conf) for k, x in d] for d in b]
     assert _key(one.people_many(imgs)) == _key(two.people_many(imgs))
+
+
+def test_preprocessing_matches_rfdetr():
+    """Resizing before the scaling (the fast way) gives rfdetr's numbers: RGB in [0, 1], bilinear
+    resize, ImageNet normalisation, CHW."""
+    import cv2
+
+    img = _images(1)[0]
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+    x = cv2.resize(rgb, (704, 704), interpolation=cv2.INTER_LINEAR)
+    ref = ((x - OnnxRfDetrBallDetector.MEAN) / OnnxRfDetrBallDetector.STD).transpose(2, 0, 1)
+    out = _fake_detector()._prep(img)
+    assert out.shape == (3, 704, 704) and out.dtype == np.float32 and out.flags.c_contiguous
+    assert np.abs(out - ref).max() < 1e-4
+
+
+class DmlSession(FakeSession):
+    """A DirectML session that notices Run calls overlapping with any other DirectML session's."""
+    running = [0]
+    overlaps = [0]
+
+    def get_providers(self):
+        return ["DmlExecutionProvider", "CPUExecutionProvider"]
+
+    def run(self, _outputs, feeds):
+        import time
+
+        DmlSession.running[0] += 1
+        if DmlSession.running[0] > 1:
+            DmlSession.overlaps[0] += 1
+        time.sleep(0.005)
+        try:
+            return super().run(_outputs, feeds)
+        finally:
+            DmlSession.running[0] -= 1
+
+
+def test_directml_runs_one_call_at_a_time_across_sessions_and_detectors():
+    """Two DirectML sessions running at once failed on an RTX 5070 (DmlFusedNode); an old and a
+    new detector (a profile change during an analysis) must not overlap either."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    a, b = (OnnxRfDetrBallDetector.__new__(OnnxRfDetrBallDetector) for _ in range(2))
+    a._init([DmlSession(), DmlSession()])
+    b._init([DmlSession()])
+    assert a.provider == "DmlExecutionProvider" and b.parallel == 2   # a second caller prepares the next frame
+    imgs = _images(6)
+    DmlSession.overlaps[0] = 0
+    with ThreadPoolExecutor(4) as ex:
+        list(ex.map(lambda d: d.people_many(imgs), [a, b, a, b]))
+    assert DmlSession.overlaps[0] == 0
+
+
+def test_directml_gets_one_session_and_reports_why_sessions_failed(monkeypatch):
+    import sys
+
+    from shottracer.runtime import Runtime
+
+    made = []
+
+    class FakeOrt(SimpleNamespace):
+        class ExecutionMode:
+            ORT_SEQUENTIAL = "seq"
+
+        @staticmethod
+        def SessionOptions():  # noqa: N802 - onnxruntime's name
+            return SimpleNamespace()
+
+        @staticmethod
+        def InferenceSession(path, opts, providers):  # noqa: N802
+            made.append((providers, opts))
+            if "CUDAExecutionProvider" in providers and len(made) == 2:
+                raise RuntimeError("CUDA failure 2: out of memory")
+            return FakeSession()
+
+    ort = FakeOrt(get_available_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    det = OnnxRfDetrBallDetector(Path("x.onnx"), Runtime(sessions=3))
+    assert det.sessions == 1 and len(made) == 1 and made[0][0][0] == "DmlExecutionProvider"
+    assert made[0][1].enable_mem_pattern is False and made[0][1].execution_mode == "seq"   # the DirectML rules
+
+    made.clear()
+    ort.get_available_providers = lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    det = OnnxRfDetrBallDetector(Path("x.onnx"), Runtime(sessions=3))
+    assert det.sessions == 1 and "out of memory" in (det.session_error or "")

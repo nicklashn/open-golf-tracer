@@ -4,9 +4,11 @@
  * Settings → Performance: the worker's profile (how many analyses/videos at once, detector
  * sessions, CPU threads), the hardware it sees, and "Optimise" – a short benchmark job that saves
  * the fastest safe settings as "Tuned for this PC". The worker reads the profile before each job.
+ * A running Optimise is picked up again when the page opens; "Details" lists every step it tried
+ * (with the error of a failed one, for a bug report).
  */
 import { Gauge } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { ProgressBar } from '@/components/ui/misc';
 import { toast } from '@/components/ui/toast';
@@ -28,12 +30,24 @@ interface Perf {
   gpu: boolean;
 }
 
+interface Trial {
+  kind?: 'detector' | 'decode';
+  sessions: number;
+  batch: number;
+  callers?: number;
+  fps: number | null;
+  vram_mb: number | null;
+  error: string | null;
+  provider?: string | null;
+}
+
 interface TuneSummary {
   speedup: number;
   inference: Device;
   gpu: string | null;
   vramMb: number | null;
   stop: 'vram' | 'error' | 'no_gain' | 'time' | 'cpu' | 'done';
+  trials?: Trial[];
 }
 
 export interface PerformanceInfo {
@@ -62,9 +76,22 @@ export function PerformanceSettings() {
   const [saving, setSaving] = useState(false);
   const [job, setJob] = useState<JobInfo | null>(null);
   const [error, setError] = useState('');
+  const alive = useRef(true);
 
   useEffect(() => {
+    alive.current = true;
     void api<PerformanceInfo>('/performance').then(setInfo, (e) => setError(errorMessage(e, t)));
+    // An Optimise started earlier (the page was left meanwhile) is followed again.
+    void api<{ jobs: JobInfo[] }>('/jobs?active=true').then(
+      ({ jobs }) => {
+        const running = jobs.find((x) => x.kind === 'tune');
+        if (running) void follow(running);
+      },
+      () => undefined,
+    );
+    return () => {
+      alive.current = false;
+    };
     // Once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -81,24 +108,44 @@ export function PerformanceSettings() {
     }
   }
 
+  /** Polls the Optimise job until it ends. It takes 30–60 s once it runs, but waits for the
+   *  analyses already running (a round of clips can take a while), so there is no time limit. */
+  async function follow(start: JobInfo) {
+    let j: JobInfo | undefined = start;
+    setJob(j);
+    try {
+      while (alive.current && j && (j.status === 'queued' || j.status === 'running')) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const { jobs } = await api<{ jobs: JobInfo[] }>('/jobs');
+        j = jobs.find((x) => x.id === start.id);
+        if (j) setJob(j);
+      }
+      if (!alive.current) return;
+      if (j?.status === 'succeeded') setInfo(await api<PerformanceInfo>('/performance?refresh=true'));
+      else if (j?.status === 'canceled') setError(T.canceled);
+      else setError(`${T.failed}${j?.error ? `: ${j.error}` : ''}`);
+    } catch (e) {
+      if (alive.current) setError(`${T.failed}: ${errorMessage(e, t)}`);
+    } finally {
+      if (alive.current) setJob(null);
+    }
+  }
+
   async function optimize() {
     setError('');
     try {
-      let j = await api<JobInfo>('/performance/optimize', { method: 'POST' });
-      setJob(j);
-      // The benchmark takes 30–60 s, longer while another analysis holds the queue.
-      for (let i = 0; i < 600 && (j.status === 'queued' || j.status === 'running'); i++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        const { jobs } = await api<{ jobs: JobInfo[] }>('/jobs');
-        j = jobs.find((x) => x.id === j.id) ?? j;
-        setJob(j);
-      }
-      if (j.status === 'succeeded') setInfo(await api<PerformanceInfo>('/performance?refresh=true'));
-      else setError(`${T.failed}${j.error ? `: ${j.error}` : ''}`);
+      await follow(await api<JobInfo>('/performance/optimize', { method: 'POST' }));
     } catch (e) {
       setError(`${T.failed}: ${errorMessage(e, t)}`);
-    } finally {
-      setJob(null);
+    }
+  }
+
+  async function stop() {
+    if (!job) return;
+    try {
+      await api(`/jobs/${job.id}/cancel`, { method: 'POST' });
+    } catch (e) {
+      toast.error(errorMessage(e, t));
     }
   }
 
@@ -107,6 +154,17 @@ export function PerformanceSettings() {
   const gpu = hw.gpus[0];
   const tuned = info.tuned?.summary;
   const label = (p: Profile | 'cpu') => (p === 'cpu' ? T.cpuLabel : T.profiles[p]);
+
+  function trialText(tr: Trial) {
+    const n = tr.callers ?? 1;
+    const what =
+      tr.kind === 'decode'
+        ? f(T.trialDecode, { n })
+        : f(T.trial, { sessions: tr.sessions, batch: tr.batch, callers: n }) + (tr.provider ? ` (${tr.provider})` : '');
+    if (tr.error) return `${what}: ${T.trialFailed}`;
+    const fps = f(T.trialFps, { fps: number(tr.fps ?? 0, locale, 1) });
+    return `${what}: ${fps}${tr.vram_mb ? ` · ${f(T.trialVram, { mb: tr.vram_mb })}` : ''}`;
+  }
 
   function does(p: Perf) {
     return (
@@ -182,11 +240,16 @@ export function PerformanceSettings() {
 
       <div className="grid gap-2">
         <p className="text-[13px] text-fg-muted">{T.optimizeLead}</p>
-        <div>
+        <div className="flex gap-2">
           <Button type="button" variant="secondary" onClick={() => void optimize()} loading={!!job} disabled={!!job}>
             <Gauge />
             {job ? T.optimizing : T.optimize}
           </Button>
+          {job ? (
+            <Button type="button" variant="ghost" onClick={() => void stop()}>
+              {T.stopOptimize}
+            </Button>
+          ) : null}
         </div>
         {job ? (
           <div className="grid gap-1" aria-live="polite">
@@ -207,6 +270,19 @@ export function PerformanceSettings() {
               : f(T.resultCpu, { n: info.profiles.tuned?.analyses ?? 1 })}{' '}
             {T.stop[tuned.stop]} {info.tuned ? f(T.measuredAt, { when: relativeTime(info.tuned.at, locale) }) : ''}
           </p>
+        ) : null}
+        {tuned?.trials?.length && !job ? (
+          <details className="text-[12px] text-fg-muted" data-testid="perf-details">
+            <summary className="cursor-pointer select-none">{T.details}</summary>
+            <ol className="mt-1 grid gap-1 pl-4">
+              {tuned.trials.map((tr, i) => (
+                <li key={i} className="list-decimal">
+                  {trialText(tr)}
+                  {tr.error ? <pre className="mt-0.5 whitespace-pre-wrap break-all text-accent-fg">{tr.error}</pre> : null}
+                </li>
+              ))}
+            </ol>
+          </details>
         ) : null}
       </div>
     </div>

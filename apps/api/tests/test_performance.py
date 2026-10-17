@@ -45,7 +45,9 @@ def test_profiles_on_a_gpu_pc():
     assert gentle == Perf(analyses=1, ingests=1, sessions=1, batch=1, threads=8)
     assert performance.for_profile("balanced", GPU_PC) == Perf(analyses=1, ingests=2, sessions=1, batch=1, threads=0)
     mx = performance.for_profile("max", GPU_PC)
-    assert mx.analyses == 3 and mx.sessions == 3 and mx.ingests == 4 and mx.threads == 0
+    assert mx.analyses == 3 and mx.ingests == 4 and mx.threads == 0
+    # DirectML runs one detector call at a time: the analyses share one session; CUDA gets one each.
+    assert mx.sessions == 1 and performance.for_profile("max", {**GPU_PC, "inference": "CUDA"}).sessions == 3
     small = {**GPU_PC, "gpus": [{"name": "GTX 1650", "vramMb": 4096, "usedMb": 0}]}
     assert performance.for_profile("max", small).analyses == 1
     # Little RAM caps the analyses too (each holds seconds of full-HD frames).
@@ -129,3 +131,44 @@ def test_endpoints(client):
     performance.save_tuned(Perf(analyses=2, ingests=2, sessions=2), {"speedup": 2.4, "gpu": "RTX 5070", "inference": "DirectML", "stop": "vram"})
     s = client.get("/api/performance").json()
     assert s["profile"] == "tuned" and s["profiles"]["tuned"]["analyses"] == 2 and s["tuned"]["summary"]["speedup"] == 2.4
+
+
+@pytest.mark.parametrize("text", [
+    '{"profile": "tuned", "tuned": "old format", "rev": 3}',
+    '{"profile": "max", "rev": "seven", "fallback": ["max", "balanced"]}',
+    '{"profile": "tuned", "tuned": [1, 2], "cpuOnly": true}',
+    '["balanced"]',
+    '',
+])
+def test_odd_files_do_not_stop_anything(env, client, text):
+    """An older, hand-edited or half-written performance.json: the worker's startup and every
+    job read it, and the settings page shows it."""
+    from golf_worker import main, tasks
+
+    (env / "data" / "performance.json").write_text(text)
+    perf, data = performance.effective(GPU_PC)
+    assert data["profile"] in performance.PROFILES and isinstance(data["rev"], int)
+    assert main.lane_threads("analysis") >= 1 and isinstance(tasks.apply_performance(), int)
+    r = client.get("/api/performance")
+    assert r.status_code == 200, r.text
+    assert client.put("/api/performance", json={"profile": "gentle"}).json()["profile"] == "gentle"
+    assert performance.step_down(performance.load()["rev"], "oom")["to"] == "gentle" or performance.load().get("cpuOnly")
+
+
+def test_a_failed_read_is_not_remembered(env, monkeypatch):
+    """Windows: reading the file while the other process replaces it fails once; the next read
+    must see the real profile, not a remembered "balanced"."""
+    performance.set_profile("max")
+    real = performance.Path.read_text
+    fail = [True]
+
+    def flaky(self, *a, **k):
+        if fail and self.name == performance.FILE:
+            fail.clear()
+            raise PermissionError(13, "The process cannot access the file")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(performance.Path, "read_text", flaky)
+    performance._cache.clear()
+    assert performance.load()["profile"] == "balanced"     # this one read: the safe default
+    assert performance.load()["profile"] == "max"

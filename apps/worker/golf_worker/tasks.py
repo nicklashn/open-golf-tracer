@@ -342,7 +342,10 @@ def apply_performance() -> int:
     from shottracer import runtime
 
     perf, data = performance.effective()
-    runtime.configure(runtime.Runtime(sessions=perf.sessions, batch=perf.batch, threads=perf.threads, gpu=perf.gpu))
+    rt = runtime.Runtime(sessions=perf.sessions, batch=perf.batch, threads=perf.threads, gpu=perf.gpu)
+    if rt != runtime.current():
+        log.info("performance: %s profile -> %s", data["profile"], rt)
+    runtime.configure(rt)
     return int(data.get("rev", 0))
 
 
