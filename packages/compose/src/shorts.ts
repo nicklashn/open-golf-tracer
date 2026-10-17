@@ -86,20 +86,21 @@ export function shortFor(doc: Project, shot: Shot, name: string, locale: 'da' | 
 
 /** Seconds a putt rolls when the analysis gave no end. */
 const PUTT_ROLL_S = 4;
-/** Seconds kept before a putt and after its ball stops. */
-export const PUTT_PAD_S = 1;
+/** Seconds kept before a putt's stroke (the backswing) ... */
+export const PUTT_LEAD_S = 0.7;
+/** ... and after its ball stops or drops. */
+export const PUTT_TAIL_S = 1;
 
 /** Source seconds when a putt's ball stopped or dropped. */
 export function puttEnd(putt: Shot): number {
   return Math.max(putt.impactTime, putt.putt?.end ?? putt.impactTime + PUTT_ROLL_S * putt.slowmo);
 }
 
-/** A short of one putt: vertical, from a second before the stroke to a second after the ball stops, no tracer. */
+/** A short of one putt: vertical, from just before the stroke to a second after the ball stops, no tracer. */
 export function puttShort(doc: Project, putt: Shot, name: string): Project {
   const media = doc.media[putt.mediaId];
-  const pad = PUTT_PAD_S * putt.slowmo;
-  const a = Math.max(0, putt.impactTime - pad);
-  const b = Math.min(media?.duration ?? Infinity, puttEnd(putt) + pad);
+  const a = Math.max(0, putt.impactTime - PUTT_LEAD_S * putt.slowmo);
+  const b = Math.min(media?.duration ?? Infinity, puttEnd(putt) + PUTT_TAIL_S * putt.slowmo);
   const clips: Clip[] = [{ id: newId('c_'), kind: 'video', mediaId: putt.mediaId, in: a, out: Math.max(b, a + 0.5), speed: 1, volume: 1, muted: false }];
   // Framed on the ball at address, then where it was last seen.
   const keys: ReframeKey[] = [];

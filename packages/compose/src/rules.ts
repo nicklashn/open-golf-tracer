@@ -5,7 +5,7 @@
 import { TEMPLATES } from '@golf/render';
 import type { WarningCode } from '@golf/schema';
 import { compareShots, sameShotPairs, strikeGroups, type ShotMatch } from './match';
-import { puttQuestionId, REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type PuttMode, type ReasonCode } from './plan';
+import { defaultPutts, puttQuestionId, REASON_CODES, VideoPlan, type PlanItem, type PlanKind, type PlanQuestion, type PuttMode, type ReasonCode } from './plan';
 import type { ClipSummary, RoundSummary, ShotSummary, StrokeSummary } from './summary';
 
 type Locale = 'da' | 'en';
@@ -427,8 +427,9 @@ export function planFromRules(s: RoundSummary, preference: string, locale: Local
   //   id `putts:<hole>`; options '1', '2', '3' = that many putts, the last holed; '4' = four or
   //   more, the last holed; 'notHoled' = the last did not drop (or was not filmed to the end).
   // The answer sets the hole's score and the putts shown (the last N of those found).
+  // Asked for the YouTube video's score, and wherever putts are shown (shorts show none by default).
   const putts = pref.putts ?? null;
-  if (kind === 'youtube' || putts !== 'none')
+  if (kind === 'youtube' || (putts ?? defaultPutts(kind)) !== 'none')
     for (const h of s.holes) {
       if (!h.puttsUnsure) continue;
       const list = s.putts.filter((p) => p.hole === h.hole);

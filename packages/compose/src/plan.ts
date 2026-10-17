@@ -10,8 +10,17 @@ export type PlanKind = (typeof PLAN_KINDS)[number];
 /** Which putts a video shows (never traced): none, only those that went in, or each hole's putting. */
 export const PUTT_MODES = ['none', 'holed', 'all'] as const;
 export type PuttMode = (typeof PUTT_MODES)[number];
-/** Without a choice: the YouTube video shows the putting of each hole, shorts only holed putts. */
-export const defaultPutts = (kind: PlanKind): PuttMode => (kind === 'youtube' ? 'all' : 'holed');
+/**
+ * Putts shown when the wish says nothing: a mode, or `best` – only holed putts the analysis is
+ * sure of that are worth a look (a long roll), see `shownPutts`.
+ */
+export type PuttShow = PuttMode | 'best';
+/**
+ * Without a choice the videos stay light on putting: the YouTube video shows the holed putt of
+ * each hole, the highlight only notable holed putts, and shorts none (no short per putt). The
+ * wish ("alle putts", "putts der går i", "uden putts") or the plan's `putts` overrides this.
+ */
+export const defaultPutts = (kind: PlanKind): PuttShow => (kind === 'youtube' ? 'holed' : kind === 'highlight' ? 'best' : 'none');
 
 const shortText = (max: number) => z.string().trim().max(max);
 

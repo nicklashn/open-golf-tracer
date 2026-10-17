@@ -7,6 +7,7 @@ import {
   mergeAiPlan,
   planFromRules,
   prepare,
+  PUTT_HOLE_MAX_S,
   puttCuts,
   puttsUnsure,
   readPreference,
@@ -74,40 +75,100 @@ const fullHole = (holed: boolean | null = true, putts: Record<string, unknown> =
 
 const texts = (doc: Project) => doc.layers.flatMap((l) => (l.type === 'text' ? [l.props.text] : l.type === 'lowerThird' ? [l.props.title] : []));
 
+const greenCuts = (doc: Project) => doc.clips.flatMap((c) => (c.kind === 'video' && c.mediaId === 'green' ? [[c.in, c.out]] : []));
+
+// Expected cuts changed deliberately with the "fewer putts" defaults: 0.7 s before a stroke and
+// 1 s after the ball stops (was 1 s / 1 s), waits over 2.5 s cut out (was 4 s), 1.5 s hold for
+// the score (was 2.5 s), and only the holed putt of each hole unless the wish asks for all.
 describe('putts in the videos', () => {
-  it('cuts the putting from a second before the first putt to a second after the last stops, waits shortened', () => {
+  it('cuts the putting tight around each stroke, waits cut out', () => {
     const doc = fullHole();
     const putts = doc.shots.filter((s) => s.kind === 'putt');
     expect(puttCuts(putts, doc.media.green)).toMatchObject([
-      { a: 4, b: 10 },
-      { a: 19, b: 24 },
+      { a: 4.3, b: 10 },
+      { a: 19.3, b: 24 },
     ]);
     // A short wait stays in one cut; `whole` keeps the wait.
-    expect(puttCuts([putts[0], { ...putts[1], impactTime: 12 }], doc.media.green)).toHaveLength(1);
-    expect(puttCuts(putts, doc.media.green, true)).toMatchObject([{ a: 4, b: 24 }]);
+    expect(puttCuts([putts[0], { ...putts[1], impactTime: 11 }], doc.media.green)).toHaveLength(1);
+    expect(puttCuts([putts[0], { ...putts[1], impactTime: 12, putt: { end: 15, holed: true } }], doc.media.green)).toHaveLength(2);
+    // Kept whole, the green is still capped: its end stays.
+    expect(puttCuts(putts, doc.media.green, true)).toMatchObject([{ a: 12, b: 24 }]);
   });
 
-  it('shows each hole’s putting in the YouTube video as plain video, without stats', () => {
-    const v = youtubeVideo(fullHole(null), 'da', 'YT');
-    const green = v.clips.filter((c) => c.kind === 'video' && c.mediaId === 'green');
-    expect(green.map((c) => c.kind === 'video' && [c.in, c.out])).toEqual([
-      [4, 10],
-      [19, 24],
-    ]);
+  it('keeps at most PUTT_HOLE_MAX_S of one green, the last putt always', () => {
+    const doc = fullHole();
+    const p = doc.shots.find((s) => s.kind === 'putt')!;
+    // Five putts of 3 s, a long wait before each: 5 × 4.7 s of footage.
+    const five = [0, 1, 2, 3, 4].map((i) => ({ ...p, id: `q${i}`, impactTime: 2 + 10 * i, putt: { end: 5 + 10 * i, holed: i === 4 } }));
+    const cuts = puttCuts(five, { ...doc.media.green, duration: 60 });
+    expect(cuts.reduce((n, c) => n + c.b - c.a, 0)).toBeLessThanOrEqual(PUTT_HOLE_MAX_S + 1e-9);
+    expect(cuts[cuts.length - 1].putts.map((x) => x.id)).toEqual(['q4']);
+    expect(cuts.flatMap((c) => c.putts.map((x) => x.id))).toEqual(['q3', 'q4']);
+  });
+
+  it('shows only the holed putt of each hole in the YouTube video by default, all with "alle putts"', () => {
+    const doc = fullHole();
+    const v = youtubeVideo(doc, 'da', 'YT');
+    expect(greenCuts(v)).toEqual([[19.3, 24.5]]);
     const cards = v.layers.flatMap((l) => (l.type === 'statCard' ? [l.props.shotId] : []));
     expect(cards).toEqual(['drive', 'approach']);
     for (const l of v.layers) expect(l.end).toBeLessThanOrEqual(timelineDuration(v) + 1e-6);
+    expect(greenCuts(youtubeVideo(doc, 'da', 'YT', {}, { putts: 'all' }))).toEqual([
+      [4.3, 10],
+      [19.3, 24.5],
+    ]);
+    const all = compose(doc, planFromRules(summarize(doc), 'YouTube med alle putts', 'da'), null, { locale: 'da' })[0].document;
+    expect(greenCuts(all)).toHaveLength(2);
+    expect(greenCuts(compose(doc, planFromRules(summarize(doc), 'YouTube uden putts', 'da'), null, { locale: 'da' })[0].document)).toEqual([]);
   });
 
-  it('puts only holed putts in the highlight, and none when the wish says so', () => {
+  it('leaves out the putting of a hole the analysis is unsure of, until the putts question is answered', () => {
+    const doc = fullHole(true, { confidence: 0.4 });
+    const plan = planFromRules(summarize(doc), 'all putts', 'en');
+    expect(greenCuts(youtubeVideo(doc, 'en', 'YT', {}, { putts: 'all' }))).toEqual([]);
+    // Defaults are not answers: still left out, but the score counts them.
+    const auto = compose(doc, plan, null, { locale: 'en' })[0].document;
+    expect(greenCuts(auto)).toEqual([]);
+    expect(texts(auto)).toContain('Hole 7 · Par 4 · Par');
+    const answered = compose(doc, plan, { 'putts:7': '2' }, { locale: 'en' })[0].document;
+    expect(greenCuts(answered)).toHaveLength(2);
+  });
+
+  it('keeps putts the analysis hid hidden, and their strokes in the score', () => {
+    const doc = fullHole(true);
+    doc.shots.find((s) => s.id === 'p1')!.visible = false;
+    const plan = planFromRules(summarize(doc), 'alle putts', 'da');
+    const { doc: ready } = prepare(doc, plan, null);
+    expect(ready.shots.filter((s) => s.kind === 'putt').map((s) => s.visible)).toEqual([false, true]);
+    expect(summarize(doc).holes[0]).toMatchObject({ putts: 2, strokes: 4 });
+    expect(greenCuts(compose(doc, plan, null, { locale: 'da' })[0].document)).toEqual([[19.3, 24.5]]);
+  });
+
+  it('puts only notable holed putts in the highlight, and none when the wish says so', () => {
     const doc = fullHole();
     const hl = highlightShort(doc, 'en', 'HL');
-    expect(hl.clips.filter((c) => c.kind === 'video' && c.mediaId === 'green').map((c) => c.kind === 'video' && [c.in, c.out])).toEqual([[19, 24]]);
+    expect(greenCuts(hl)).toEqual([[19.3, 24]]);
     expect(hl.layers.filter((l) => l.type === 'statCard')).toHaveLength(2);
+    // A tap-in (1 s roll) is not notable: only with "putts der går i".
+    const tap = fullHole(true);
+    tap.shots.find((s) => s.id === 'p2')!.putt = { end: 21, holed: true };
+    expect(greenCuts(highlightShort(tap, 'en', 'HL'))).toEqual([]);
+    expect(greenCuts(compose(tap, planFromRules(summarize(tap), 'short med putts der går i', 'da'), null, { locale: 'da' })[0].document)).toEqual([[19.3, 22]]);
     const none = compose(doc, planFromRules(summarize(doc), 'TikTok uden putts', 'da'), null, { locale: 'da' })[0].document;
     expect(none.clips.some((c) => c.mediaId === 'green')).toBe(false);
     const all = compose(doc, planFromRules(summarize(doc), 'a short with all putts'), null, { locale: 'en' })[0].document;
     expect(all.clips.filter((c) => c.mediaId === 'green')).toHaveLength(2);
+  });
+
+  it('makes no short per putt unless the wish asks for putts', () => {
+    const doc = fullHole();
+    const names = (wish: string) => compose(doc, planFromRules(summarize(doc), wish, 'en'), null, { locale: 'en' }).map((v) => v.document.shots[0].id);
+    expect(names('one short per shot')).toEqual(['drive', 'approach']);
+    expect(names('one short per shot, putts that go in')).toEqual(['drive', 'approach', 'p2']);
+    expect(names('one short per shot with all putts')).toEqual(['drive', 'approach', 'p1', 'p2']);
+    // Nothing to ask about putts when none are shown.
+    const unsure = fullHole(true, { confidence: 0.4 });
+    expect(planFromRules(summarize(unsure), 'one short per shot').questions.some((q) => q.id.startsWith('putts:'))).toBe(false);
   });
 
   it('reads putts in the wish', () => {
@@ -146,7 +207,7 @@ describe('the score of a hole', () => {
     expect(texts(v)).toContain('I alt\n4\n4 (±0)');
     expect(v.clips[v.clips.length - 1].kind).toBe('freeze');
     // The holed putt is held a little longer to read the score.
-    expect(v.clips.filter((c) => c.kind === 'video' && c.mediaId === 'green').map((c) => c.kind === 'video' && c.out)).toEqual([10, 25.5]);
+    expect(v.clips.filter((c) => c.kind === 'video' && c.mediaId === 'green').map((c) => c.kind === 'video' && c.out)).toEqual([24.5]);
     const en = youtubeVideo(fullHole(), 'en', 'YT');
     expect(texts(en)).toContain('Hole 7 · Par 4 · Par');
   });

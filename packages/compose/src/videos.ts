@@ -19,9 +19,10 @@ import {
 } from '@golf/schema';
 import { layerDefaults, type LayerNames } from './layers';
 import { placeTitle } from './place';
-import { defaultPutts, type PuttMode } from './plan';
+import { defaultPutts, type PuttShow } from './plan';
+import { LOW_CONFIDENCE } from './rules';
 import { scoreName, toPar, type HoleScore } from './score';
-import { PUTT_PAD_S, puttEnd, puttShort, shortFor } from './shorts';
+import { PUTT_LEAD_S, PUTT_TAIL_S, puttEnd, puttShort, shortFor } from './shorts';
 import { summarize } from './summary';
 
 export type VideoKind = 'youtube' | 'highlight';
@@ -31,10 +32,16 @@ type Locale = 'da' | 'en';
 /** Seconds kept after each landing in the YouTube edit: long enough to read the stats card. */
 const AFTER_LANDING_S = 3.2;
 
-/** Waits between putts longer than this are cut down to PUTT_PAD_S before the next stroke. */
-export const PUTT_GAP_S = 4;
-/** After a holed putt that ends a scored hole: time to read the score. */
-const SCORE_HOLD_S = 2.5;
+/** Waits between putts longer than this are cut out (PUTT_TAIL_S after a stop, PUTT_LEAD_S before the next stroke). */
+export const PUTT_GAP_S = 2.5;
+/** The most putting of one green kept in a video (seconds); the earliest putts go first. */
+export const PUTT_HOLE_MAX_S = 12;
+/** After a holed putt that ends a scored hole: a little longer, for the score. */
+const SCORE_HOLD_S = 1.5;
+/** A holed putt worth a place in the highlight by default: the analysis is this sure of it ... */
+export const NOTABLE_PUTT_CONF = 0.75;
+/** ... and the ball rolled at least this long (seconds of real time: a putt of several metres). */
+export const NOTABLE_PUTT_S = 3;
 const SCORECARD_S = 7;
 
 /** Visible full shots in the order they were played: timeline order of their clips, then time. */
@@ -42,26 +49,41 @@ export function playedShots(doc: Project): Shot[] {
   return doc.shots.filter((s) => s.visible && s.kind === 'full' && doc.media[s.mediaId]).sort(byTimeline(doc.clips));
 }
 
-/** Visible putts to show (never traced), in playing order; 'holed' keeps those that went in. */
-export function shownPutts(doc: Project, mode: PuttMode): Shot[] {
+/** The analysis is sure of this putt: confident and without a warning about the count. */
+export const surePutt = (s: Shot) => s.confidence >= LOW_CONFIDENCE && !s.warnings.some((w) => w.code === 'putt_count_unsure');
+
+/**
+ * Visible putts to show (never traced), in playing order: 'holed' keeps those that went in,
+ * 'best' only holed ones the analysis is sure of that rolled a long way. Putts on `skipHoles`
+ * (holes whose putting is in doubt) are left out.
+ */
+export function shownPutts(doc: Project, mode: PuttShow, skipHoles: readonly string[] = []): Shot[] {
   if (mode === 'none') return [];
+  const keep = (s: Shot) =>
+    mode === 'all' ||
+    (s.putt?.holed === true &&
+      (mode === 'holed' || (s.confidence >= NOTABLE_PUTT_CONF && surePutt(s) && (puttEnd(s) - s.impactTime) / s.slowmo >= NOTABLE_PUTT_S)));
   return doc.shots
-    .filter((s) => s.visible && s.kind === 'putt' && doc.media[s.mediaId] && (mode === 'all' || s.putt?.holed === true))
+    .filter((s) => s.visible && s.kind === 'putt' && doc.media[s.mediaId] && !skipHoles.includes(doc.media[s.mediaId].place?.hole ?? '') && keep(s))
     .sort(byTimeline(doc.clips));
 }
 
+/** Holes whose putting is left out by default: the analysis is unsure of the putts and no one answered. */
+export const unsurePuttHoles = (scores: readonly HoleScore[], settled: readonly string[] = []) =>
+  scores.filter((h) => h.puttsUnsure && !settled.includes(h.hole)).map((h) => h.hole);
+
 /**
- * The putting on one green as cuts of its clip, from PUTT_PAD_S before the first putt to
- * PUTT_PAD_S after the last one stops; a wait between putts longer than PUTT_GAP_S is cut down
- * to the pad before the next stroke (`whole` keeps it, e.g. when a putt was not found).
- * `putts` are of one clip, in order.
+ * The putting on one green as cuts of its clip, from PUTT_LEAD_S before each stroke to
+ * PUTT_TAIL_S after its ball stops (`tail` after the last one); a wait between putts longer than
+ * PUTT_GAP_S is cut out (`whole` keeps it, e.g. when a putt was not found). At most
+ * PUTT_HOLE_MAX_S (seconds of real time) are kept: the earliest putts are dropped first, the
+ * last one always stays. `putts` are of one clip, in order.
  */
-export function puttCuts(putts: Shot[], media: MediaRef, whole = false, tail = PUTT_PAD_S): { a: number; b: number; putts: Shot[] }[] {
+export function puttCuts(putts: Shot[], media: MediaRef, whole = false, tail = PUTT_TAIL_S): { a: number; b: number; putts: Shot[] }[] {
   const out: { a: number; b: number; putts: Shot[] }[] = [];
   putts.forEach((p, i) => {
-    const pad = PUTT_PAD_S * p.slowmo;
-    const a = Math.max(0, p.impactTime - pad);
-    const b = Math.min(media.duration, puttEnd(p) + (i === putts.length - 1 ? tail : PUTT_PAD_S) * p.slowmo);
+    const a = Math.max(0, p.impactTime - PUTT_LEAD_S * p.slowmo);
+    const b = Math.min(media.duration, puttEnd(p) + (i === putts.length - 1 ? tail : PUTT_TAIL_S) * p.slowmo);
     const last = out[out.length - 1];
     const prev = putts[i - 1];
     if (last && (whole || p.impactTime - puttEnd(prev) <= PUTT_GAP_S * p.slowmo || a <= last.b)) {
@@ -69,6 +91,17 @@ export function puttCuts(putts: Shot[], media: MediaRef, whole = false, tail = P
       last.putts.push(p);
     } else out.push({ a, b, putts: [p] });
   });
+  const slowmo = putts[0]?.slowmo ?? 1;
+  const cap = PUTT_HOLE_MAX_S * slowmo;
+  const length = () => out.reduce((n, c) => n + c.b - c.a, 0);
+  while (out.length > 1 && length() > cap) out.shift();
+  const c = out[0];
+  if (c && c.b - c.a > cap) {
+    // One long cut: keep its end, starting no later than the stroke of its last putt.
+    const lastPutt = c.putts[c.putts.length - 1];
+    c.a = Math.max(c.a, Math.min(lastPutt.impactTime - PUTT_LEAD_S * slowmo, c.b - cap));
+    c.putts = c.putts.filter((p) => p.impactTime >= c.a);
+  }
   return out;
 }
 
@@ -85,8 +118,10 @@ function greens(putts: Shot[], doc: Project): Shot[][] {
 }
 
 export interface VideoOptions {
-  /** Putts shown: default all in the YouTube video, holed ones in the highlight. */
-  putts?: PuttMode;
+  /** Putts shown: default the holed putt of each hole in the YouTube video, notable holed ones in the highlight (see `defaultPutts`). */
+  putts?: PuttShow;
+  /** Holes whose putting is left out; default every hole whose putts are unsure (see `unsurePuttHoles`). */
+  skipPutts?: readonly string[];
   /** Hole scores; default from the project itself (see score.ts). */
   scores?: HoleScore[];
   /** Holes whose putting is kept whole (more putts than were found). */
@@ -173,13 +208,13 @@ export function youtubeVideo(doc: Project, locale: Locale, name: string, names: 
     putts?: Shot[];
   }
   const segs: Seg[] = wins.map((w) => ({ media: w.media, a: w.a, b: w.b, key: w.shot.impactTime, win: w }));
-  const putts = shownPutts(doc, opts.putts ?? defaultPutts('youtube'));
+  const putts = shownPutts(doc, opts.putts ?? defaultPutts('youtube'), opts.skipPutts ?? unsurePuttHoles(scores));
   greens(putts, doc).forEach((g, i, all) => {
     const media = doc.media[g[0].mediaId];
     const hole = holeOf(g[0]);
     const last = g[g.length - 1];
     const ends = scored.has(hole) && last.putt?.holed === true && !all.slice(i + 1).some((x) => holeOf(x[0]) === hole);
-    for (const c of puttCuts(g, media, !!hole && !!opts.uncut?.includes(hole), ends ? SCORE_HOLD_S : PUTT_PAD_S))
+    for (const c of puttCuts(g, media, !!hole && !!opts.uncut?.includes(hole), ends ? SCORE_HOLD_S : PUTT_TAIL_S))
       segs.push({ media, a: c.a, b: c.b, key: c.putts[0].impactTime, putts: c.putts });
   });
   const rank = new Map<string, number>();
@@ -401,11 +436,18 @@ function scorecard(ctx: Ctx, holes: HoleScore[], start: number, end: number, cou
 /**
  * One vertical short of every shot back to back: each cut tight around swing and flight with
  * slow motion through impact and the frame following the ball (the per-shot shorts, joined),
- * a hole badge when the hole changes and stats after each landing. Holed putts (by default)
- * come as plain cuts, without tracer or stats.
+ * a hole badge when the hole changes and stats after each landing. Putts (by default only
+ * notable holed ones the analysis is sure of) come as plain cuts, without tracer or stats.
  */
-export function highlightShort(doc: Project, locale: Locale, name: string, names: LayerNames = {}, opts: Pick<VideoOptions, 'putts'> = {}): Project {
-  const shots = [...playedShots(doc), ...shownPutts(doc, opts.putts ?? defaultPutts('highlight'))].sort(byTimeline(doc.clips));
+export function highlightShort(
+  doc: Project,
+  locale: Locale,
+  name: string,
+  names: LayerNames = {},
+  opts: Pick<VideoOptions, 'putts' | 'skipPutts' | 'scores'> = {},
+): Project {
+  const putts = shownPutts(doc, opts.putts ?? defaultPutts('highlight'), opts.skipPutts ?? unsurePuttHoles(opts.scores ?? summarize(doc).holes));
+  const shots = [...playedShots(doc), ...putts].sort(byTimeline(doc.clips));
   const clips: Clip[] = [];
   const keys: ReframeKey[] = [];
   const marks: { shot: Shot; start: number; land: number; end: number }[] = [];

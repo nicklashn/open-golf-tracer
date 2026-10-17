@@ -83,7 +83,7 @@ You may change:
 - kind: "youtube" (16:9 video of the round), "highlight" (one vertical short of all shots) or "shorts" (one vertical short per shot). Follow the user's wish; keep the rule plan's choice when the wish says nothing about format.
 - template: null or one of "range", "minimal", "tv", "holeInOne", "swing", "neon" (only the tracer look). Keep null unless the wish asks for a style.
 - includeShotIds: a subset of the rule plan's shot ids, e.g. when the user wants only certain holes or the best shots. Never add ids that are not in the rule plan.
-- putts: null (the app's default: each hole's putting in "youtube", only holed putts otherwise), "none", "holed" or "all". Putts are shown as plain video, never traced. Keep null unless the wish mentions putts.
+- putts: null (the app's default: the holed putt of each hole in "youtube", only long holed putts in "highlight", none in "shorts"), "none", "holed" or "all" (every putt). Putts are shown as plain video, never traced. Keep null unless the wish mentions putts.
 - order: shot ids in playing order, only when the user asks for another order; otherwise an empty list.
 - title: a short video title in the user's language.
 - shotTexts: at most one short line (≤ 60 characters) for a few notable shots, e.g. "Longest drive of the day". Use only facts from the summary. Empty when not useful.
