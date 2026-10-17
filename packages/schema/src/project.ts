@@ -98,6 +98,8 @@ export const WarningCode = z.enum([
   'carry_mismatch',
   'short_shot',
   'default_path',
+  /** The fitted flight left the picture (shottracer/physics.py `off_frame_reason`); an in-frame guess is drawn. */
+  'off_frame',
   'manual',
   'hole_limit',
   'putt_count_unsure',
@@ -126,6 +128,8 @@ export const ShotConstraints = z.object({
   /** -1 = strong draw … +1 = strong fade (right-handed, seen from behind). */
   curve: z.number().min(-1).max(1).nullable().default(null),
   flightTime: z.number().min(0.5).max(12).nullable().default(null),
+  /** The tracked points are wrong (the path was redrawn or pulled into view): refits ignore them. */
+  ignoreTrack: z.boolean().optional(),
 });
 export type ShotConstraints = z.infer<typeof ShotConstraints>;
 

@@ -532,6 +532,7 @@
                     "carry_mismatch",
                     "short_shot",
                     "default_path",
+                    "off_frame",
                     "manual",
                     "hole_limit",
                     "putt_count_unsure"
@@ -806,6 +807,9 @@
                     "type": "null"
                   }
                 ]
+              },
+              "ignoreTrack": {
+                "type": "boolean"
               }
             }
           },

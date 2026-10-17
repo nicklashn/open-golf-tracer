@@ -86,7 +86,8 @@ interface Stroke {
 const EDIT_KEYS = ['par', 'strokes', 'putts'] as const;
 
 const practice = (flags: readonly string[], confidence: number) => flags.includes('no_track') && confidence < LOW_CONFIDENCE;
-const traced = (x: ShotSummary) => x.carryM !== null && x.trackPts >= 5 && !x.flags.includes('default_path') && !x.flags.includes('no_track');
+const traced = (x: ShotSummary) =>
+  x.carryM !== null && x.trackPts >= 5 && !x.flags.includes('default_path') && !x.flags.includes('off_frame') && !x.flags.includes('no_track');
 const accuracy = (g: GeoPoint) => Math.min(MAX_ACC_M, g.acc ?? GPS_M);
 
 /** Putts the analysis is unsure about: a warning, low confidence, or not known whether the last went in. */

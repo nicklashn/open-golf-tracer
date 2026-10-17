@@ -233,7 +233,7 @@ const measured = (x: ShotSummary) =>
   !x.carrySuggestM &&
   x.trackPts >= 5 &&
   !x.nextOff &&
-  !x.flags.some((f) => f === 'no_track' || f === 'default_path' || f === 'implausible' || f === 'carry_mismatch');
+  !x.flags.some((f) => f === 'no_track' || f === 'default_path' || f === 'off_frame' || f === 'implausible' || f === 'carry_mismatch');
 
 /** Sets `tags` on the shots and putts of the summary (see HIGHLIGHT_TAGS). */
 export function tagHighlights(s: RoundSummary): void {

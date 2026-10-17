@@ -3,8 +3,10 @@
 import { layerEnv, placeLayer, screenTransform, type OverlayContext } from '@golf/render';
 import { aspectRatio, clipAt, cropAt, primaryMedia, type Layer, type Shot } from '@golf/schema';
 import { project as projectFlight } from '@golf/physics';
+import { AlertTriangle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import { useI18n } from '@/lib/i18n/client';
+import { Tooltip } from '@/components/ui/tooltip';
 import { cn } from '@/lib/cn';
 import * as ops from './ops';
 import { PlayerEngine, loadRendererFonts } from './player';
@@ -18,6 +20,13 @@ interface Size {
 }
 
 const SNAP_PX = 6;
+/** Grab margin around the video: handles just outside the picture stay reachable there. */
+export const GRAB_MARGIN = 24;
+/** Handles further out are drawn as markers on the video's edge, this far from its corners. */
+const MARKER_CORNER = 10;
+
+type HandleName = 'start' | 'apex' | 'landing';
+const DRAW_ORDER: HandleName[] = ['start', 'apex', 'landing'];
 
 /** Fit an aspect ratio into a box. */
 function fit(box: Size, r: number): Size {
@@ -26,9 +35,10 @@ function fit(box: Size, r: number): Size {
 }
 
 export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: string, time: number, ball: { x: number; y: number }) => void }) {
-  const { t, locale } = useI18n();
+  const { t, f, locale } = useI18n();
   const outer = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
+  const wrap = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [box, setBox] = useState<Size>({ width: 640, height: 360 });
   const [fontsOk, setFontsOk] = useState(false);
@@ -114,13 +124,42 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
   >(null);
   const [guides, setGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] });
 
-  function startHandle(e: RPointerEvent, shot: Shot, h: ops.HandleKind) {
+  function startHandle(e: RPointerEvent, shot: Shot, h: ops.HandleKind, offView = false) {
     e.stopPropagation();
-    (e.target as Element).setPointerCapture(e.pointerId);
+    // Captured by the (stable) wrapper: an edge marker is replaced by the handle as the drag starts.
+    (wrap.current ?? (e.target as Element)).setPointerCapture(e.pointerId);
     useEditor.getState().setPlaying(false);
-    ops.beginHandleDrag(shot.id, h);
+    ops.beginHandleDrag(shot.id, h, offView ? ops.visibleBox(shot) : undefined);
     setDragging({ kind: 'handle' });
+    // A handle grabbed at the edge jumps to the pointer at once.
+    if (offView) void ops.dragHandle(toSource(local(e)));
   }
+
+  // Off-screen handles: drawn as markers at the edge of the grab margin, pointing at them.
+  const offMarkers = useMemo(() => {
+    if (!handles) return [];
+    const out: { h: HandleName; x: number; y: number; angle: number }[] = [];
+    for (const h of DRAW_ORDER) {
+      const q = toScreen(handles[h]);
+      if (q.x >= -GRAB_MARGIN && q.x <= view.width + GRAB_MARGIN && q.y >= -GRAB_MARGIN && q.y <= view.height + GRAB_MARGIN) continue;
+      // On the edge of the video (the arrow points out into the margin, the label in).
+      // Beyond a corner, the edge it is further past (relative to the video's size) wins.
+      const ox = (q.x < 0 ? -q.x : Math.max(0, q.x - view.width)) / view.width;
+      const oy = (q.y < 0 ? -q.y : Math.max(0, q.y - view.height)) / view.height;
+      const cx = Math.min(Math.max(q.x, MARKER_CORNER), view.width - MARKER_CORNER);
+      const cy = Math.min(Math.max(q.y, MARKER_CORNER), view.height - MARKER_CORNER);
+      const x = ox >= oy ? (q.x < 0 ? 0 : view.width) : cx;
+      const y = ox >= oy ? cy : q.y < 0 ? 0 : view.height;
+      out.push({ h, x, y, angle: (Math.atan2(q.y - y, q.x - x) * 180) / Math.PI });
+    }
+    return out;
+  }, [handles, toScreen, view.width, view.height]);
+  const offNames = new Set(offMarkers.map((m) => m.h));
+
+  // "Draw the path": three clicks (start, apex, landing) replace the handles.
+  const [drawn, setDrawn] = useState<{ x: number; y: number }[]>([]);
+  const drawing = tool === 'drawPath' && !!activeShot;
+  useEffect(() => setDrawn([]), [tool, activeShot?.id]);
 
   // ------------------------------------------------------------------------------------------
   // Layers on screen
@@ -214,6 +253,19 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
     const p = local(e);
     const s = useEditor.getState();
     s.setPlaying(false);
+    if (tool === 'drawPath') {
+      e.stopPropagation();
+      if (!activeShot || !st) return;
+      const pts = [...drawn, toSource(p)];
+      if (pts.length < 3) {
+        setDrawn(pts);
+        return;
+      }
+      ops.drawShot(activeShot.id, pts[0], pts[1], pts[2]);
+      setDrawn([]);
+      s.setTool('select');
+      return;
+    }
     if (tool === 'addPoint' && activeShot && st) {
       void ops.addPointConstraint(activeShot.id, stNow?.sourceTime ?? st.sourceTime, toSource(p));
       s.setTool('select');
@@ -233,13 +285,15 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
   }
 
   const hasVideo = useEditor((s) => !!clipAt(s.doc.clips, s.time));
-  const cursor = tool === 'addPoint' || tool === 'addShot' ? 'cursor-crosshair' : tool === 'reframe' ? 'cursor-move' : '';
+  const cursor = tool === 'addPoint' || tool === 'addShot' || tool === 'drawPath' ? 'cursor-crosshair' : tool === 'reframe' ? 'cursor-move' : '';
+  const offView = !!activeShot && tool === 'select' && !dragging && (!handles || offMarkers.length > 0);
+  const M = GRAB_MARGIN;
 
   return (
-    <div ref={outer} className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-4" data-testid="preview">
+    <div ref={outer} className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-6" data-testid="preview">
       <div
-        ref={host}
-        className={cn('relative overflow-hidden bg-black shadow-[0_0_0_1px_rgba(255,255,255,0.06)]', cursor)}
+        ref={wrap}
+        className={cn('relative', cursor)}
         style={{ width: view.width, height: view.height }}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -248,12 +302,24 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
           setDragging(null);
         }}
       >
-        <canvas ref={canvas} data-testid="preview-canvas" className="pointer-events-none absolute inset-0 size-full" aria-label={t.editor.panels.properties} />
+        <div ref={host} className="absolute inset-0 overflow-hidden bg-black shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+          <canvas
+            ref={canvas}
+            data-testid="preview-canvas"
+            className="pointer-events-none absolute inset-0 size-full"
+            aria-label={t.editor.panels.properties}
+          />
+          {!hasVideo ? <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">{t.editor.noVideoTitle}</div> : null}
+        </div>
+        {/* The overlay reaches GRAB_MARGIN past the video, in the same coordinates as the video. */}
         <svg
-          className="absolute inset-0 size-full touch-none select-none"
+          className="absolute touch-none select-none"
+          style={{ left: -M, top: -M, width: view.width + 2 * M, height: view.height + 2 * M }}
+          viewBox={`${-M} ${-M} ${view.width + 2 * M} ${view.height + 2 * M}`}
           onPointerDown={onBackgroundDown}
           role="application"
           aria-label={t.tracer.editOnVideo}
+          data-testid="preview-overlay"
         >
           {/* clickable flight paths */}
           {paths.map((p) =>
@@ -272,7 +338,7 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
               />
             ) : null,
           )}
-          {activeShot ? (
+          {activeShot && !drawing ? (
             <path
               d={paths.find((p) => p.id === activeShot.id)?.d}
               fill="none"
@@ -352,9 +418,9 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
           ))}
 
           {/* tracer handles */}
-          {activeShot && handles ? (
+          {activeShot && handles && !drawing ? (
             <g>
-              {(['start', 'apex', 'landing'] as const).map((h) => {
+              {DRAW_ORDER.filter((h) => !offNames.has(h)).map((h) => {
                 const q = toScreen(handles[h]);
                 const label = t.tracer.handles[h];
                 return (
@@ -399,13 +465,141 @@ export function Preview({ onRequestRetrack }: { onRequestRetrack: (mediaId: stri
                   </g>
                 );
               })}
+              {offMarkers.map((m) => {
+                const label = t.tracer.handles[m.h];
+                const name = f(t.tracer.offViewMarker, { name: label });
+                // The label sits on the picture side of the marker, opposite its arrow.
+                const a = (m.angle * Math.PI) / 180;
+                const lx = -Math.cos(a) * 16;
+                const ly = -Math.sin(a) * 18 + 4;
+                const anchor = Math.cos(a) > 0.5 ? 'end' : Math.cos(a) < -0.5 ? 'start' : 'middle';
+                return (
+                  <g
+                    key={`off-${m.h}`}
+                    data-testid={`offscreen-${m.h}`}
+                    transform={`translate(${m.x} ${m.y})`}
+                    className="cursor-grab"
+                    role="button"
+                    aria-label={name}
+                    onPointerDown={(e) => startHandle(e, activeShot, m.h, true)}
+                  >
+                    <circle r={16} fill="transparent" />
+                    <g transform={`rotate(${m.angle})`}>
+                      <path d="M 6 -7 L 17 0 L 6 7 Z" fill="#F04438" stroke="white" strokeWidth={1.5} strokeLinejoin="round" />
+                    </g>
+                    <circle
+                      r={8}
+                      fill={m.h === 'start' ? '#F04438' : 'white'}
+                      stroke={m.h === 'start' ? 'white' : '#F04438'}
+                      strokeWidth={2}
+                      strokeDasharray="3 2"
+                    />
+                    <text
+                      x={lx}
+                      y={ly}
+                      textAnchor={anchor}
+                      fontSize={11}
+                      fontWeight={600}
+                      fill="white"
+                      stroke="rgba(0,0,0,.6)"
+                      strokeWidth={3}
+                      paintOrder="stroke"
+                    >
+                      {label}
+                    </text>
+                    <title>{name}</title>
+                  </g>
+                );
+              })}
+            </g>
+          ) : null}
+
+          {/* "Draw the path": the clicks so far; a cover takes every click */}
+          {drawing ? (
+            <g>
+              <rect x={-M} y={-M} width={view.width + 2 * M} height={view.height + 2 * M} fill="transparent" data-testid="draw-cover" />
+              {drawn.map((p, i) => {
+                const q = toScreen(p);
+                return (
+                  <g key={i} transform={`translate(${q.x} ${q.y})`} pointerEvents="none">
+                    <circle r={6} fill={i === 0 ? '#F04438' : 'white'} stroke={i === 0 ? 'white' : '#F04438'} strokeWidth={2} />
+                    <text y={-12} textAnchor="middle" fontSize={11} fontWeight={600} fill="white" stroke="rgba(0,0,0,.6)" strokeWidth={3} paintOrder="stroke">
+                      {t.tracer.handles[DRAW_ORDER[i]]}
+                    </text>
+                  </g>
+                );
+              })}
+              {drawn.length > 1 ? (
+                <polyline
+                  points={drawn.map((p) => `${toScreen(p).x},${toScreen(p).y}`).join(' ')}
+                  fill="none"
+                  stroke="white"
+                  strokeOpacity={0.7}
+                  strokeDasharray="4 4"
+                  pointerEvents="none"
+                />
+              ) : null}
             </g>
           ) : null}
         </svg>
-        {!hasVideo ? <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">{t.editor.noVideoTitle}</div> : null}
         {tool !== 'select' ? (
-          <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-sm bg-gray-950/80 px-3 py-1.5 text-[13px] text-white">
-            {tool === 'addPoint' ? t.tracer.addPointHint : tool === 'addShot' ? t.shots.addManualStep1 : t.format.dragToReframe}
+          <div
+            className={cn(
+              'pointer-events-none absolute left-1/2 w-max max-w-[calc(100%-16px)] -translate-x-1/2 rounded-sm bg-gray-950/80 px-3 py-1.5 text-center text-[13px] text-white',
+              // Drawing: away from the point to click (the start is low, the apex high).
+              tool === 'drawPath' && drawn.length > 0 ? 'bottom-3' : 'top-3',
+            )}
+            data-testid="preview-hint"
+          >
+            {tool === 'drawPath' ? (
+              <>
+                <span className="tabular mr-1.5 font-semibold text-red-300">{f(t.tracer.drawStep, { n: Math.min(3, drawn.length + 1) })}</span>
+                {t.tracer.drawSteps[DRAW_ORDER[Math.min(2, drawn.length)]]}
+                <button
+                  type="button"
+                  className="pointer-events-auto ml-2 rounded-sm px-1.5 py-0.5 text-white/70 underline-offset-2 hover:bg-white/10 hover:text-white"
+                  onClick={() => useEditor.getState().setTool('select')}
+                >
+                  {t.tracer.drawCancel}
+                </button>
+              </>
+            ) : tool === 'addPoint' ? (
+              t.tracer.addPointHint
+            ) : tool === 'addShot' ? (
+              t.shots.addManualStep1
+            ) : (
+              t.format.dragToReframe
+            )}
+          </div>
+        ) : null}
+        {offView && activeShot ? (
+          // Bottom-left: the corner a down-the-line flight (start bottom centre) rarely uses.
+          <div
+            className="absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] items-center gap-0.5 rounded-sm bg-gray-950/85 p-1 pl-2 text-[12px] text-white"
+            data-testid="offview-bar"
+            title={t.tracer.offViewShort}
+          >
+            <AlertTriangle className="mr-1 size-3.5 shrink-0 text-amber-400" aria-label={t.tracer.offViewShort} />
+            <Tooltip label={t.tracer.intoView}>
+              <button
+                type="button"
+                aria-label={t.tracer.intoView}
+                className="whitespace-nowrap rounded-sm bg-white/10 px-2 py-1 font-medium hover:bg-white/20"
+                onClick={() => ops.bringIntoView(activeShot.id)}
+              >
+                {t.tracer.intoViewShort}
+              </button>
+            </Tooltip>
+            <Tooltip label={t.tracer.draw}>
+              <button
+                type="button"
+                aria-label={t.tracer.draw}
+                className="whitespace-nowrap rounded-sm px-2 py-1 font-medium text-white/80 hover:bg-white/10"
+                onClick={() => useEditor.getState().setTool('drawPath')}
+              >
+                {t.tracer.drawShort}
+              </button>
+            </Tooltip>
           </div>
         ) : null}
       </div>

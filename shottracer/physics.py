@@ -33,6 +33,7 @@ class Flight:
     rms_px: float = float("nan")
     n_obs: int = 0
     fitted: bool = True
+    cost: float = float("nan")     # least-squares cost of fit_constrained (priors included)
 
     def p(self, name: str) -> float:
         return float(self.params[NAMES.index(name)])
@@ -385,7 +386,7 @@ def fit_constrained(params0, cx, cy, anchor, long_side, fps, sigma_px, con: Cons
 
     x0 = np.clip(p_ref, lo + 1e-9, hi - 1e-9)
     r = least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac", max_nfev=200, diff_step=1e-3)
-    fl = Flight(r.x, cx, cy, anchor)
+    fl = Flight(r.x, cx, cy, anchor, cost=float(r.cost))
     if has_obs:
         assert t_obs is not None and u_obs is not None and v_obs is not None
         sim = fl.project(to_ground=False)
@@ -402,3 +403,93 @@ def _soft_l1(r: np.ndarray, c: float = 1.5) -> np.ndarray:
     """scipy's soft_l1 loss as a residual transform (same as packages/physics)."""
     z = (r / c) ** 2
     return np.sign(r) * c * np.sqrt(2 * (np.sqrt(1 + z) - 1))
+
+
+# --- sanity: a flight the editor can show and edit -------------------------------------------
+# A bad track (a bird, the tee, two balls) can fit a flight whose apex or landing lies far
+# outside the picture, where nobody can grab the handles. Same rule and thresholds as
+# packages/physics/src/view.ts (offFrameReason / intoView).
+
+OFF_FRAME_SLACK = 1.0      # apex or landing more than this many frame sizes outside the picture
+OFF_FRAME_MAX_FLIGHT_S = 11.0
+OFF_FRAME_MAX_CARRY_M = 360.0
+OFF_FRAME_MIN_APEX_S = 0.25
+
+
+def flight_handles(flight: Flight):
+    """(start, apex, landing) image points and (apex t, landing t), as the editor's handles."""
+    pr = flight.project(to_ground=True)
+    sim = flight.simulate(True)
+    if pr is None or sim is None:
+        return None
+    ts, pu, pv, _ = pr
+    k = apex_index(sim[1], flight.p("pitch"))
+    return flight.anchor, (float(pu[k]), float(pv[k])), (float(pu[-1]), float(pv[-1])), (float(ts[k]), float(ts[-1]))
+
+
+def _outside_by(p, w: float, h: float) -> float:
+    x, y = p
+    dx = -x / w if x < 0 else (x - w) / w if x > w else 0.0
+    dy = -y / h if y < 0 else (y - h) / h if y > h else 0.0
+    return max(dx, dy)
+
+
+def off_frame_reason(flight: Flight, w: float, h: float) -> str | None:
+    """Why a flight cannot be what happened in a w x h picture, or None."""
+    hd = flight_handles(flight)
+    if hd is None:
+        return "invalid flight"
+    _, apex, land, (t_apex, t_land) = hd
+    if not all(math.isfinite(v) for v in (*apex, *land)):
+        return "invalid flight"
+    if _outside_by(apex, w, h) > OFF_FRAME_SLACK:
+        return "apex off frame"
+    if _outside_by(land, w, h) > OFF_FRAME_SLACK:
+        return "landing off frame"
+    if t_land > OFF_FRAME_MAX_FLIGHT_S:
+        return "flight too long"
+    if t_apex < OFF_FRAME_MIN_APEX_S:
+        return "no rise"
+    st = flight.stats()
+    if st and st["carry_m"] > OFF_FRAME_MAX_CARRY_M:
+        return "carry too long"
+    return None
+
+
+def into_frame(flight: Flight, w: float, h: float, long_side: float, fps: float, club: str | None = None) -> Flight:
+    """An in-frame flight from the same start: apex and landing stay where they are in the
+    picture, else take the default shot's place (pulled inside); fitted through them."""
+    ix, iy = 0.06 * w, 0.06 * h
+    inside = (lambda p: p is not None and ix <= p[0] <= w - ix and iy <= p[1] <= h - iy)
+    clamp = (lambda p: (min(max(p[0], ix), w - ix), min(max(p[1], iy), h - iy)))
+    cur = flight_handles(flight)
+    default = default_flight(flight.anchor, flight.cx, flight.cy, long_side, fps, club=club)
+    dh = flight_handles(default)
+    sx, sy = flight.anchor
+
+    def pick(i: int):
+        if cur is not None and inside(cur[i]):
+            return cur[i]
+        if dh is not None and inside(dh[i]):
+            return dh[i]
+        src = dh or cur
+        return clamp(src[i]) if src is not None else clamp((sx, h * (0.15 if i == 1 else 0.4)))
+
+    apex, land = pick(1), pick(2)
+    rise = 0.12 * h
+    if apex[1] > sy - rise:
+        apex = (apex[0], max(iy, sy - max(rise, 0.45 * (sy - iy))))
+    if land[1] < apex[1] + 0.04 * h:
+        land = (land[0], min(sy - 0.04 * h, apex[1] + max(0.04 * h, 0.3 * (sy - apex[1]))))
+    aim = max(-1.5, min(1.5, math.atan((apex[0] - flight.cx) / (0.75 * long_side))))
+    best, best_err, best_cost = default, math.inf, math.inf
+    for p0 in (default.params, default_flight(flight.anchor, flight.cx, flight.cy, long_side, fps, aim, club).params, flight.params):
+        fl = fit_constrained(p0, flight.cx, flight.cy, flight.anchor, long_side, fps, 1.0, Constraints(apex=apex, landing=land), club=club)
+        hd = flight_handles(fl)
+        err = math.inf if hd is None else math.hypot(hd[1][0] - apex[0], hd[1][1] - apex[1]) + math.hypot(hd[2][0] - land[0], hd[2][1] - land[1])
+        cost = fl.cost
+        # Of the fits that meet the points, the most plausible (lowest cost); else the closest.
+        if (err < 3 and (best_err >= 3 or cost < best_cost)) or (err >= 3 and best_err >= 3 and err < best_err):
+            best, best_err, best_cost = fl, err, cost
+    best.fitted = False
+    return best

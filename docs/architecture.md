@@ -179,6 +179,11 @@ valideres den med ffprobe (format, varighed, størrelse mod serverens grænser) 
 2. Tre-billeds-differens finder små objekter i bevægelse; en kæde-tracker (numba) finder den
    glatteste kæde fra bolden.
 3. Fysikken fittes til sporet og giver banen helt til landing samt carry/apex/boldfart.
+   Et fit, hvis top eller landing ligger mere end ét billede uden for billedet, som ikke lander inden
+   for 11 s, flyver over 360 m eller topper inden 0,25 s (`physics.py: off_frame_reason`, samme regel
+   i `packages/physics/src/view.ts`), erstattes af et gæt inde i billedet fra samme startpunkt og
+   markeres `off_frame` ("Banen er gættet – tjek den"). I editoren vises håndtag uden for billedet
+   som markører ved kanten; "Hent banen ind i billedet" og "Tegn banen" (tre klik) retter altid banen.
 4. `analyze()` returnerer alle slag som projekt-JSON; `process()` renderer stadig en video direkte
    (CLI og `Tracer.bat`).
 

@@ -72,7 +72,7 @@ export interface RefitOptions {
 
 export function refitShot(shot: ShotLike, opt: RefitOptions): FitResult {
   const sigma = Math.max(1.5, Math.max(3, 0.0035 * Math.hypot(shot.camera.cx * 2, shot.camera.cy * 2)) / 3);
-  const track = opt.useTrack === false || !shot.track.t.length ? null : shot.track;
+  const track = opt.useTrack === false || shot.constraints.ignoreTrack || !shot.track.t.length ? null : shot.track;
   return fitConstrained({
     params: opt.from ?? shot.params,
     camera: shot.camera,
