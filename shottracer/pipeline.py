@@ -338,7 +338,10 @@ def _analyze(src: Path, opt: Options, report: _Report, on_shot, t_start: float, 
         used.append(impact.time)
         flight_s = float(sh.stats.get("flight_time_s") or 4.0) if sh.stats else 4.0
         land = impact.time + (sh.flight.t_offset + flight_s) * opt.slowmo
-        moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo, land), addr.golfer, head)
+        # A believable flight: scanned to its landing. A doubtful one (the tracer may be moved
+        # to a longer flight in the editor): to the longest flight, as before.
+        sure = sh.track is not None and not sh.verdict and not any(c in ("off_frame", "no_track") for c, _ in sh.codes)
+        moved = motion(*clean_mod.scan_range(impact.time, opt.slowmo, land if sure else None), addr.golfer, head)
         emit(_shot_doc(info, sh, len(shots) + len(pending), opt), impact.time, moved, land)
 
     for k, addr in enumerate(addresses):
