@@ -10,7 +10,10 @@ test('open app → upload → analysis → fix tracer → add text → export �
   // No sign-up: the app opens straight away.
   await page.goto('/app');
   const chooser = page.waitForEvent('filechooser');
-  await page.getByRole('button', { name: 'New video' }).click();
+  await page
+    .getByRole('button', { name: /Upload videos|Choose videos/ })
+    .first()
+    .click();
   await (await chooser).setFiles(sampleVideo());
   await page.waitForURL('**/app/projects/**', { timeout: 60_000 });
   await skipOnboarding(page);
@@ -51,6 +54,10 @@ test('open app → upload → analysis → fix tracer → add text → export �
   await page.getByTestId('start-export').click();
   const status = page.getByTestId('export-status');
   await expect(status.getByText('Your video is ready')).toBeVisible({ timeout: 180_000 });
+  // Where the file goes, and a way to watch it and find it again.
+  await expect(status.getByTestId('export-saved-to')).toContainText('Downloads folder');
+  await expect(status.getByRole('link', { name: 'Play' })).toBeVisible();
+  await expect(status.getByRole('link', { name: 'My videos' })).toHaveAttribute('href', '/app/exports');
   const download = page.waitForEvent('download');
   await status.getByRole('link', { name: 'Download' }).click();
   const file = await (await download).path();

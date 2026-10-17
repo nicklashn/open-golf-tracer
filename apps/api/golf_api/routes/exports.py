@@ -29,7 +29,8 @@ def public_export(db: Session, e: Export) -> dict:
     return {"id": e.id, "projectId": e.project_id, "projectName": e.project_name, "settings": e.settings, "status": e.status,
             "progress": job.progress if job else (1.0 if e.status == "succeeded" else 0.0), "message": job.message if job else "",
             "jobId": e.job_id, "size": e.size, "width": e.width, "height": e.height, "duration": e.duration,
-            "url": export_url(e) if e.status == "succeeded" else None, "createdAt": e.created_at.isoformat(),
+            "url": export_url(e) if e.status == "succeeded" else None,
+            "previewUrl": export_url(e, download=False) if e.status == "succeeded" else None, "createdAt": e.created_at.isoformat(),
             "finishedAt": e.finished_at.isoformat() if e.finished_at else None, "error": job.error[-300:] if job and e.status == "failed" else ""}
 
 

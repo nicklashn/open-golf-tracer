@@ -16,13 +16,16 @@ from .probe import probe_file
 from .storage import media_prefix, storage, tmp_dir
 
 DEMO_DIR = ROOT / "assets" / "demo"
+# The sample is named in the language the app is shown in (the request's, else the account's).
+DEMO_NAMES = {"da": "Eksempel: drive på rangen", "en": "Example: drive at the range"}
 
 
-def create_demo_project(db: Session, user: User) -> Project:
+def create_demo_project(db: Session, user: User, locale: str | None = None) -> Project:
     video = DEMO_DIR / "demo.mp4"
     if not video.exists():
         raise ApiError(503, "demo_missing", "The demo video is missing. Run setup again.")
-    p = Project(user_id=user.id, name="Example: drive at the range", is_demo=True)
+    name = DEMO_NAMES.get(locale or "") or DEMO_NAMES.get(user.locale or "") or DEMO_NAMES["en"]
+    p = Project(user_id=user.id, name=name, is_demo=True)
     db.add(p)
     db.flush()
     info = probe_file(video)

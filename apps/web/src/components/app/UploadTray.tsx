@@ -13,7 +13,7 @@ export function UploadTray() {
   const remove = useUploads((s) => s.remove);
   if (!items.length) return null;
   return (
-    <section aria-label={t.upload.preparing} className="fixed bottom-4 left-4 z-40 w-[360px] max-w-[calc(100vw-32px)] space-y-2" aria-live="polite">
+    <section aria-label={t.upload.section} className="fixed bottom-4 left-4 z-40 w-[360px] max-w-[calc(100vw-32px)] space-y-2" aria-live="polite">
       {items.map((it) => {
         const pct = it.size ? it.sent / it.size : 0;
         const left = it.speed > 0 ? Math.max(0, (it.size - it.sent) / it.speed) : null;
@@ -21,7 +21,9 @@ export function UploadTray() {
           <div key={it.key} className="rounded-md border border-border bg-surface-raised p-3 text-sm shadow-md">
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
-                <p className="truncate font-medium">{f(t.upload.uploading, { name: it.name })}</p>
+                <p className="truncate font-medium">
+                  {it.status === 'error' ? `${t.upload.failed}: ${it.name}` : it.status === 'done' ? it.name : f(t.upload.uploading, { name: it.name })}
+                </p>
                 <p className="tabular mt-0.5 text-[12px] text-fg-muted">
                   {it.status === 'preparing'
                     ? t.upload.preparing
@@ -39,9 +41,12 @@ export function UploadTray() {
               {it.status === 'done' ? (
                 <CheckCircle2 className="size-5 text-[var(--color-success)]" aria-hidden />
               ) : it.status === 'error' ? (
-                <button type="button" onClick={() => remove(it.key)} aria-label={t.common.close} className="text-fg-muted hover:text-fg">
-                  <AlertCircle className="size-5 text-accent-fg" />
-                </button>
+                <span className="flex items-center gap-1">
+                  <AlertCircle className="size-5 text-accent-fg" aria-hidden />
+                  <button type="button" onClick={() => remove(it.key)} aria-label={t.upload.dismiss} className="rounded-sm p-0.5 text-fg-muted hover:text-fg">
+                    <X className="size-4" />
+                  </button>
+                </span>
               ) : (
                 <button
                   type="button"
