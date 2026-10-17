@@ -371,6 +371,8 @@ def _shot_doc(info: VideoInfo, sh: ShotAnalysis, n: int, opt: Options) -> dict:
 
 
 PUTT_TICK = 3.0   # a putt's tick is far softer than a full strike (find_strikes ratio)
+PUTT_SHOW_CONF = 0.6   # putts less sure than this are kept hidden (they still count, and are asked about)
+OTHER_BALL_S = 240.0   # after a holed putt, putts this soon that start elsewhere are another player's
 
 
 def _by_green(opt: Options) -> bool:
@@ -419,7 +421,7 @@ def _putts(info: VideoInfo, det: BallDetector, addr: Address, opt: Options, tick
         if len(ro.t) < 8:
             codes.append(("few_points", str(len(ro.t))))
         conf = putt_mod.confidence(ro, prior, tick is not None)
-        if conf < 0.6:
+        if conf < PUTT_SHOW_CONF:
             codes.insert(0, ("low_confidence", ""))
         docs.append(_putt_doc(info, ro, t0, conf, codes, n0 + len(docs), opt, sx, sy, "roll + sound" if tick else "roll"))
     return docs, (t_ref, float(seen.t[-1]) if len(seen.t) else t_ref)
@@ -461,7 +463,7 @@ def _putt_doc(info: VideoInfo, ro: putt_mod.Roll, t0: float, conf: float, codes:
         "auto": {"params": plist, "anchor": anchor, "impactTime": round(t0, 4)},
         "slowmo": opt.slowmo,
         "club": "auto",
-        "visible": True,
+        "visible": conf >= PUTT_SHOW_CONF,
         "label": "",
         "stats": {},
         "impactMethod": method,
@@ -470,17 +472,28 @@ def _putt_doc(info: VideoInfo, ro: putt_mod.Roll, t0: float, conf: float, codes:
 
 def _settle_putts(shots: list[dict], diag: float) -> None:
     """Putts followed separately (the ball was lost between them): a putt followed by another
-    was not the last one, so it was not holed – unless the next starts elsewhere (another ball)."""
+    from where it stopped was not the last one, so it was not holed. Putts soon after a holed one
+    that start elsewhere are another player's ball: hidden, and the count is unsure."""
     putts = sorted((s for s in shots if s["kind"] == "putt"), key=lambda s: s["impactTime"])
+    unsure = {"code": "putt_count_unsure", "detail": "another putt follows the one that seemed to drop"}
+    other = {"code": "putt_count_unsure", "detail": "starts away from where the holed putt dropped: maybe another player's ball"}
+    dropped: dict | None = None
     for a, b in zip(putts, putts[1:]):
         a["warnings"] = [w for w in a["warnings"] if w.get("detail") != putt_mod.STILL_LYING]
-        if a["putt"]["holed"] is not True:
-            continue
-        tr = a["track"]
-        end = (tr["u"][-1], tr["v"][-1]) if tr["u"] else (a["anchor"]["x"], a["anchor"]["y"])
-        near = math.hypot(b["anchor"]["x"] - end[0], b["anchor"]["y"] - end[1]) < 0.03 * diag
-        a["putt"]["holed"] = False if near else None
-        a["warnings"].append({"code": "putt_count_unsure", "detail": "another putt follows the one that seemed to drop"})
+        if dropped is None and a["putt"]["holed"] is True:
+            tr = a["track"]
+            end = (tr["u"][-1], tr["v"][-1]) if tr["u"] else (a["anchor"]["x"], a["anchor"]["y"])
+            a["warnings"].append(unsure)
+            if math.hypot(b["anchor"]["x"] - end[0], b["anchor"]["y"] - end[1]) < 0.03 * diag:
+                a["putt"]["holed"] = False
+                continue
+            dropped = a
+        if dropped is not None:
+            if b["impactTime"] - dropped["putt"]["end"] <= OTHER_BALL_S:
+                b["visible"] = False
+                b["warnings"].append(dict(other))
+                continue
+            dropped = None
 
 
 # =============================================================================================

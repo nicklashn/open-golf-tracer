@@ -144,6 +144,10 @@ def test_putts_become_putt_shots(tmp_path):
     doc = new_document("t")
     doc["shots"] = [clean_shot(d, "m1") for d in docs]
     assert not list(_validator().iter_errors(doc))
+    # Far from any green the same rolls are too weak to show: kept hidden, flagged.
+    far, _ = pipeline._putts(info, _NoPeople(), addr, pipeline.Options(green_m=60.0), [], 0)   # type: ignore[arg-type]
+    assert len(far) == 2 and not any(d["visible"] for d in far)
+    assert all(d["warnings"][0]["code"] == "low_confidence" for d in far)
 
 
 def test_a_putt_followed_by_another_was_not_holed():
