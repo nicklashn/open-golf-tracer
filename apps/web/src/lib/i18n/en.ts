@@ -256,6 +256,8 @@ const en: Dict = {
     apiKey: 'API key',
     apiKeyHint: 'Kept on the server only and never shown again. Leave empty to keep the saved key.',
     keySaved: 'Saved key: {key}',
+    keyWillClear: 'The saved key belongs to another provider or address and is removed when you save. Enter the key for the new address again.',
+    keyCleared: 'The saved key was removed because the provider or address changed. Enter a new key.',
     removeKey: 'Remove the key',
     maxTokens: 'Max tokens per video',
     maxTokensHint: 'For the plan (in + out, all calls). Above it the plan is made by fixed rules instead – the video is made either way.',
@@ -820,6 +822,11 @@ const en: Dict = {
     data: 'Your data',
     exportData: 'Download my data',
     exportDataLead: 'Projects, file list and exports from the local database as JSON in a zip file.',
+    privacy: 'Privacy',
+    geoLookup: 'Look courses up on OpenStreetMap',
+    geoLookupHint:
+      'When a video has GPS, its position is sent to OpenStreetMap\'s public servers (Overpass) so the app can find the course, hole and distance to the green. Turned off, the position stays on your PC and you pick the hole yourself. "Measure on the map" still asks OpenStreetMap when you open the map yourself.',
+    geoLookupEnv: 'Turned off with GEO_LOOKUP=0 in .env.',
   },
   exportsPage: {
     title: 'My videos',

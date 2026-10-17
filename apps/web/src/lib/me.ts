@@ -14,6 +14,10 @@ export interface Me {
   locale: 'da' | 'en';
   units: 'm' | 'yd';
   onboardingDone: boolean;
+  /** A video's GPS may be looked up on OpenStreetMap on its own (Settings → Privacy). */
+  geoLookup?: boolean;
+  /** False when GEO_LOOKUP=0 on the server: the setting can't be turned on. */
+  geoLookupAllowed?: boolean;
   /** Upload safety limits of this server. */
   limits: ServerLimits;
   createdAt: string;

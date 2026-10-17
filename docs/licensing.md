@@ -82,8 +82,10 @@ navne. Licensteksterne ligger ved siden af filerne (`assets/fonts/*-OFL.txt` og 
   hjemmenetværket (`NEXT_PUBLIC_MAP_SATELLITE`).
 - *Note:* gør man appen tilgængelig for mange andre, skal man selv sørge for kortadgang med licens
   (egen Overpass, og fliser fra fx MapTiler, Stadia eller Esri med konto).
-- Videoens GPS-position læses fra filens metadata og sendes kun til kortet/OSM, når man selv
-  åbner "Mål på kort".
+- Videoens GPS-position læses fra filens metadata. Under hver analyse af en video med GPS sendes
+  positionen til Overpass for at finde bane, hul og afstand til greenen – det kan slås fra under
+  **Indstillinger → Privatliv** ("Slå baner op på OpenStreetMap") eller med `GEO_LOOKUP=0`. Kortet
+  ("Mål på kort") spørger OSM, når man selv åbner det. Se "What leaves your PC" i README.
 
 ## 5. Øvrige afhængigheder
 

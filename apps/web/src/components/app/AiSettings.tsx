@@ -20,6 +20,8 @@ import { useI18n } from '@/lib/i18n/client';
 type Provider = 'server' | 'none' | 'ollama' | 'openai-compatible' | 'anthropic' | 'chatgpt';
 
 export interface AiSettingsInfo {
+  /** Only on a save: the stored key was removed because the provider or address changed. */
+  keyCleared?: boolean;
   provider: Provider;
   model: string;
   baseUrl: string;
@@ -105,6 +107,16 @@ function TokenBudget({ maxTokens, vision }: { maxTokens: number; vision: boolean
       ) : null}
     </div>
   );
+}
+
+/** Provider and origin a stored key is sent to (the server drops the key when this changes). */
+export function keyTarget(provider: string, baseUrl: string, defaults: AiSettingsInfo['defaults']): string {
+  const url = baseUrl.trim() || defaults[provider]?.baseUrl || '';
+  try {
+    return `${provider} ${new URL(url).origin}`;
+  } catch {
+    return `${provider} ${url}`;
+  }
 }
 
 const isLocalHost = (h: string) => ['localhost', '127.0.0.1', '[::1]', '::1'].includes(h) || h.endsWith('.localhost');
@@ -276,6 +288,9 @@ export function AiSettingsForm() {
 
   const own = form.provider !== 'server' && form.provider !== 'none' && form.provider !== 'chatgpt';
   const defaults = own ? info?.defaults[form.provider] : undefined;
+  // Saving without a new key while pointing somewhere else removes the stored one.
+  const keyWillClear =
+    !!info?.keyMasked && !form.apiKey.trim() && keyTarget(info.provider, info.baseUrl, info.defaults) !== keyTarget(form.provider, form.baseUrl, info.defaults);
 
   async function save(apiKey?: string) {
     setBusy('save');
@@ -292,7 +307,8 @@ export function AiSettingsForm() {
       setInfo(s);
       setForm((x) => ({ ...x, apiKey: '' }));
       setTest(null);
-      toast.success(t.ai.saved);
+      if (s.keyCleared) toast.info(t.ai.saved, t.ai.keyCleared);
+      else toast.success(t.ai.saved);
     } catch (e) {
       toast.error(errorMessage(e, t));
     } finally {
@@ -386,7 +402,10 @@ export function AiSettingsForm() {
             )}
           </Field>
           {form.provider !== 'ollama' ? (
-            <Field label={t.ai.apiKey} hint={info.keyMasked ? `${f(t.ai.keySaved, { key: info.keyMasked })} ${t.ai.apiKeyHint}` : t.ai.apiKeyHint}>
+            <Field
+              label={t.ai.apiKey}
+              hint={info.keyMasked && !keyWillClear ? `${f(t.ai.keySaved, { key: info.keyMasked })} ${t.ai.apiKeyHint}` : t.ai.apiKeyHint}
+            >
               {(p) => (
                 <Input
                   {...p}
@@ -432,6 +451,11 @@ export function AiSettingsForm() {
       ) : null}
       {form.provider !== 'none' && (form.provider !== 'server' || info.server.provider !== 'none') ? (
         <TokenBudget maxTokens={form.provider === 'server' ? info.effective.maxTokens : form.maxTokens} vision={form.vision} />
+      ) : null}
+      {keyWillClear ? (
+        <p role="status" className="text-[13px] text-accent-fg" data-testid="ai-key-will-clear">
+          {t.ai.keyWillClear}
+        </p>
       ) : null}
       <p className="text-[13px] text-fg-muted" data-testid="ai-privacy">
         {aiPrivacy(t, info.effective)}
