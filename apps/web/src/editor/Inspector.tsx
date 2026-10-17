@@ -9,6 +9,7 @@ import {
   AlignStartVertical,
   ArrowDown,
   ArrowUp,
+  Check,
   Copy,
   Crosshair,
   Diamond,
@@ -54,11 +55,13 @@ import { Badge } from '@/components/ui/misc';
 import { toast } from '@/components/ui/toast';
 import { Tooltip } from '@/components/ui/tooltip';
 import { api, errorMessage } from '@/lib/api';
+import type { Dict } from '@/lib/i18n';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
 import { placeTitle } from './course';
 import { MapDialog } from './MapDialog';
 import * as ops from './ops';
+import { shotList, shotName } from './shotGroups';
 import { useEditor, useLiveDoc } from './store';
 
 function Section({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
@@ -122,13 +125,60 @@ export function Inspector({ onRetrack }: { onRetrack: (shot: Shot) => void }) {
 // ---------------------------------------------------------------------------------------------
 // Shot / tracer
 
+/** The shot's doubts, and "Looks right" to settle them (they stay settled, one undo step). */
+function ShotWarnings({ shot }: { shot: Shot }) {
+  const { t } = useI18n();
+  const doubts = shot.warnings.filter((w) => w.code !== 'manual');
+  if (!doubts.length && shot.confidence >= 0.6) return null;
+  const text = t.shots.warnings as Record<string, string>;
+  return (
+    <div
+      className="flex flex-col gap-2 border-b border-border bg-[color-mix(in_srgb,var(--color-warning)_10%,transparent)] px-4 py-3 text-[12px] text-fg"
+      data-testid="shot-warnings"
+    >
+      {doubts.length ? doubts.map((w) => <p key={w.code}>{text[w.code]}</p>) : <p>{text.low_confidence}</p>}
+      <div>
+        <Button size="sm" variant="secondary" onClick={() => ops.approveShot(shot.id)} data-testid="shot-approve">
+          <Check />
+          {t.shots.looksRight}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Putt, short shot or full shot: the analysis can mistake one for another. */
+function ShotKind({ shot }: { shot: Shot }) {
+  const { t } = useI18n();
+  return (
+    <Row label={t.shots.kindLabel}>
+      <Segmented
+        label={t.shots.kindLabel}
+        size="sm"
+        value={shot.kind}
+        onChange={(v) => ops.setShotKind(shot.id, v)}
+        options={(['putt', 'short', 'full'] as const).map((k) => ({ value: k, label: t.shots.kinds[k] }))}
+      />
+    </Row>
+  );
+}
+
+/** The number the shot list shows for a shot (within its hole in a round), 0 when hidden. */
+function useShotNumber(id: string): number {
+  const shots = useEditor((s) => s.doc.shots);
+  const media = useEditor((s) => s.doc.media);
+  return useMemo(() => shotList({ shots, media }).numbers.get(id) ?? 0, [shots, media, id]);
+}
+
 const PuttInspector = memo(function PuttInspector({ shot }: { shot: Shot }) {
   const { t, f } = useI18n();
   const holed = shot.putt?.holed ?? null;
   const value = holed === null ? 'unknown' : holed ? 'yes' : 'no';
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col" data-testid="putt-inspector">
+      <ShotWarnings shot={shot} />
       <Section title={t.shots.putt}>
+        <ShotKind shot={shot} />
         <p className="text-[12px] text-fg-muted">{t.shots.puttLead}</p>
         {shot.putt ? (
           <p className="tabular text-[12px] text-fg-muted">{f(t.shots.puttRoll, { s: Math.max(0, shot.putt.end - shot.impactTime).toFixed(1) })}</p>
@@ -180,7 +230,7 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
   const tool = useEditor((s) => s.tool);
   const retracking = useEditor((s) => !!s.retracking[shot.id]);
   const st = shotStats(shot);
-  const n = useEditor((s) => s.doc.shots.findIndex((x) => x.id === shot.id) + 1);
+  const n = useShotNumber(shot.id);
   const carryVal = shot.constraints.carry != null ? (units === 'yd' ? shot.constraints.carry * M_TO_YD : shot.constraints.carry) : null;
   const measured = shot.constraints.carry != null;
   const fps = ops.fpsOf(shot.mediaId);
@@ -228,7 +278,7 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
           aria-label={t.common.rename}
           className="h-8 text-[13px] font-medium"
           value={shot.label}
-          placeholder={f(t.shots.shot, { n })}
+          placeholder={shotName({ ...shot, label: '' }, n, t)}
           onChange={(e) =>
             useEditor.getState().edit(
               'Name',
@@ -241,15 +291,10 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
           }
         />
       </div>
-      {shot.warnings.length ? (
-        <div className="border-b border-border bg-[color-mix(in_srgb,var(--color-warning)_10%,transparent)] px-4 py-3 text-[12px] text-fg">
-          {shot.warnings.map((w) => (
-            <p key={w.code}>{(t.shots.warnings as Record<string, string>)[w.code]}</p>
-          ))}
-        </div>
-      ) : null}
+      <ShotWarnings shot={shot} />
 
       <Section title={t.tracer.section}>
+        <ShotKind shot={shot} />
         {outside.length ? (
           <div
             className="flex flex-col gap-2 rounded-md border border-[color-mix(in_srgb,var(--color-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--color-warning)_10%,transparent)] p-3"
@@ -419,15 +464,16 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
         <Row label={t.tracer.animSpeed} value={`${shot.timing.speed.toFixed(2)}×`}>
           <Slider label={t.tracer.animSpeed} value={shot.timing.speed} min={0.25} max={3} step={0.05} onChange={(v) => ops.setTiming(shot.id, { speed: v })} />
         </Row>
-        <Row label={t.tracer.slowmo} value={`${shot.slowmo}×`}>
+        <Row label={t.tracer.slowmo}>
           <Select
             label={t.tracer.slowmo}
             size="sm"
             value={String(shot.slowmo)}
             onChange={(v) => ops.setSlowmo(shot.id, Number(v))}
-            options={[1, 2, 4, 8].map((x) => ({ value: String(x), label: x === 1 ? t.common.off : `${x}×` }))}
+            options={slowmoOptions(shot.slowmo, t)}
           />
         </Row>
+        <p className="text-[12px] text-fg-muted">{t.tracer.slowmoHint}</p>
       </Section>
 
       <Section
@@ -515,6 +561,28 @@ const ShotInspector = memo(function ShotInspector({ shot, onRetrack }: { shot: S
     </div>
   );
 });
+
+/**
+ * Slow motion as the phone puts it: filmed at 120 or 240 fps and played back at 30 or 60. The
+ * stored value is the factor (filmed ÷ played back); one the list does not name stays selectable.
+ */
+const SLOWMO_CHOICES: { factor: number; filmed: number; played: number }[] = [
+  { factor: 2, filmed: 120, played: 60 },
+  { factor: 4, filmed: 120, played: 30 },
+  { factor: 8, filmed: 240, played: 30 },
+];
+
+export function slowmoOptions(current: number, t: Dict): { value: string; label: string }[] {
+  const opts = [
+    { value: '1', label: t.tracer.slowmoNone },
+    ...SLOWMO_CHOICES.map((c) => ({
+      value: String(c.factor),
+      label: t.tracer.slowmoFps.replace('{filmed}', String(c.filmed)).replace('{played}', String(c.played)),
+    })),
+  ];
+  if (!opts.some((o) => o.value === String(current))) opts.push({ value: String(current), label: `${current}×` });
+  return opts;
+}
 
 /** Slider that applies once on release (for expensive refits). */
 function CommitSlider({

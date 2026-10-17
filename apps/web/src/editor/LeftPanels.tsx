@@ -20,37 +20,44 @@ import {
   Sparkles,
   Wand2,
   Crosshair,
+  ChevronDown,
+  RotateCcw,
 } from 'lucide-react';
 import { TEMPLATES } from '@golf/render';
 import { shotStats } from '@golf/render';
 import { offFrameReason } from '@golf/physics';
 import type { LayerType, Shot } from '@golf/schema';
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
 import { Button } from '@/components/ui/button';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '@/components/ui/menu';
 import { Badge, ProgressBar } from '@/components/ui/misc';
 import { toast } from '@/components/ui/toast';
 import { Tooltip } from '@/components/ui/tooltip';
-import { errorMessage } from '@/lib/api';
+import { api, errorMessage } from '@/lib/api';
 import { useI18n } from '@/lib/i18n/client';
 import { jobMessage } from '@/lib/jobMessage';
 import { uploadFile } from '@/lib/upload';
 import { cn } from '@/lib/cn';
 import { M_TO_YD } from '@golf/schema';
+import { clearFailure, useAnalysisFailures } from './analysisFailures';
 import { placeTitle } from './course';
 import * as ops from './ops';
+import { shotList, shotName } from './shotGroups';
 import { useEditor, type MediaInfo } from './store';
 
 export function ShotsPanel() {
   const { t, f } = useI18n();
   const shots = useEditor((s) => s.doc.shots);
+  const docMedia = useEditor((s) => s.doc.media);
+  const edits = useEditor((s) => s.doc.scoreEdits);
   const units = useEditor((s) => s.doc.units);
   const selection = useEditor((s) => s.selection);
   const analysis = useEditor((s) => s.analysis);
   const retracking = useEditor((s) => s.retracking);
   const tool = useEditor((s) => s.tool);
-  const hidden = shots.filter((s) => !s.visible);
+  const list = useMemo(() => shotList({ shots, media: docMedia, scoreEdits: edits }), [shots, docMedia, edits]);
+  const hidden = list.hidden;
   // "Clip 2 of 3" while a round is analysed clip by clip.
   const clips = useEditor((s) => s.doc.clips);
   const ingesting = useEditor((s) => s.ingesting);
@@ -59,6 +66,18 @@ export function ShotsPanel() {
   const total = videos.length + Object.keys(ingesting).filter((id) => !videos.includes(id)).length;
   const clipNo = analysis.mediaId ? videos.indexOf(analysis.mediaId) + 1 : 0;
   const hiddenOpen = hidden.length === shots.length || (selection?.kind === 'shot' && hidden.some((s) => s.id === selection.id));
+  const selectedId = selection?.kind === 'shot' ? selection.id : null;
+  const row = (s: Shot) => (
+    <ShotRow
+      key={s.id}
+      shot={s}
+      n={list.numbers.get(s.id) ?? 0}
+      selected={selectedId === s.id}
+      units={units}
+      retracking={!!retracking[s.id]}
+      showHole={!list.byHole || !s.visible}
+    />
+  );
 
   return (
     <div className="flex flex-col gap-3 p-3" data-testid="shots-panel">
@@ -79,6 +98,8 @@ export function ShotsPanel() {
         </div>
       ) : null}
 
+      <FailedAnalyses />
+
       {hidden.length === shots.length && !analysis.running ? (
         <div className="flex flex-col items-center rounded-md border border-dashed border-border-strong px-4 py-8 text-center" data-testid="shots-empty">
           <Birdie mood="confused" size={64} />
@@ -86,40 +107,26 @@ export function ShotsPanel() {
         </div>
       ) : null}
 
-      <ul className="flex flex-col gap-1.5" aria-label={t.shots.title}>
-        {shots.map((s, i) =>
-          s.visible ? (
-            <ShotRow
-              key={s.id}
-              shot={s}
-              n={i + 1}
-              selected={selection?.kind === 'shot' && selection.id === s.id}
-              units={units}
-              retracking={!!retracking[s.id]}
-            />
-          ) : null,
-        )}
-      </ul>
+      {list.byHole ? (
+        <div className="flex flex-col gap-2" aria-label={t.shots.title} role="group">
+          {list.groups.map((g) => (
+            <HoleGroup key={g.hole || '-'} hole={g.hole} par={g.par} count={g.shots.length} selected={g.shots.some((s) => s.id === selectedId)}>
+              {g.shots.map(row)}
+            </HoleGroup>
+          ))}
+        </div>
+      ) : (
+        <ul className="flex flex-col gap-1.5" aria-label={t.shots.title}>
+          {list.groups[0]?.shots.map(row)}
+        </ul>
+      )}
       {hidden.length ? (
         // Short-game shots and doubtful candidates: out of the way, but one click from use.
         <details className="group rounded-md" open={hiddenOpen}>
           <summary className="cursor-pointer select-none px-1 text-[12px] font-medium text-fg-muted hover:text-fg">
             {f(t.shots.hiddenShots, { n: hidden.length })}
           </summary>
-          <ul className="mt-1.5 flex flex-col gap-1.5">
-            {shots.map((s, i) =>
-              s.visible ? null : (
-                <ShotRow
-                  key={s.id}
-                  shot={s}
-                  n={i + 1}
-                  selected={selection?.kind === 'shot' && selection.id === s.id}
-                  units={units}
-                  retracking={!!retracking[s.id]}
-                />
-              ),
-            )}
-          </ul>
+          <ul className="mt-1.5 flex flex-col gap-1.5">{hidden.map(row)}</ul>
         </details>
       ) : null}
 
@@ -141,6 +148,74 @@ export function ShotsPanel() {
   );
 }
 
+/** One hole of a round in the shot list: "Hole 4 · par 4 · 5 shots", folds away. The hole with the
+ *  selected shot opens by itself. */
+function HoleGroup({ hole, par, count, selected, children }: { hole: string; par: number | null; count: number; selected: boolean; children: ReactNode }) {
+  const { t, f } = useI18n();
+  const [open, setOpen] = useState(true);
+  const shown = open || selected;
+  const title = hole ? f(t.shots.holeTitle, { hole }) : t.shots.noHole;
+  return (
+    <section data-testid="hole-group" data-hole={hole}>
+      <button
+        type="button"
+        aria-expanded={shown}
+        onClick={() => setOpen(!shown)}
+        className="flex w-full items-center gap-1.5 rounded-sm px-1 py-1 text-left text-[12px] font-semibold text-fg-muted hover:text-fg"
+      >
+        <ChevronDown className={cn('size-3.5 shrink-0 transition-transform', !shown && '-rotate-90')} aria-hidden />
+        <span className="text-fg">{title}</span>
+        <span className="font-normal">
+          {par ? ` · ${f(t.shots.holePar, { par })}` : ''} · {count === 1 ? t.shots.oneStroke : f(t.shots.strokes, { n: count })}
+        </span>
+      </button>
+      {shown ? <ul className="mt-1 flex flex-col gap-1.5">{children}</ul> : null}
+    </section>
+  );
+}
+
+/** Clips whose analysis failed, each with its own "Try again" until it is run again. */
+function FailedAnalyses() {
+  const { t, f } = useI18n();
+  const failures = useAnalysisFailures((s) => s.byMedia);
+  const projectId = useEditor((s) => s.projectId);
+  const media = useEditor((s) => s.doc.media);
+  const [busy, setBusy] = useState<string | null>(null);
+  const ids = Object.keys(failures).filter((id) => media[id]);
+  if (!ids.length) return null;
+  async function retry(mediaId: string) {
+    setBusy(mediaId);
+    try {
+      await api(`/projects/${projectId}/analyze`, { body: { mediaId } });
+      clearFailure(mediaId);
+    } catch (e) {
+      toast.error(errorMessage(e, t));
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <ul className="flex flex-col gap-1.5" data-testid="failed-analyses">
+      {ids.map((id) => (
+        <li
+          key={id}
+          className="flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--color-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--color-warning)_10%,transparent)] p-2.5"
+        >
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="break-words text-[12px] font-medium">{f(t.editor.analysisFailed, { name: media[id].name })}</p>
+            <p className="text-[12px] text-fg-muted">{t.editor.analysisFailedHint}</p>
+            <Button size="sm" variant="secondary" className="mt-2" loading={busy === id} onClick={() => void retry(id)}>
+              <RotateCcw />
+              {t.common.retry}
+            </Button>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** The next step once there are shots: "Make a video for me" (YouTube, highlight short, a short per shot). */
 function ShortsButton() {
   const { t } = useI18n();
@@ -152,12 +227,26 @@ function ShortsButton() {
   );
 }
 
-function ShotRow({ shot, n, selected, units, retracking }: { shot: Shot; n: number; selected: boolean; units: 'm' | 'yd'; retracking: boolean }) {
+function ShotRow({
+  shot,
+  n,
+  selected,
+  units,
+  retracking,
+  showHole,
+}: {
+  shot: Shot;
+  n: number;
+  selected: boolean;
+  units: 'm' | 'yd';
+  retracking: boolean;
+  showHole: boolean;
+}) {
   const { t, f, locale } = useI18n();
   const st = shotStats(shot);
   const carry = st ? (units === 'yd' ? `${Math.round(st.carryM * M_TO_YD)} yd` : `${Math.round(st.carryM)} m`) : '–';
   const place = useEditor((s) => s.doc.media[shot.mediaId]?.place ?? null);
-  const hole = place?.hole ? placeTitle({ ...place, par: null }, locale) : '';
+  const hole = showHole && place?.hole ? placeTitle({ ...place, par: null }, locale) : '';
   // A flight far outside the picture (e.g. from an analysis before this was caught) needs a look too.
   const lost = shot.kind !== 'putt' && shot.visible && offFrameReason(shot) !== null;
   const check = lost || shot.confidence < 0.6 || shot.warnings.some((w) => w.code !== 'manual' && w.code !== 'low_confidence');
@@ -189,8 +278,8 @@ function ShotRow({ shot, n, selected, units, retracking }: { shot: Shot; n: numb
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-[13px] font-medium">{shot.label || (shot.kind === 'putt' ? t.shots.putt : f(t.shots.shot, { n }))}</span>
-            {shot.kind === 'short' ? <Badge>{t.shots.shortShot}</Badge> : null}
+            <span className="truncate text-[13px] font-medium">{shotName(shot, n, t)}</span>
+            {shot.kind === 'short' && (n || shot.label) ? <Badge>{t.shots.shortShot}</Badge> : null}
             {shot.kind === 'putt' && shot.putt?.holed ? <Badge>{t.shots.puttHoled}</Badge> : null}
             {shot.source === 'manual' ? <Badge>{t.shots.warnings.manual.replace('.', '')}</Badge> : null}
           </div>

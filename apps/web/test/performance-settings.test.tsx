@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const calls: string[] = [];
 let jobStatus = 'running';
+/** NVIDIA cards are named by nvidia-smi; AMD/Intel run DirectML without a name. */
+let nvidia = true;
 
 const trials = [
   { kind: 'detector', sessions: 1, batch: 1, callers: 1, fps: 24.3, vram_mb: 1766, error: null, provider: 'DmlExecutionProvider' },
@@ -31,7 +33,12 @@ const perf = (profile: string) => ({
   fallback: null,
   cpuOnly: false,
   ingestFromEnv: false,
-  hardware: { cpuCores: 28, ram: { totalMb: 16000, availableMb: 9000 }, gpus: [{ name: 'RTX 5070', vramMb: 12227, usedMb: 900 }], inference: 'DirectML' },
+  hardware: {
+    cpuCores: 28,
+    ram: { totalMb: 16000, availableMb: 9000 },
+    gpus: nvidia ? [{ name: 'RTX 5070', vramMb: 12227, usedMb: 900 }] : [],
+    inference: 'DirectML',
+  },
 });
 const job = () => ({ id: 'job_t', kind: 'tune', status: jobStatus, progress: 0.3, message: 'Testing', error: '', result: {} });
 
@@ -79,5 +86,17 @@ describe('PerformanceSettings', () => {
     expect(details?.textContent).toContain('DmlFusedNode_7_11');
     expect(details?.textContent).toContain('2 video(s) decoded at once');
     view.unmount();
+  });
+
+  it('names the graphics card the ball search uses, also without NVIDIA (DirectML)', async () => {
+    nvidia = false;
+    jobStatus = 'succeeded';
+    const view = mount(<PerformanceSettings />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(view.el.querySelector('[data-testid="perf-gpu"]')?.textContent).toBe('Graphics card: RTX 5070 (DirectML)');
+    view.unmount();
+    nvidia = true;
   });
 });

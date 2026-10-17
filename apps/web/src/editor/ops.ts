@@ -1,7 +1,7 @@
 'use client';
 
 /** Editor commands. Each one is a single undoable step (see store.edit). */
-import { CLUBS, fitThrough, frameBox, intoView, offFrameReason, outsideBy, shotHandles, type Box, type Vec2 } from '@golf/physics';
+import { CLUBS, defaultParams, fitThrough, frameBox, intoView, offFrameReason, outsideBy, shotHandles, type Box, type Vec2 } from '@golf/physics';
 import { clipSlot, layerDefaults } from '@golf/compose';
 import { applyTemplate, currentShot, relayoutTemplate, shotStats } from '@golf/render';
 import {
@@ -25,6 +25,7 @@ import {
   type ReframeKey,
   type Shot,
   type TracerStyle,
+  type WarningCode,
 } from '@golf/schema';
 import type { Draft } from 'immer';
 import { courseMapGeometry, haversine, type CourseData } from './course';
@@ -166,6 +167,70 @@ export function setPuttLine(id: string, line: boolean) {
   });
 }
 
+/** What a look by the user settles: every doubt, but not how the shot came to be ('manual'). */
+const KEEP_ON_REVIEW: ReadonlySet<WarningCode> = new Set(['manual']);
+/** A flight fixed by hand answers the doubts about the path; how many putts there were is another question. */
+const KEEP_ON_FLIGHT_EDIT: ReadonlySet<WarningCode> = new Set(['manual', 'putt_count_unsure']);
+
+/** The user has looked at the shot: its "Check this" goes away. */
+function markReviewed(s: Draft<Shot>, keep: ReadonlySet<WarningCode>) {
+  s.warnings = s.warnings.filter((w) => keep.has(w.code));
+  s.confidence = 1;
+}
+
+/**
+ * "Looks right": clears the shot's warnings (one undo step). A doubtful full shot that was hidden
+ * is shown, since the user just confirmed it.
+ */
+export function approveShot(id: string) {
+  updateShot('Looks right', id, (s) => {
+    markReviewed(s, KEEP_ON_REVIEW);
+    if (s.kind === 'full') s.visible = true;
+  });
+}
+
+/** Seconds a putt is taken to roll when it becomes one by hand (the user can trim the clip). */
+const PUTT_ROLL_S = 4;
+
+/**
+ * Changes what kind of shot it is, as one undo step, keeping the data sane: a putt that becomes a
+ * shot gets a default flight from where the ball lay (pulled into the picture), a shot that becomes
+ * a putt loses its tracer and gets an end of roll. A full shot is shown. The score follows (it is
+ * counted from the kinds).
+ */
+export function setShotKind(id: string, kind: Shot['kind']): boolean {
+  const shot = E().doc.shots.find((s) => s.id === id);
+  if (!shot || shot.kind === kind) return false;
+  const opt = { fps: fpsOf(shot.mediaId), longSide: longSide(shot) };
+  const flight =
+    shot.kind === 'putt'
+      ? intoView(
+          { ...shot, params: defaultParams(opt.longSide, 0, shot.club), constraints: { ...NO_CONSTRAINTS, start: shot.constraints.start } },
+          visibleBox(shot),
+          opt,
+        )
+      : null;
+  const m = E().media[shot.mediaId] ?? E().doc.media[shot.mediaId];
+  const end = Math.max(shot.impactTime, Math.min(m?.duration || Infinity, shot.impactTime + PUTT_ROLL_S * shot.slowmo));
+  updateShot('Shot type', id, (s) => {
+    s.kind = kind;
+    // "Looks like a chip or a putt" is answered; a putt question goes with the putt.
+    s.warnings = s.warnings.filter((w) => w.code !== 'short_shot' && (kind === 'putt' || w.code !== 'putt_count_unsure'));
+    if (kind === 'putt') {
+      s.putt = { end, holed: null };
+      s.constraints = { ...NO_CONSTRAINTS };
+    } else {
+      delete s.putt;
+      if (flight) {
+        s.params = flight.params;
+        s.constraints = flight.constraints as Draft<Shot['constraints']>;
+      }
+      if (kind === 'full') s.visible = true;
+    }
+  });
+  return true;
+}
+
 export function deleteShot(id: string) {
   E().edit(
     'Delete shot',
@@ -252,6 +317,7 @@ export function bringIntoView(id: string): boolean {
   updateShot('Bring into view', id, (s) => {
     s.params = r.params;
     s.constraints = r.constraints as Draft<Shot['constraints']>;
+    markReviewed(s, KEEP_ON_FLIGHT_EDIT);
   });
   return true;
 }
@@ -267,6 +333,7 @@ export function drawShot(id: string, start: Vec2, apex: Vec2, landing: Vec2) {
     s.params = r.params;
     // The user drew what happened: later refits leave the tracked points out.
     s.constraints = { ...base.constraints, apex, landing, ignoreTrack: true } as Draft<Shot['constraints']>;
+    markReviewed(s, KEEP_ON_FLIGHT_EDIT);
   });
 }
 
@@ -312,6 +379,7 @@ export async function setConstraint(id: string, patch: Partial<Shot['constraints
   updateShot('Fix flight', id, (s) => {
     Object.assign(s.constraints, patch);
     if (res) s.params = res.params;
+    markReviewed(s, KEEP_ON_FLIGHT_EDIT);
   });
 }
 
@@ -488,6 +556,7 @@ export async function endHandleDrag() {
   updateShot('Move handle', d.shotId, (s) => {
     s.constraints = d.constraints as Draft<Shot['constraints']>;
     s.params = res?.params ?? live ?? s.params;
+    markReviewed(s, KEEP_ON_FLIGHT_EDIT);
   });
   E().setLive(d.shotId, null);
 }

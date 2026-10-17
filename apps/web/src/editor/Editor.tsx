@@ -18,6 +18,7 @@ import { useJobEvents, type JobEvent } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { useMe } from '@/lib/me';
 import { cn } from '@/lib/cn';
+import { failuresFromJobs, noteAnalysisJob, setFailures } from './analysisFailures';
 import { saveNow, startAutosave } from './autosave';
 import { ExportDialog, ExportStatus, Onboarding, ShortcutsDialog, VersionsDialog, type ExportRow } from './Dialogs';
 import { filmedDay } from './course';
@@ -84,7 +85,20 @@ export function Editor({ projectId }: { projectId: string }) {
         ingesting: Object.fromEntries(p.processing.filter((j) => j.kind === 'ingest' && j.mediaId).map((j) => [j.mediaId!, j.progress])),
       });
       if (doc.shots[0]) useEditor.getState().select({ kind: 'shot', id: doc.shots[0].id });
+      setFailures({});
+      setExports([]);
       setState('ready');
+      // Clips whose last analysis failed keep a "Try again" in the Shots panel, and exports still
+      // running (started before the editor was left) show their progress again.
+      void api<{ jobs: JobEvent['job'][] }>(`/jobs?project_id=${encodeURIComponent(projectId)}`)
+        .then((r) => setFailures(failuresFromJobs(r.jobs)))
+        .catch(() => undefined);
+      void api<{ exports: ExportRow[] }>(`/exports?project_id=${encodeURIComponent(projectId)}`)
+        .then((r) => {
+          const running = r.exports.filter((e) => e.status === 'queued' || e.status === 'running');
+          setExports((xs) => [...xs, ...running.filter((e) => !xs.some((x) => x.id === e.id))]);
+        })
+        .catch(() => undefined);
     } catch (e) {
       setError(errorMessage(e, t));
       setState('error');
@@ -151,6 +165,7 @@ export function Editor({ projectId }: { projectId: string }) {
         const running = job.status === 'queued' || job.status === 'running';
         if (running) analysing.current.add(job.id);
         else analysing.current.delete(job.id);
+        noteAnalysisJob(job);
         // Between the clips of a round the card stays up: the next clip's analysis is queued.
         useEditor.setState({
           analysis: running

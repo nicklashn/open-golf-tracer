@@ -1,12 +1,13 @@
 'use client';
 
-import { AlertTriangle, Copy, Film, MoreHorizontal, Pencil, Play, Sparkles, Trash2, UploadCloud } from 'lucide-react';
+import { AlertTriangle, Camera, ChevronDown, Copy, Download, Film, MoreHorizontal, Pencil, Play, Search, Sparkles, Trash2, UploadCloud } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
+import { Select } from '@/components/ui/controls';
 import { Input } from '@/components/ui/input';
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '@/components/ui/menu';
 import { Badge, ProgressBar, Skeleton } from '@/components/ui/misc';
@@ -19,6 +20,7 @@ import { useI18n } from '@/lib/i18n/client';
 import { useMe } from '@/lib/me';
 import { uploadFile } from '@/lib/upload';
 import { cn } from '@/lib/cn';
+import { ExportAllDialog, RunningExports } from './ExportBatch';
 import { UploadTray } from './UploadTray';
 
 export interface ProjectSummary {
@@ -32,6 +34,45 @@ export interface ProjectSummary {
   processing: JobInfo[];
   isDemo: boolean;
   failed: boolean;
+  /** A video made by "Make a video for me": the round it came from and the run that made it. */
+  sourceId?: string | null;
+  runId?: string | null;
+  runKind?: string | null;
+}
+
+export type ProjectSort = 'newest' | 'name';
+
+export interface ProjectGroup {
+  p: ProjectSummary;
+  /** Videos made from it, newest first. */
+  made: ProjectSummary[];
+}
+
+/**
+ * Projects as the page shows them: videos made from a round under that round, filtered by name
+ * (a round shows when it or one of its videos matches) and sorted. A video whose round is gone
+ * stands on its own.
+ */
+export function groupProjects(projects: ProjectSummary[], query: string, sort: ProjectSort, locale: 'da' | 'en'): ProjectGroup[] {
+  const ids = new Set(projects.map((p) => p.id));
+  const made = new Map<string, ProjectSummary[]>();
+  for (const p of projects) {
+    if (p.sourceId && p.sourceId !== p.id && ids.has(p.sourceId)) made.set(p.sourceId, [...(made.get(p.sourceId) ?? []), p]);
+  }
+  const q = query.trim().toLocaleLowerCase(locale);
+  const hit = (p: ProjectSummary) => !q || p.name.toLocaleLowerCase(locale).includes(q);
+  const newest = (a: ProjectSummary, b: ProjectSummary) => b.updatedAt.localeCompare(a.updatedAt);
+  const groups: ProjectGroup[] = [];
+  for (const p of projects) {
+    if (p.sourceId && ids.has(p.sourceId) && p.sourceId !== p.id) continue;
+    const kids = [...(made.get(p.id) ?? [])].sort(newest);
+    if (hit(p)) groups.push({ p, made: kids });
+    else if (kids.some(hit)) groups.push({ p, made: kids.filter(hit) });
+  }
+  const latest = (g: ProjectGroup) => [g.p, ...g.made].reduce((a, b) => (b.updatedAt > a ? b.updatedAt : a), '');
+  return groups.sort(
+    sort === 'name' ? (a, b) => a.p.name.localeCompare(b.p.name, locale, { sensitivity: 'base' }) : (a, b) => latest(b).localeCompare(latest(a)),
+  );
 }
 
 export function ProjectsPage() {
@@ -45,6 +86,9 @@ export function ProjectsPage() {
   const [several, setSeveral] = useState<File[] | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState<ProjectSort>('newest');
+  const groups = useMemo(() => (projects ? groupProjects(projects, query, sort, locale) : []), [projects, query, sort, locale]);
 
   const load = useCallback(async () => {
     try {
@@ -212,13 +256,45 @@ export function ProjectsPage() {
       ) : projects.length === 0 ? (
         <EmptyState onBrowse={() => fileInput.current?.click()} onDemo={demo} demoBusy={demoBusy} />
       ) : (
-        <ul className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {projects.map((p) => (
-            <li key={p.id}>
-              <ProjectCard p={p} onChanged={load} />
-            </li>
-          ))}
-        </ul>
+        <>
+          <RunningExports />
+          <div className="mt-6 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-0 flex-1 sm:max-w-xs">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" aria-hidden />
+              <Input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t.projects.searchPlaceholder}
+                aria-label={t.projects.search}
+                className="pl-9"
+                data-testid="projects-search"
+              />
+            </div>
+            <div className="w-44">
+              <Select
+                label={t.projects.sort}
+                value={sort}
+                onChange={setSort}
+                options={[
+                  { value: 'newest', label: t.projects.sortNewest },
+                  { value: 'name', label: t.projects.sortName },
+                ]}
+              />
+            </div>
+          </div>
+          {groups.length ? (
+            <ul className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {groups.map((g) => (
+                <li key={g.p.id}>
+                  <ProjectCard p={g.p} made={g.made} searching={!!query.trim()} onChanged={load} />
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-8 text-sm text-fg-muted">{f(t.projects.noMatch, { q: query.trim() })}</p>
+          )}
+        </>
       )}
 
       {dragging ? (
@@ -232,6 +308,9 @@ export function ProjectsPage() {
       <UploadTray />
       <Dialog open={!!several} onOpenChange={(o) => !o && setSeveral(null)}>
         <DialogContent title={f(t.projects.severalTitle, { n: several?.length ?? 0 })} description={t.projects.severalHint} wide>
+          <p className="mb-3 text-[13px] text-fg-muted" data-testid="several-gps">
+            {t.projects.severalGps}
+          </p>
           <div className="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
@@ -260,10 +339,11 @@ export function ProjectsPage() {
               <span className="text-[13px] text-fg-muted">{t.projects.separatelyHint}</span>
             </button>
           </div>
+          <BeforeFilming className="mt-4" />
         </DialogContent>
       </Dialog>
       <span className="sr-only" aria-live="polite">
-        {projects ? f(t.projects.shots, { n: projects.length }) : ''}
+        {projects ? (projects.length === 1 ? t.projects.oneProject : f(t.projects.count, { n: projects.length })) : ''}
       </span>
     </div>
   );
@@ -311,18 +391,162 @@ function EmptyState({ onBrowse, onDemo, demoBusy }: { onBrowse: () => void; onDe
           {t.projects.tryDemo}
         </Button>
       </div>
+      <BeforeFilming className="mt-8 max-w-3xl text-left" />
     </div>
   );
 }
 
-function ProjectCard({ p, onChanged }: { p: ProjectSummary; onChanged: () => void }) {
+/** What makes the analysis work, said before the round: GPS on, a tripod, and the original files. */
+function BeforeFilming({ className }: { className?: string }) {
+  const { t } = useI18n();
+  const B = t.projects.beforeFilming;
+  return (
+    <section className={cn('rounded-md border border-border bg-surface p-4', className)} data-testid="before-filming">
+      <h2 className="flex items-center gap-2 text-[13px] font-semibold">
+        <Camera className="size-4 text-accent-fg" aria-hidden />
+        {B.title}
+      </h2>
+      <ul className="mt-2 grid list-disc gap-1 pl-5 text-[13px] leading-snug text-fg-muted">
+        {B.items.map((x, i) => (
+          <li key={i}>{x}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ProjectCard({ p, made, searching, onChanged }: { p: ProjectSummary; made: ProjectSummary[]; searching: boolean; onChanged: () => void }) {
   const { t, f, locale } = useI18n();
+  const job = p.processing.find((j) => j.kind === 'ingest') ?? p.processing.find((j) => j.kind === 'analyze');
+
+  return (
+    <div>
+      <div className="group relative">
+        <Link href={`/app/projects/${p.id}`} className="block rounded-md focus-visible:outline-offset-4">
+          <div className="relative aspect-video overflow-hidden rounded-md border border-border bg-gray-950">
+            {p.posterUrl ? (
+              <img src={p.posterUrl} alt="" className="size-full object-cover transition-transform duration-300 group-hover:scale-[1.02]" loading="lazy" />
+            ) : (
+              <div className="flex size-full items-center justify-center text-gray-500">
+                <Play className="size-8" aria-hidden />
+              </div>
+            )}
+            {p.duration > 0 ? (
+              <span className="tabular absolute bottom-2 right-2 rounded-sm bg-gray-950/75 px-1.5 py-0.5 text-[11px] font-medium text-white">
+                {duration(p.duration)}
+              </span>
+            ) : null}
+            {p.isDemo || p.aspect === '16:9' || p.aspect === '9:16' ? (
+              <span className="absolute left-2 top-2 flex gap-1">
+                {p.isDemo ? <Badge>{t.projects.demoBadge}</Badge> : null}
+                {/* A made video (YouTube or a short) tells itself apart from the clips it came from. */}
+                {p.aspect === '16:9' || p.aspect === '9:16' ? <Badge>{p.aspect}</Badge> : null}
+              </span>
+            ) : null}
+            {job ? (
+              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-gray-950/90 to-transparent p-3 pt-8">
+                <p className="text-[12px] font-medium text-white">
+                  {job.kind === 'ingest' ? t.projects.processing : t.projects.analyzing}
+                  <span className="font-normal text-white/80"> {jobMessage(job.message, t)}</span>
+                </p>
+                <ProgressBar className="mt-1.5 bg-white/20" value={job.status === 'queued' ? null : job.progress} label={jobMessage(job.message, t)} />
+              </div>
+            ) : null}
+            {p.failed ? (
+              <div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gray-950/85 px-3 py-2 text-[12px] text-red-300">
+                <AlertTriangle className="size-3.5" />
+                {t.projects.failed}
+              </div>
+            ) : null}
+          </div>
+          <div className="mt-3 pr-10">
+            <h2 className="truncate text-[15px] font-medium">{p.name}</h2>
+            <p className="mt-0.5 text-[13px] text-fg-muted">
+              {p.shots === 0 ? t.projects.noShots : p.shots === 1 ? t.projects.oneShot : f(t.projects.shots, { n: p.shots })} ·{' '}
+              {f(t.projects.updated, { when: relativeTime(p.updatedAt, locale) })}
+            </p>
+          </div>
+        </Link>
+        <ProjectMenu p={p} onChanged={onChanged} className="absolute bottom-3 right-0" />
+      </div>
+      {made.length ? <MadeVideos made={made} open={searching} onChanged={onChanged} /> : null}
+    </div>
+  );
+}
+
+/** The videos made from a round, folded under it; "Export all" for each run that made several. */
+function MadeVideos({ made, open: searching, onChanged }: { made: ProjectSummary[]; open: boolean; onChanged: () => void }) {
+  const { t, f } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [exporting, setExporting] = useState<{ ids: string[]; vertical: boolean } | null>(null);
+  const shown = open || searching;
+  // Runs in the order of their newest video; videos without a run (older projects) stand alone.
+  const runs = new Map<string, ProjectSummary[]>();
+  for (const m of made) runs.set(m.runId ?? m.id, [...(runs.get(m.runId ?? m.id) ?? []), m]);
+  return (
+    <div className="mt-2 rounded-md border border-border bg-surface" data-testid="made-videos">
+      <button
+        type="button"
+        aria-expanded={shown}
+        onClick={() => setOpen(!shown)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[13px] font-medium text-fg-muted hover:text-fg"
+      >
+        <ChevronDown className={cn('size-4 shrink-0 transition-transform', !shown && '-rotate-90')} aria-hidden />
+        {made.length === 1 ? t.projects.madeFromOne : f(t.projects.madeFrom, { n: made.length })}
+      </button>
+      {shown ? (
+        <div className="flex flex-col gap-2 border-t border-border p-2">
+          {[...runs.values()].map((run) => (
+            <div key={run[0].runId ?? run[0].id}>
+              {run.length > 1 ? (
+                <div className="flex items-center justify-between gap-2 px-1 pb-1">
+                  <span className="truncate text-[12px] text-fg-subtle">{runLabel(run[0].runKind, t)}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setExporting({ ids: run.map((m) => m.id), vertical: run.every((m) => m.aspect === '9:16') })}
+                    data-testid="export-all"
+                  >
+                    <Download />
+                    {f(t.projects.exportAll, { n: run.length })}
+                  </Button>
+                </div>
+              ) : null}
+              <ul className="flex flex-col">
+                {run.map((m) => (
+                  <li key={m.id} className="group relative flex items-center gap-2.5 rounded-sm px-1 py-1 hover:bg-surface-sunken">
+                    <Link href={`/app/projects/${m.id}`} className="flex min-w-0 flex-1 items-center gap-2.5 rounded-sm">
+                      <span className={cn('shrink-0 overflow-hidden rounded-sm bg-gray-950', m.aspect === '9:16' ? 'h-10 w-6' : 'h-7 w-12')}>
+                        {m.posterUrl ? <img src={m.posterUrl} alt="" className="size-full object-cover" loading="lazy" /> : null}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[13px]">{m.name}</span>
+                      {m.aspect === '16:9' || m.aspect === '9:16' ? <Badge>{m.aspect}</Badge> : null}
+                    </Link>
+                    <ProjectMenu p={m} onChanged={onChanged} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <ExportAllDialog open={!!exporting} onOpenChange={(o) => !o && setExporting(null)} projectIds={exporting?.ids ?? []} vertical={!!exporting?.vertical} />
+    </div>
+  );
+}
+
+function runLabel(kind: string | null | undefined, t: ReturnType<typeof useI18n>['t']): string {
+  return kind === 'youtube' ? t.make.youtube : kind === 'highlight' ? t.make.highlight : kind === 'shorts' ? t.make.perShot : t.auto.open;
+}
+
+/** Edit, rename, duplicate and delete a project. */
+function ProjectMenu({ p, onChanged, className }: { p: ProjectSummary; onChanged: () => void; className?: string }) {
+  const { t, f } = useI18n();
   const router = useRouter();
   const [rename, setRename] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [name, setName] = useState(p.name);
   const [busy, setBusy] = useState(false);
-  const job = p.processing.find((j) => j.kind === 'ingest') ?? p.processing.find((j) => j.kind === 'analyze');
 
   async function doRename() {
     setBusy(true);
@@ -358,59 +582,12 @@ function ProjectCard({ p, onChanged }: { p: ProjectSummary; onChanged: () => voi
   }
 
   return (
-    <div className="group relative">
-      <Link href={`/app/projects/${p.id}`} className="block rounded-md focus-visible:outline-offset-4">
-        <div className="relative aspect-video overflow-hidden rounded-md border border-border bg-gray-950">
-          {p.posterUrl ? (
-            <img src={p.posterUrl} alt="" className="size-full object-cover transition-transform duration-300 group-hover:scale-[1.02]" loading="lazy" />
-          ) : (
-            <div className="flex size-full items-center justify-center text-gray-500">
-              <Play className="size-8" aria-hidden />
-            </div>
-          )}
-          {p.duration > 0 ? (
-            <span className="tabular absolute bottom-2 right-2 rounded-sm bg-gray-950/75 px-1.5 py-0.5 text-[11px] font-medium text-white">
-              {duration(p.duration)}
-            </span>
-          ) : null}
-          {p.isDemo || p.aspect === '16:9' || p.aspect === '9:16' ? (
-            <span className="absolute left-2 top-2 flex gap-1">
-              {p.isDemo ? <Badge>{t.projects.demoBadge}</Badge> : null}
-              {/* A made video (YouTube or a short) tells itself apart from the clips it came from. */}
-              {p.aspect === '16:9' || p.aspect === '9:16' ? <Badge>{p.aspect}</Badge> : null}
-            </span>
-          ) : null}
-          {job ? (
-            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-gray-950/90 to-transparent p-3 pt-8">
-              <p className="text-[12px] font-medium text-white">
-                {job.kind === 'ingest' ? t.projects.processing : t.projects.analyzing}
-                <span className="font-normal text-white/80"> {jobMessage(job.message, t)}</span>
-              </p>
-              <ProgressBar className="mt-1.5 bg-white/20" value={job.status === 'queued' ? null : job.progress} label={jobMessage(job.message, t)} />
-            </div>
-          ) : null}
-          {p.failed ? (
-            <div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gray-950/85 px-3 py-2 text-[12px] text-red-300">
-              <AlertTriangle className="size-3.5" />
-              {t.projects.failed}
-            </div>
-          ) : null}
-        </div>
-        <div className="mt-3 pr-10">
-          <h2 className="truncate text-[15px] font-medium">{p.name}</h2>
-          <p className="mt-0.5 text-[13px] text-fg-muted">
-            {p.shots === 0 ? t.projects.noShots : p.shots === 1 ? t.projects.oneShot : f(t.projects.shots, { n: p.shots })} ·{' '}
-            {f(t.projects.updated, { when: relativeTime(p.updatedAt, locale) })}
-          </p>
-        </div>
-      </Link>
+    <>
       <Menu>
         <MenuTrigger asChild>
           <button
             type="button"
-            className={cn(
-              'absolute bottom-3 right-0 inline-flex size-8 items-center justify-center rounded-sm text-fg-muted hover:bg-surface-sunken hover:text-fg',
-            )}
+            className={cn('inline-flex size-8 shrink-0 items-center justify-center rounded-sm text-fg-muted hover:bg-surface-sunken hover:text-fg', className)}
             aria-label={`${t.common.more}: ${p.name}`}
           >
             <MoreHorizontal className="size-4" />
@@ -465,6 +642,6 @@ function ProjectCard({ p, onChanged }: { p: ProjectSummary; onChanged: () => voi
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }
