@@ -233,8 +233,9 @@ export function useShortcuts({ enabled, onHelp, onExport }: { enabled: boolean; 
           else if (s.selection?.kind === 'audio') ops.removeMusic(s.selection.id);
           break;
         case 'Escape':
-          s.setTool('select');
-          s.select(null);
+          // First Esc leaves a tool (e.g. drawing the path) and keeps the selection.
+          if (s.tool !== 'select') s.setTool('select');
+          else s.select(null);
           break;
         case '?':
           onHelp();

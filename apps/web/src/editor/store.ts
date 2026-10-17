@@ -51,7 +51,8 @@ export function selectedClipIds(s: Selection): string[] {
   return s?.kind === 'clip' ? (s.ids?.length ? s.ids : [s.id]) : [];
 }
 
-export type Tool = 'select' | 'addPoint' | 'addShot' | 'reframe';
+/** drawPath: three clicks on the video (start, apex, landing) replace the selected shot's flight. */
+export type Tool = 'select' | 'addPoint' | 'addShot' | 'reframe' | 'drawPath';
 export type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
 
 interface HistoryEntry {

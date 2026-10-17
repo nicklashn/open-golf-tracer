@@ -8,6 +8,8 @@
  * There is no login, so everything listens on 127.0.0.1 only. LISTEN_HOST (environment or .env)
  * opens the web app to the network on purpose, e.g. LISTEN_HOST=0.0.0.0 – see the README.
  * The API always stays on 127.0.0.1; the web app proxies /api to it.
+ * API_PORT / WEB_PORT (environment) move the API and the web app off :8000 / :3000, e.g. to run a
+ * second copy beside the first; the web app, worker and exporter then talk to that API.
  */
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -38,6 +40,11 @@ function listenHost() {
   return '127.0.0.1';
 }
 const host = listenHost();
+const apiPort = process.env.API_PORT || '8000';
+const webPort = process.env.WEB_PORT || '3000';
+const apiUrl = `http://127.0.0.1:${apiPort}`;
+// The web proxy, worker and exporter find the API by API_URL (default :8000).
+if (apiPort !== '8000') process.env.API_URL ??= apiUrl;
 
 const colors = { api: 36, worker: 35, exporter: 33, web: 32 };
 const procs = [];
@@ -98,11 +105,11 @@ async function waitForApi(url, tries = 120) {
   return false;
 }
 
-run('api', py, ['-m', 'uvicorn', 'golf_api.main:app', '--host', '127.0.0.1', '--port', '8000', ...(prod ? [] : ['--reload', '--reload-dir', 'golf_api'])], {
+run('api', py, ['-m', 'uvicorn', 'golf_api.main:app', '--host', '127.0.0.1', '--port', apiPort, ...(prod ? [] : ['--reload', '--reload-dir', 'golf_api'])], {
   cwd: resolve(root, 'apps/api'),
   critical: true,
 });
-const ok = await waitForApi('http://127.0.0.1:8000/api/health');
+const ok = await waitForApi(`${apiUrl}/api/health`);
 if (!ok) {
   console.error('API’et startede ikke. Se loggen ovenfor.');
   shutdown(1);
@@ -112,15 +119,16 @@ if (!ok) {
     run('exporter', npm, ['run', 'start', '-w', '@golf/exporter']);
   }
   // The web scripts bind 127.0.0.1; a later -H wins, so LISTEN_HOST can widen it on purpose.
-  const hostArgs = host === '127.0.0.1' ? [] : ['--', '-H', host];
+  const extra = [...(host === '127.0.0.1' ? [] : ['-H', host]), ...(webPort === '3000' ? [] : ['-p', webPort])];
+  const hostArgs = extra.length ? ['--', ...extra] : [];
   if (!args.has('--no-web')) run('web', npm, ['run', prod ? 'start' : 'dev', '-w', '@golf/web', ...hostArgs], { critical: true });
-  console.log('\n  Open Golf Tracer is running at \x1b[1mhttp://localhost:3000\x1b[0m  (API: http://127.0.0.1:8000/api/docs)\n');
+  console.log(`\n  Open Golf Tracer is running at \x1b[1mhttp://localhost:${webPort}\x1b[0m  (API: ${apiUrl}/api/docs)\n`);
   if (host !== '127.0.0.1') {
     console.log(`  \x1b[33mLISTEN_HOST=${host}: the web app is reachable from the network. There is no login –`);
     console.log('  only do this on a network you trust or behind your own auth proxy.\x1b[0m\n');
   }
-  if (args.has('--open') && (await waitForApi('http://127.0.0.1:3000/', 240))) {
-    const url = 'http://localhost:3000';
+  if (args.has('--open') && (await waitForApi(`http://127.0.0.1:${webPort}/`, 240))) {
+    const url = `http://localhost:${webPort}`;
     if (win) spawn('cmd', ['/c', 'start', '', url], { detached: true });
     else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { detached: true, stdio: 'ignore' }).on('error', () => {});
   }

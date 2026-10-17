@@ -28,6 +28,8 @@ interface Perf {
   batch: number;
   threads: number;
   gpu: boolean;
+  /** How videos are decoded for analysis: 'sw' (CPU), 'auto' (ffmpeg picks) or a GPU decoder. */
+  decoder?: string;
 }
 
 interface Trial {
@@ -39,6 +41,7 @@ interface Trial {
   vram_mb: number | null;
   error: string | null;
   provider?: string | null;
+  decoder?: string | null;
 }
 
 interface TuneSummary {
@@ -48,6 +51,8 @@ interface TuneSummary {
   vramMb: number | null;
   stop: 'vram' | 'error' | 'no_gain' | 'time' | 'cpu' | 'done';
   trials?: Trial[];
+  decoder?: string | null;
+  decodeFps?: number | null;
 }
 
 export interface PerformanceInfo {
@@ -57,6 +62,7 @@ export interface PerformanceInfo {
   tuned: { summary: TuneSummary; at: string } | null;
   fallback: { at: string; from: string; to: Profile | 'cpu'; reason: string } | null;
   cpuOnly: boolean;
+  decodeFailed?: { method: string; codec: string; at: string | null }[];
   ingestFromEnv: boolean;
   hardware: {
     cpuCores: number;
@@ -108,7 +114,7 @@ export function PerformanceSettings() {
     }
   }
 
-  /** Polls the Optimise job until it ends. It takes 30–60 s once it runs, but waits for the
+  /** Polls the Optimise job until it ends. It takes 1–2 min once it runs, but waits for the
    *  analyses already running (a round of clips can take a while), so there is no time limit. */
   async function follow(start: JobInfo) {
     let j: JobInfo | undefined = start;
@@ -155,11 +161,17 @@ export function PerformanceSettings() {
   const tuned = info.tuned?.summary;
   const label = (p: Profile | 'cpu') => (p === 'cpu' ? T.cpuLabel : T.profiles[p]);
 
+  function decoderName(d: string) {
+    return d === 'sw' ? T.decoderCpu : d === 'auto' ? T.decoderAuto : f(T.decoderGpu, { name: d });
+  }
+
   function trialText(tr: Trial) {
     const n = tr.callers ?? 1;
     const what =
       tr.kind === 'decode'
-        ? f(T.trialDecode, { n })
+        ? tr.decoder
+          ? f(T.trialDecoder, { how: decoderName(tr.decoder), n })
+          : f(T.trialDecode, { n })
         : f(T.trial, { sessions: tr.sessions, batch: tr.batch, callers: n }) + (tr.provider ? ` (${tr.provider})` : '');
     if (tr.error) return `${what}: ${T.trialFailed}`;
     const fps = f(T.trialFps, { fps: number(tr.fps ?? 0, locale, 1) });
@@ -172,7 +184,9 @@ export function PerformanceSettings() {
         analyses: p.analyses === 1 ? T.analysesOne : f(T.analyses, { n: p.analyses }),
         ingests: p.ingests === 1 ? T.ingestsOne : f(T.ingests, { n: p.ingests }),
         threads: p.threads ? f(T.someCores, { n: p.threads }) : T.allCores,
-      }) + (hw.inference !== 'CPU' && p.sessions > 1 ? ` · ${f(T.sessions, { n: p.sessions })}` : '')
+      }) +
+      (hw.inference !== 'CPU' && p.sessions > 1 ? ` · ${f(T.sessions, { n: p.sessions })}` : '') +
+      (p.decoder && p.decoder !== 'auto' ? ` · ${f(T.decodes, { how: decoderName(p.decoder) })}` : '')
     );
   }
 
@@ -200,6 +214,15 @@ export function PerformanceSettings() {
           {T.cpuOnly}
         </p>
       ) : null}
+      {(info.decodeFailed ?? []).map((d) => (
+        <p key={`${d.method}:${d.codec}`} role="status" className="text-[13px] text-accent-fg" data-testid="perf-decode-failed">
+          {f(T.decodeFailed, {
+            method: d.method,
+            codec: d.codec.toUpperCase(),
+            when: d.at ? relativeTime(d.at, locale) : '',
+          })}
+        </p>
+      ))}
 
       <fieldset className="grid gap-2" disabled={saving}>
         <legend className="mb-1.5 text-[13px] font-medium">{T.profile}</legend>
@@ -268,6 +291,7 @@ export function PerformanceSettings() {
             {tuned.inference !== 'CPU' && tuned.gpu
               ? f(T.resultGpu, { gpu: tuned.gpu, n: info.profiles.tuned?.analyses ?? 1 })
               : f(T.resultCpu, { n: info.profiles.tuned?.analyses ?? 1 })}{' '}
+            {tuned.decoder && tuned.decodeFps ? `${f(T.resultDecode, { how: decoderName(tuned.decoder), fps: number(tuned.decodeFps, locale, 0) })} ` : ''}
             {T.stop[tuned.stop]} {info.tuned ? f(T.measuredAt, { when: relativeTime(info.tuned.at, locale) }) : ''}
           </p>
         ) : null}

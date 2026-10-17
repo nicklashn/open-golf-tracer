@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { TEMPLATES } from '@golf/render';
 import { shotStats } from '@golf/render';
+import { offFrameReason } from '@golf/physics';
 import type { LayerType, Shot } from '@golf/schema';
 import { useMemo, useRef, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
@@ -157,8 +158,15 @@ function ShotRow({ shot, n, selected, units, retracking }: { shot: Shot; n: numb
   const carry = st ? (units === 'yd' ? `${Math.round(st.carryM * M_TO_YD)} yd` : `${Math.round(st.carryM)} m`) : '–';
   const place = useEditor((s) => s.doc.media[shot.mediaId]?.place ?? null);
   const hole = place?.hole ? placeTitle({ ...place, par: null }, locale) : '';
-  const check = shot.confidence < 0.6 || shot.warnings.some((w) => w.code !== 'manual' && w.code !== 'low_confidence');
+  // A flight far outside the picture (e.g. from an analysis before this was caught) needs a look too.
+  const lost = shot.kind !== 'putt' && shot.visible && offFrameReason(shot) !== null;
+  const check = lost || shot.confidence < 0.6 || shot.warnings.some((w) => w.code !== 'manual' && w.code !== 'low_confidence');
   const firstWarning = shot.warnings.find((w) => w.code !== 'low_confidence') ?? shot.warnings[0];
+  const why = lost
+    ? t.tracer.offView
+    : firstWarning
+      ? ((t.shots.warnings as Record<string, string>)[firstWarning.code] ?? '')
+      : t.shots.warnings.low_confidence;
   return (
     <li>
       <div
@@ -203,11 +211,11 @@ function ShotRow({ shot, n, selected, units, retracking }: { shot: Shot; n: numb
             {retracking ? ` · ${t.shots.retracking}` : ''}
           </p>
           {check ? (
-            <Tooltip label={firstWarning ? ((t.shots.warnings as Record<string, string>)[firstWarning.code] ?? '') : t.shots.warnings.low_confidence}>
+            <Tooltip label={why}>
               <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-warning">
                 <AlertTriangle className="size-3" aria-hidden />
                 {t.shots.checkThis}
-                <span className="sr-only">: {firstWarning ? (t.shots.warnings as Record<string, string>)[firstWarning.code] : ''}</span>
+                <span className="sr-only">: {why}</span>
               </span>
             </Tooltip>
           ) : null}

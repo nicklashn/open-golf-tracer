@@ -35,6 +35,7 @@ export const REASON_CODES = [
   'implausible',
   'carry_mismatch',
   'default_path',
+  'off_frame',
   'short_shot',
   'low_confidence',
   'few_points',

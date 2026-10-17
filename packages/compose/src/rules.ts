@@ -11,7 +11,7 @@ import type { ClipSummary, HighlightTag, RoundSummary, ShotSummary, StrokeSummar
 type Locale = 'da' | 'en';
 
 /** Analysis warnings that make a flight doubtful. */
-export const DOUBT_FLAGS: readonly WarningCode[] = ['no_track', 'implausible', 'carry_mismatch', 'default_path'];
+export const DOUBT_FLAGS: readonly WarningCode[] = ['no_track', 'implausible', 'carry_mismatch', 'default_path', 'off_frame'];
 /** Below this confidence a shot is doubtful too. */
 export const LOW_CONFIDENCE = 0.6;
 /** Seconds of a clip without shots used as a mood shot in the YouTube video. */
@@ -160,6 +160,7 @@ const L = {
       no_track: 'Bolden blev ikke fundet i luften, så banen er gættet',
       implausible: 'Banen ligner ikke et rigtigt slag (for langsom, for kort eller passer dårligt)',
       default_path: 'Banen er en standardbane, ikke målt',
+      off_frame: 'Banen er gættet – tjek den (analysen lagde den uden for billedet)',
       carry_mismatch: 'Længden passer ikke med den carry, der er skrevet ind',
       hole_limit: 'Landede længere væk end hullet tillader, så banen er forkortet',
       few_points: 'Bolden blev kun set kortvarigt',
@@ -220,6 +221,7 @@ const L = {
       no_track: 'The ball was not found in the air, so the path is a guess',
       implausible: 'The path does not look like a real shot (too slow, too short or a poor fit)',
       default_path: 'The path is a default one, not measured',
+      off_frame: 'The path is a guess – check it (the analysis put it outside the picture)',
       carry_mismatch: 'The length does not fit the carry that was entered',
       hole_limit: 'Landed further than the hole allows, so the path was shortened',
       few_points: 'The ball was only seen briefly',

@@ -339,14 +339,22 @@ def _resolve_round(project_id: str) -> None:
 
 def apply_performance() -> int:
     """Hands the current performance profile to the engine; returns its revision (for step_down)."""
-    from shottracer import runtime
+    from shottracer import hwdecode, runtime
 
     perf, data = performance.effective()
-    rt = runtime.Runtime(sessions=perf.sessions, batch=perf.batch, threads=perf.threads, gpu=perf.gpu)
+    hwdecode.on_failure(_decode_failed)
+    rt = runtime.Runtime(sessions=perf.sessions, batch=perf.batch, threads=perf.threads, gpu=perf.gpu,
+                         decoder=perf.decoder, decode_failed=tuple(sorted(data.get("decodeFailed") or {})))
     if rt != runtime.current():
         log.info("performance: %s profile -> %s", data["profile"], rt)
     runtime.configure(rt)
     return int(data.get("rev", 0))
+
+
+def _decode_failed(key: str, reason: str) -> None:
+    """A GPU decoder failed in an analysis (it went on on the CPU): saved, so later jobs skip it."""
+    if performance.record_decode_failure(key, reason):
+        log.warning("GPU decoding failed (%s); those videos are decoded on the CPU until Optimise runs again", key)
 
 
 def _with_fallback(run: Callable[[], dict], report: Report) -> dict:

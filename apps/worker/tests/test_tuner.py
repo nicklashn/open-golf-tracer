@@ -250,7 +250,16 @@ def _fake_tuner(monkeypatch, decode_fps: dict, detector: dict, errors: tuple = (
     monkeypatch.setattr(tuner, "_frames", lambda n=3: [])
     monkeypatch.setattr(tuner, "_gpu_used", lambda: None)
     monkeypatch.setattr(tuner, "measure_detector", lambda frames, gpu=True: sim(detector, errors=errors)[0])
-    monkeypatch.setattr(tuner, "measure_decoding", lambda: lambda k: Trial(0, 0, k, fps=decode_fps.get(k, 0.0), kind="decode"))
+    per = decode_fps if all(isinstance(v, dict) for v in decode_fps.values()) else {"auto": decode_fps}
+    monkeypatch.setattr(tuner, "decoders", lambda: list(per))
+
+    def measure_decoding(method="auto"):
+        def measure(k):
+            fps = per[method].get(k, 0.0)
+            return Trial(0, 0, k, fps=fps or None, error=None if fps else "no gain", kind="decode", decoder=method)
+        return measure
+
+    monkeypatch.setattr(tuner, "measure_decoding", measure_decoding)
     return tuner
 
 
@@ -263,7 +272,23 @@ def test_optimise_on_directml_saves_what_decoding_side_by_side_allows(env, monke
     assert data["tuned"]["summary"]["parallel"] == 3 and data["tuned"]["summary"]["speedup"] == round(40 / 24, 2)
     kinds = [t["kind"] for t in data["tuned"]["summary"]["trials"]]
     assert kinds == ["detector"] * 3 + ["decode"] * 4
-    assert any("decoded" in m for m in messages)
+    assert any("decoding" in m for m in messages)
+    assert res["settings"]["decoder"] == "auto" and data["tuned"]["summary"]["decodeFps"] == 700
+
+
+def test_optimise_picks_the_fastest_decoder_and_saves_it(env, monkeypatch):
+    """The user's PC: ffmpeg's own pick topped out near 100 frames/s; a GPU decoder that is faster
+    side by side is chosen, and the analyses at once follow it."""
+    tuner = _fake_tuner(monkeypatch, {"sw": {1: 90, 2: 150, 3: 160}, "auto": {1: 53, 2: 95, 3: 102, 4: 98},
+                                      "d3d11va": {1: 160, 2: 300, 3: 310}, "cuda": {}}, {(1, 1): 53, (1, 1, 2): 66})
+    res = tuner.run_tuner(lambda p, m: True)
+    summary = performance.load()["tuned"]["summary"]
+    assert res["settings"]["decoder"] == "d3d11va" and res["settings"]["analyses"] == 2
+    assert summary["decoder"] == "d3d11va" and summary["parallel"] == 2 and summary["decodeFps"] == 300
+    decode = [(t["decoder"], t["callers"]) for t in summary["trials"] if t["kind"] == "decode"]
+    # each one alone (cuda fails), then the two fastest side by side
+    assert decode == [("sw", 1), ("auto", 1), ("d3d11va", 1), ("cuda", 1), ("d3d11va", 2), ("d3d11va", 3), ("sw", 2), ("sw", 3), ("sw", 4)]
+    assert performance.effective()[0].decoder == "d3d11va"
 
 
 def test_a_failed_step_keeps_enough_of_the_error_to_tell_why(monkeypatch):
@@ -304,7 +329,7 @@ def test_decoding_side_by_side_for_real(monkeypatch):
     from golf_worker import tuner
 
     monkeypatch.setattr(tuner, "MIN_TRIAL_S", 0.3)
-    one, two = (tuner.measure_decoding()(k) for k in (1, 2))
+    one, two = (tuner.measure_decoding("sw")(k) for k in (1, 2))
     assert one.fps and two.fps and not one.error and two.kind == "decode" and two.callers == 2
 
 
@@ -319,3 +344,41 @@ def test_search_parallel():
 
     assert search_parallel(measure, GPU_PC, 60) == (2, search_parallel(measure, GPU_PC, 60)[1]) and tried[:3] == [1, 2, 3]
     assert search_parallel(lambda k: Trial(0, 0, k, error="no ffmpeg"), GPU_PC, 60)[0] is None
+
+
+def test_search_decoders():
+    from golf_worker.tuner import search_decoders
+
+    def sim(table):
+        def measure(m, k):
+            fps = table.get(m, {}).get(k)
+            return Trial(0, 0, k, fps=fps, error=None if fps else "RuntimeError: broken", kind="decode", decoder=m)
+        return measure
+
+    # A GPU decoder must beat the CPU clearly; a near tie keeps the CPU.
+    assert search_decoders(sim({"sw": {1: 200, 2: 380}, "cuda": {1: 205, 2: 390}}), ["sw", "cuda"], GPU_PC, 60)[:2] == ("sw", 2)
+    assert search_decoders(sim({"sw": {1: 200, 2: 380}, "cuda": {1: 400, 2: 410}}), ["sw", "cuda"], GPU_PC, 60)[:2] == ("cuda", 1)
+    # Broken everywhere: nothing chosen, the default stays.
+    assert search_decoders(sim({}), ["sw", "d3d11va"], GPU_PC, 60)[:2] == (None, None)
+    # Only one works.
+    pick, k, trials = search_decoders(sim({"d3d11va": {1: 100}}), ["sw", "d3d11va"], GPU_PC, 60)
+    assert (pick, k) == ("d3d11va", 1) and trials[0].error
+
+
+def test_a_gpu_decoder_that_falls_back_is_not_measured_as_working():
+    """Without the hardware (this machine) a GPU decoder hands over to the CPU; its trial must fail,
+    or the CPU's speed would be saved as the GPU's."""
+    from golf_worker import tuner
+    from shottracer import hwdecode
+    from shottracer.video import ffmpeg_bin
+
+    hw = [m for m in hwdecode.candidates(ffmpeg_bin()) if m in ("cuda", "vaapi", "qsv")]
+    if not hw or performance.gpus():
+        pytest.skip("needs an ffmpeg with GPU decoders and no GPU")
+    tuner.MIN_TRIAL_S, old = 0.2, tuner.MIN_TRIAL_S
+    try:
+        tr = tuner.measure_decoding(hw[0])(1)
+    finally:
+        tuner.MIN_TRIAL_S = old
+    assert tr.error and tr.fps is None and tr.decoder == hw[0]
+    assert tuner.check_decoder("sw") is None

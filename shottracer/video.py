@@ -1,6 +1,7 @@
 """Video/audio I/O: frame iteration, audio extraction and an ffmpeg-backed writer."""
 from __future__ import annotations
 
+import collections
 import functools
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import runtime
+from . import hwdecode, runtime
 
 
 def ffmpeg_bin() -> str:
@@ -32,6 +33,8 @@ class VideoInfo:
     frame_count: int
     pix_fmt: str = "yuv420p"
     color: dict | None = None        # primaries/transfer/space tags to carry over
+    codec: str = ""                  # e.g. h264, hevc (which GPU decoders work depends on it)
+    rotation: int = 0                # display rotation in the file (width/height are already rotated)
 
     @property
     def duration(self) -> float:
@@ -70,17 +73,34 @@ def probe(path: Path) -> VideoInfo:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
         out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-                              "stream=pix_fmt,color_primaries,color_transfer,color_space", "-of", "json", str(path)],
+                              "stream=codec_name,pix_fmt,color_primaries,color_transfer,color_space:stream_side_data=rotation",
+                              "-of", "json", str(path)],
                              capture_output=True, text=True).stdout
         try:
             st = json.loads(out)["streams"][0]
             info.pix_fmt = st.get("pix_fmt", info.pix_fmt)
+            info.codec = str(st.get("codec_name") or "")
+            info.rotation = parse_rotation(st)
             tags = {"color_primaries": st.get("color_primaries"), "color_trc": st.get("color_transfer"),
                     "colorspace": st.get("color_space")}
             info.color = {k: v for k, v in tags.items() if v and v != "unknown"}
         except (ValueError, KeyError, IndexError):
             pass
     return info
+
+
+def parse_rotation(stream: dict) -> int:
+    """Display rotation (degrees) from an ffprobe stream: side data (new) or the rotate tag (old)."""
+    for sd in stream.get("side_data_list") or []:
+        if "rotation" in sd:
+            try:
+                return int(round(float(sd["rotation"])))
+            except (TypeError, ValueError):
+                return 0
+    try:
+        return int((stream.get("tags") or {}).get("rotate", 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def read_frame(info: VideoInfo, index: int) -> np.ndarray | None:
@@ -156,15 +176,13 @@ def sdr_for_analysis() -> bool:
     return " zscale " in out and " tonemap " in out
 
 
-def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
-           crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
-           rate: float | None = None):
-    """Yield (index, frame) via an ffmpeg pipe – GPU decoding, crop and resize happen in ffmpeg.
+class DecodeError(RuntimeError):
+    """ffmpeg ended with an error while decoding (used to fall back from GPU decoding)."""
 
-    crop = (x, y, w, h) in display (rotated) pixels; scale applies after the crop. With `rate`
-    the frames are resampled to that many per second (the index then counts samples from
-    `start`, `rate` per second) and `stop` limits the duration.
-    """
+
+def decode_plan(info: VideoInfo, crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
+                rate: float | None = None) -> tuple[list[str], tuple[int, ...], str]:
+    """(filters, frame shape, pixel format) for decode()."""
     w, h = (crop[2], crop[3]) if crop else (info.width, info.height)
     filters = [f"fps={rate:g}"] if rate else []
     if crop:
@@ -176,9 +194,21 @@ def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
         filters.append(SDR_TONEMAP)
     pix = "gray" if gray else "bgr24"
     filters.append(f"format={pix}")
-    cmd = [ffmpeg_bin(), "-v", "error", "-hwaccel", "auto"]
-    if runtime.current().threads:
-        cmd += ["-threads", str(runtime.current().threads)]
+    return filters, ((h, w) if gray else (h, w, 3)), pix
+
+
+def decode_cmd(info: VideoInfo, method: str = hwdecode.AUTO, start: int = 0, stop: int | None = None,
+               crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
+               rate: float | None = None, threads: int = 0, exe: str = "ffmpeg") -> tuple[list[str], tuple[int, ...]]:
+    """The ffmpeg command decode() runs, and the shape of each frame it writes.
+
+    Every method decodes to frames in memory and then crops, scales, converts and rotates them
+    in software (ffmpeg's autorotation), so the frames are the same size and orientation
+    whichever decoder made them."""
+    filters, shape, pix = decode_plan(info, crop, scale, gray, rate)
+    cmd = [exe, "-v", "error", *hwdecode.input_args(method)]
+    if threads:
+        cmd += ["-threads", str(threads)]
     if start > 0:
         cmd += ["-ss", f"{(start - 0.5) / info.fps:.6f}"]
     cmd += ["-i", str(info.path)]
@@ -186,22 +216,122 @@ def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
         cmd += ["-t", f"{(stop - start) / info.fps:.6f}"] if rate else ["-frames:v", str(stop - start)]
     cmd += ["-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", ",".join(filters),
             "-f", "rawvideo", "-pix_fmt", pix, "-"]
-    ch = 1 if gray else 3
-    size = w * h * ch
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=size * 4)
+    return cmd, shape
+
+
+def _read_into(stream, out: np.ndarray) -> bool:
+    """Fills `out` from the pipe; False at the end of the stream (a partial frame is dropped)."""
+    view = memoryview(out.reshape(-1))
+    got, size = 0, out.nbytes
+    while got < size:
+        n = stream.readinto(view[got:])
+        if not n:
+            return False
+        got += n
+    return True
+
+
+def _pipe(cmd: list[str], shape: tuple[int, ...], start: int, check: bool = False):
+    """Yield (index, frame) from an ffmpeg rawvideo pipe. With `check` a failed ffmpeg (non-zero
+    exit at the end of the stream) raises DecodeError with the end of its error output."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE if check else subprocess.DEVNULL, bufsize=0)
+    assert proc.stdout is not None
+    err: collections.deque[bytes] = collections.deque(maxlen=20)
+    drain = None
+    if check:   # read stderr beside the frames, so a chatty ffmpeg never blocks on it
+        stderr = proc.stderr
+        assert stderr is not None
+        drain = threading.Thread(target=lambda: err.extend(stderr), daemon=True)
+        drain.start()
     try:
         i = start
         while True:
-            buf = proc.stdout.read(size)
-            if len(buf) < size:
+            frame = np.empty(shape, np.uint8)   # a new array each time: callers keep frames
+            if not _read_into(proc.stdout, frame):
                 break
-            frame = np.frombuffer(buf, np.uint8).reshape((h, w) if gray else (h, w, 3))
             yield i, frame
             i += 1
+        if check:
+            rc = proc.wait()
+            if drain is not None:
+                drain.join(2)
+            if rc != 0:
+                tail = b"".join(err).decode(errors="replace").strip()[-600:]
+                raise DecodeError(f"ffmpeg exited with {rc}" + (f": {tail}" if tail else ""))
     finally:
         proc.stdout.close()
-        proc.kill()
+        if proc.poll() is None:
+            proc.kill()
         proc.wait()
+        if proc.stderr is not None:
+            if drain is not None:
+                drain.join(2)
+            proc.stderr.close()
+
+
+def _expected(info: VideoInfo, start: int, stop: int | None, rate: float | None) -> int | None:
+    """Frames a decode should give when the file has them (None: not known well enough)."""
+    if rate:
+        return None
+    end = min(stop, info.frame_count) if stop is not None and info.frame_count else stop or info.frame_count
+    return max(0, end - start) if end else None
+
+
+def decode(info: VideoInfo, start: int = 0, stop: int | None = None,
+           crop: tuple[int, int, int, int] | None = None, scale: float = 1.0, gray: bool = False,
+           rate: float | None = None):
+    """Yield (index, frame) via an ffmpeg pipe – decoding, crop and resize happen in ffmpeg.
+
+    crop = (x, y, w, h) in display (rotated) pixels; scale applies after the crop. With `rate`
+    the frames are resampled to that many per second (the index then counts samples from
+    `start`, `rate` per second) and `stop` limits the duration.
+
+    The decoder is the one in the runtime settings (hwdecode); a GPU decoder that fails hands
+    over to the CPU where it stopped, so the caller sees one unbroken run of frames.
+    """
+    rt = runtime.current()
+    method = hwdecode.choose(rt.decoder, info.codec, info.pix_fmt, rt.decode_failed)
+    exe = ffmpeg_bin()
+
+    def run(m: str, s: int, check: bool = False):
+        cmd, shape = decode_cmd(info, m, s, stop, crop, scale, gray, rate, rt.threads, exe)
+        return _pipe(cmd, shape, s, check)
+
+    if method not in hwdecode.HW_METHODS:
+        yield from run(method, start)
+        return
+    n, reason = 0, None
+    frames = run(method, start, check=True)
+    try:
+        for item in frames:
+            yield item
+            n += 1
+    except DecodeError as exc:
+        reason = str(exc)
+    finally:
+        frames.close()
+    expected = _expected(info, start, stop, rate)
+    short = expected is not None and n < expected or (rate is not None and n == 0)
+    if reason is None and not short:
+        return
+    if reason is not None:
+        hwdecode.record_failure(method, info.codec, info.pix_fmt, reason)
+    # Carry on in software from the first frame the GPU did not deliver. With a rate the samples
+    # depend on where the decode began, so that run starts over and skips what was delivered.
+    s = start if rate else start + n
+    if stop is not None and s >= stop:
+        return
+    rest = run(hwdecode.SW, s)
+    try:
+        for k, (i, f) in enumerate(rest):
+            if rate and k < n:
+                continue
+            if reason is None:   # the GPU stopped early, the CPU found more: it dropped frames
+                hwdecode.record_failure(method, info.codec, info.pix_fmt, f"{n} of {expected or 'the'} frames, then nothing")
+                reason = "short"
+            yield i, f
+    finally:
+        rest.close()
 
 
 def load_audio(path: Path, sr: int = 22050) -> tuple[np.ndarray, int] | None:
