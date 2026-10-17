@@ -264,7 +264,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
   // Videos with GPS but no hole yet (the map server was busy during analysis): ask again.
   useEffect(() => {
-    if (state !== 'ready') return;
+    if (state !== 'ready' || useMe.getState().me?.geoLookup === false) return;
     const missing = Object.values(useEditor.getState().doc.media).filter((m) => m.kind === 'video' && m.geo && !m.place);
     for (const m of missing) {
       void api<Record<string, unknown> | null>(`/geo/place?lat=${m.geo!.lat}&lon=${m.geo!.lon}`)

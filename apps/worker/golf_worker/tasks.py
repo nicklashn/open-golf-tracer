@@ -265,12 +265,18 @@ def _place(m: Media, src: Path) -> dict | None:
     """Course, hole and distance to the green from the video's GPS (OpenStreetMap). Optional:
     no GPS, no network or an unmapped course just means no place."""
     try:
+        from golf_api.models import User
         from golf_api.probe import probe_file
+        from golf_api.routes.common import geo_lookup_enabled
         from golf_api.routes.geo import green_distance, place_at
 
         geo = (m.probe or {}).get("geo") or probe_file(src).get("geo")   # uploads from before GPS was read
         if not geo:
             return None
+        with session_scope() as db:
+            allowed = geo_lookup_enabled(db.get(User, m.user_id))
+        if not allowed:   # Settings → "Look courses up on OpenStreetMap" off, or GEO_LOOKUP=0
+            return {"geo": geo}
         found = place_at(float(geo["lat"]), float(geo["lon"]))
         if not found:
             return {"geo": geo}

@@ -255,6 +255,8 @@ const da = {
     apiKey: 'API-nøgle',
     apiKeyHint: 'Gemmes kun på serveren og vises aldrig igen. Lad feltet stå tomt for at beholde den gemte nøgle.',
     keySaved: 'Gemt nøgle: {key}',
+    keyWillClear: 'Den gemte nøgle hører til en anden udbyder eller adresse og bliver slettet, når du gemmer. Skriv nøglen til den nye adresse ind igen.',
+    keyCleared: 'Den gemte nøgle er slettet, fordi udbyderen eller adressen er ændret. Skriv en ny nøgle ind.',
     removeKey: 'Fjern nøglen',
     maxTokens: 'Højst tokens pr. video',
     maxTokensHint: 'Til planen (ind + ud, alle kald). Bliver den for stor, laves planen af faste regler i stedet – videoen bliver lavet alligevel.',
@@ -818,6 +820,11 @@ const da = {
     data: 'Dine data',
     exportData: 'Download mine data',
     exportDataLead: 'Projekter, filoversigt og eksporter fra den lokale database som JSON i en zip-fil.',
+    privacy: 'Privatliv',
+    geoLookup: 'Slå baner op på OpenStreetMap',
+    geoLookupHint:
+      'Når en video har GPS, sendes positionen til OpenStreetMaps offentlige servere (Overpass), så appen kan finde bane, hul og afstand til greenen. Slået fra bliver positionen på din PC, og hullet skal vælges selv. "Mål på kort" spørger stadig OpenStreetMap, når du selv åbner kortet.',
+    geoLookupEnv: 'Slået fra med GEO_LOOKUP=0 i .env.',
   },
   exportsPage: {
     title: 'Mine videoer',

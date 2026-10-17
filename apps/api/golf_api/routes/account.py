@@ -24,6 +24,7 @@ class ProfileIn(BaseModel):
     locale: str | None = Field(None, pattern="^(da|en)$")
     units: str | None = Field(None, pattern="^(m|yd)$")
     onboarding_done: bool | None = None
+    geo_lookup: bool | None = None
 
 
 class StyleIn(BaseModel):
@@ -44,6 +45,8 @@ def update_profile(body: ProfileIn, db: Session = Depends(get_db), user: User = 
         user.units = body.units
     if body.onboarding_done is not None:
         user.onboarding_done = body.onboarding_done
+    if body.geo_lookup is not None:
+        user.geo_lookup = body.geo_lookup
     db.commit()
     return {"user": public_user(db, user)}
 

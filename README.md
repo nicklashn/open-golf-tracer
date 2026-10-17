@@ -89,6 +89,36 @@ several). Other names are refused.
 > projects. Only do this on a network you trust (your home network) – never on public Wi-Fi or
 > directly on the internet. The API itself always stays on `127.0.0.1`; the web app proxies to it.
 
+## Security and privacy
+
+- **Other programs and users on this PC can reach it.** `127.0.0.1` keeps other devices out, but
+  any program or Windows/macOS/Linux user account on the same PC can open the app and its API
+  (`127.0.0.1:8000`) – there is no login. Don't run it on a PC shared with people you don't
+  trust. Web sites in your browser can't: writes from other sites are refused, and so are host
+  names other than localhost, IP addresses and `ALLOWED_HOSTS` (DNS rebinding).
+- **Secrets on disk.** The AI key and the ChatGPT sign-in tokens are kept in the database in
+  `data/`. On Windows they are encrypted with DPAPI for your Windows user (a copied database or
+  backup can't be read elsewhere, and after moving to another PC you enter the key or sign in
+  again). On macOS/Linux they are stored as plain text, as are `AI_API_KEY` in `.env` and the
+  app's own keys in `data/.secret` and `data/.internal-token` on every OS: they are protected
+  only by the permissions of your user folder. Keys never reach the browser, logs, projects or
+  the data export.
+
+### What leaves your PC
+
+Videos, projects and exports stay on your PC. These are the only things sent elsewhere:
+
+| What | To | When |
+|---|---|---|
+| A video's GPS position | OpenStreetMap's public Overpass servers (`overpass-api.de`, `maps.mail.ru`, `overpass.kumi.systems`) | During each analysis of a video with GPS, to find the course, hole and distance to the green. Turn it off under **Settings → Privacy** ("Look courses up on OpenStreetMap") or with `GEO_LOOKUP=0` |
+| The map position / your search text | Overpass and Nominatim (`nominatim.openstreetmap.org`) | When you open "Measure on the map" or search in it |
+| Map tiles for the area shown | `tile.openstreetmap.org`, satellite tiles from Esri (`server.arcgisonline.com`) | Loaded by your browser while the map is open |
+| A text summary of the round (project and course name, date, hole, club and distances per shot – never videos or file names) and your wish for the video | The AI provider you chose (OpenAI-compatible, Anthropic, ChatGPT; nothing with Ollama on your own PC) | Only with "Make a video for me" and an AI provider chosen. With still frames (`AI_VISION` / Settings → AI) a few frames from the green are sent too |
+| Sign-in and token refresh | OpenAI (`auth.openai.com`, `api.openai.com`) | Only with "ChatGPT (your plan)". The tokens stay on the server |
+| A download of the ball-detection model | GitHub (this repository's releases) | Once, if `models/` doesn't have it yet |
+
+There is no telemetry and no update check (Next.js and Hugging Face telemetry are switched off).
+
 ## Configuration
 
 Everything has sensible defaults, and nothing has to be set. To change something, edit `.env`
@@ -105,6 +135,7 @@ Everything has sensible defaults, and nothing has to be set. To change something
 | `EXPORT_CPU` | `1` forces CPU encoding even when a GPU encoder exists |
 | `NEXT_PUBLIC_MAP_SATELLITE` | Satellite map in "Measure on map": empty = auto, `1` = always, `0` = never |
 | `LISTEN_HOST`, `ALLOWED_HOSTS` | Network access, see above |
+| `GEO_LOOKUP` | `0` never looks courses up on OpenStreetMap from a video's GPS, see [What leaves your PC](#what-leaves-your-pc) |
 | `LOG_LEVEL` | `INFO` by default |
 | `AI_PROVIDER`, `AI_MODEL`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MAX_TOKENS`, `AI_VISION` | Optional AI model for "Make video for me", see below |
 

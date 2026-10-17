@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # e.g. "mypc.local" with LISTEN_HOST=0.0.0.0. Other names are refused (DNS rebinding).
     allowed_hosts: str = Field("", alias="ALLOWED_HOSTS")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    # GEO_LOOKUP=0: never send a video's GPS position to OpenStreetMap on its own (the setting
+    # under Settings can then not turn it on); opening "Measure on the map" still works.
+    geo_lookup: bool = Field(True, alias="GEO_LOOKUP")
 
     # Optional AI model for "Make a video for me" (none | ollama | openai-compatible | anthropic).
     # They can be overridden under Settings → AI; the key never leaves the server.

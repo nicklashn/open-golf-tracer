@@ -17,6 +17,7 @@ from ..config import settings
 from ..deps import current_user
 from ..errors import ApiError
 from ..models import User
+from .common import geo_lookup_enabled
 
 router = APIRouter(tags=["geo"])
 
@@ -39,7 +40,7 @@ def _client() -> httpx.Client:
         verify: Any = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     except ImportError:
         verify = True
-    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=45, verify=verify)
+    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=httpx.Timeout(45, connect=5), verify=verify)
 
 
 def _cached(kind: str, key: str, fetch) -> Any:
@@ -278,7 +279,10 @@ def pick_alternative(place: dict[str, Any], previous_hole: str | None, next_hole
 
 
 @router.get("/geo/place")
-def place(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, le=180), _: User = Depends(current_user)):
+def place(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, le=180), user: User = Depends(current_user)):
+    # Asked on its own by the editor for videos with GPS: only when looking places up is allowed.
+    if not geo_lookup_enabled(user):
+        return None
     return place_at(lat, lon)
 
 

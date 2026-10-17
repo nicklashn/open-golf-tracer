@@ -3,7 +3,7 @@
 import { Download } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
-import { Segmented } from '@/components/ui/controls';
+import { Segmented, Switch } from '@/components/ui/controls';
 import { Skeleton } from '@/components/ui/misc';
 import { api } from '@/lib/api';
 import { useI18n } from '@/lib/i18n/client';
@@ -90,6 +90,22 @@ export function SettingsPage() {
 
       <Section id="performance" title={t.perf.title} lead={t.perf.lead}>
         <PerformanceSettings />
+      </Section>
+
+      <Section id="privacy" title={t.settings.privacy}>
+        <div className="grid max-w-md gap-1">
+          <label className="flex items-center justify-between gap-3 text-sm">
+            {t.settings.geoLookup}
+            <Switch
+              checked={me.geoLookup !== false}
+              disabled={me.geoLookupAllowed === false}
+              onChange={(v) => void api<{ user: Me }>('/account', { method: 'PATCH', body: { geo_lookup: v } }).then((r) => setMe(r.user))}
+              label={t.settings.geoLookup}
+            />
+          </label>
+          <p className="text-[13px] text-fg-muted">{t.settings.geoLookupHint}</p>
+          {me.geoLookupAllowed === false ? <p className="text-[13px] text-accent-fg">{t.settings.geoLookupEnv}</p> : null}
+        </div>
       </Section>
 
       <Section id="data" title={t.settings.data} lead={t.settings.exportDataLead}>

@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import logging_setup, maintenance
+from . import logging_setup, maintenance, secretbox
 from .config import settings
 from .logging_setup import request_id
 from .routes import account, autovideo, chatgpt, exports, geo, internal, jobs, media, misc, performance, projects, uploads
@@ -21,6 +21,21 @@ from .routes import account, autovideo, chatgpt, exports, geo, internal, jobs, m
 log = logging.getLogger("golf.api")
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _hosts(request: Request) -> list[str]:
+    """The host names this request claims, lower case: the real Host header plus every entry of
+    X-Forwarded-Host. Our Next.js proxy replaces X-Forwarded-Host with the browser's Host, but a
+    request sent straight to the API can carry any X-Forwarded-Host it likes, so it can only ever
+    add names to check, never stand in for the Host header."""
+    raw = [request.headers.get("host", "")] + request.headers.get("x-forwarded-host", "").split(",")
+    return [h.strip().lower() for h in raw if h.strip()]
+
+
+def browser_host(request: Request) -> str:
+    """The host the browser opened: the proxy's X-Forwarded-Host (last entry), else Host."""
+    xfh = [h.strip() for h in request.headers.get("x-forwarded-host", "").split(",") if h.strip()]
+    return (xfh[-1] if xfh else request.headers.get("host", "")).lower()
 
 
 def cross_site(request: Request) -> bool:
@@ -32,24 +47,31 @@ def cross_site(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
         return False      # not a browser (worker, exporter, curl, tests)
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
-    return origin.split("://", 1)[-1].rstrip("/") != host.split(",")[0].strip()
+    return origin.split("://", 1)[-1].rstrip("/").lower() != browser_host(request)
+
+
+def _host_name(raw: str) -> str:
+    """'host:port', '[v6]:port', 'v6' or 'host' -> the bare name."""
+    if raw.startswith("["):
+        return raw[1:].split("]")[0]
+    return raw.rsplit(":", 1)[0] if raw.count(":") == 1 else raw
 
 
 def foreign_host(request: Request) -> bool:
     """True when the page was opened under a host name we don't know. A web site can point its own
     name at 127.0.0.1 (DNS rebinding) and then read the API as same-origin; it can't fake an IP
-    address or "localhost" as the name, so only those and ALLOWED_HOSTS are accepted."""
-    raw = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip().lower()
-    if not raw:
-        return False      # not HTTP/1.1 from a browser
-    name = raw[1:].split("]")[0] if raw.startswith("[") else raw.rsplit(":", 1)[0] if raw.count(":") == 1 else raw
-    if name == "localhost" or name.endswith(".localhost"):
-        return False
-    with contextlib.suppress(ValueError):
-        ipaddress.ip_address(name)
-        return False
-    return name not in {h.strip().lower() for h in settings().allowed_hosts.split(",") if h.strip()}
+    address or "localhost" as the name, so only those and ALLOWED_HOSTS are accepted. The real
+    Host header is always checked, and every X-Forwarded-Host name must pass as well."""
+    allowed = {h.strip().lower() for h in settings().allowed_hosts.split(",") if h.strip()}
+    for raw in _hosts(request):
+        name = _host_name(raw)
+        if name == "localhost" or name.endswith(".localhost") or name in allowed:
+            continue
+        try:
+            ipaddress.ip_address(name)
+        except ValueError:
+            return True
+    return False      # an empty list: not HTTP/1.1 from a browser
 
 
 def migrate() -> None:
@@ -68,6 +90,10 @@ def migrate() -> None:
 async def lifespan(app: FastAPI):
     logging_setup.setup(settings().log_level)
     migrate()
+    try:
+        secretbox.migrate()
+    except Exception:  # the app works with plaintext as before
+        log.exception("kunne ikke kryptere gemte nøgler")
 
     async def housekeeping():
         while True:

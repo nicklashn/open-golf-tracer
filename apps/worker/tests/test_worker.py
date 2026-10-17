@@ -144,3 +144,34 @@ def test_analysis_job_finds_shots(client):
     assert abs(rt["result"]["shot"]["impactTime"] - 11.0) < 0.05
     os.environ.pop("X", None)
     json.dumps(doc)
+
+
+def test_place_lookup_respects_the_setting_and_env(client, monkeypatch, tmp_path):
+    """Settings → "Look courses up on OpenStreetMap" off (or GEO_LOOKUP=0): the analysis keeps
+    the GPS but sends nothing to Overpass."""
+    from golf_api import config
+    from golf_api.db import session_scope
+    from golf_api.models import Media
+    from golf_api.routes import geo
+    from golf_worker import tasks
+
+    calls = []
+    monkeypatch.setattr(geo, "place_at", lambda lat, lon: calls.append((lat, lon)) or {"course": "X", "hole": "1"})
+    monkeypatch.setattr(geo, "green_distance", lambda lat, lon: 100)
+    uid = client.get("/api/account").json()["user"]["id"]
+    with session_scope() as db:
+        m = Media(user_id=uid, filename="a.mp4", kind="video", storage_key="x", probe={"geo": {"lat": 56.2, "lon": 9.7}})
+        db.add(m)
+        db.flush()
+        db.expunge(m)
+    src = tmp_path / "a.mp4"
+    assert tasks._place(m, src)["course"] == "X" and len(calls) == 1
+    client.patch("/api/account", json={"geo_lookup": False})
+    assert tasks._place(m, src) == {"geo": {"lat": 56.2, "lon": 9.7}} and len(calls) == 1
+    client.patch("/api/account", json={"geo_lookup": True})
+    monkeypatch.setenv("GEO_LOOKUP", "0")
+    config.settings.cache_clear()
+    try:
+        assert tasks._place(m, src) == {"geo": {"lat": 56.2, "lon": 9.7}} and len(calls) == 1
+    finally:
+        config.settings.cache_clear()
