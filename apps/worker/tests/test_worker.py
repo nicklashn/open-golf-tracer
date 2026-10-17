@@ -106,15 +106,17 @@ def test_parallel_lanes_claim_each_job_once(client):
     assert sorted(got) == sorted(ids)
 
 
-def test_ingest_parallel_setting(monkeypatch):
+def test_ingest_parallel_setting(env, monkeypatch):
+    from golf_api import performance
     from golf_worker import main
 
     monkeypatch.setenv("INGEST_PARALLEL", "3")
     assert main.lane_threads("media") == 3 and main.lane_threads("analysis") == 1
     monkeypatch.delenv("INGEST_PARALLEL")
-    monkeypatch.setattr(main.os, "cpu_count", lambda: 4)
+    hw = performance.hardware()
+    monkeypatch.setattr(performance, "hardware", lambda refresh=False: {**hw, "cpuCores": 4})
     assert main.lane_threads("media") == 1
-    monkeypatch.setattr(main.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(performance, "hardware", lambda refresh=False: {**hw, "cpuCores": 16})
     assert main.lane_threads("media") == 2
 
 

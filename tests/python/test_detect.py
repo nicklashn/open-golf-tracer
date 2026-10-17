@@ -1,4 +1,37 @@
-from shottracer.detect import Box, feet_roi
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from shottracer.detect import Box, OnnxRfDetrBallDetector, feet_roi
+
+
+class FakeSession:
+    """Stands in for an onnxruntime session: input shape [batch, 3, 704, 704]."""
+
+    def __init__(self, batch="batch"):
+        self.shape = [batch, 3, 704, 704]
+        self.calls = []
+
+    def get_inputs(self):
+        return [SimpleNamespace(name="input", shape=self.shape)]
+
+    def run(self, _outputs, feeds):
+        """Each image's outputs depend only on that image (as a real network's), so batching
+        must not change them."""
+        x = feeds["input"]
+        self.calls.append(len(x))
+        logits = np.full((len(x), 300, 91), -10.0, np.float32)
+        boxes = np.zeros((len(x), 300, 4), np.float32)
+        for b in range(len(x)):
+            m = x[b].mean(axis=(1, 2))
+            logits[b, 5, 37] = m[0]                       # a "sports ball"
+            boxes[b, 5] = (0.5 + 0.05 * m[1], 0.75, 0.01, 0.02)
+            logits[b, 9, 1] = 2.0 + m[2]                  # a "person"
+            boxes[b, 9] = (0.25, 0.5 + 0.05 * m[0], 0.2, 0.6)
+        return [boxes, logits]
 
 
 def test_feet_roi_reaches_a_face_on_ball_mid_swing():
@@ -22,8 +55,6 @@ def test_far_away_players_are_not_the_golfer():
 def test_onnx_postprocessing_matches_rfdetr():
     """Sigmoid scores, COCO ids from the flat top-k index, cxcywh boxes scaled to the image
     (as rfdetr's PostProcess), without running a real model."""
-    import threading
-
     import numpy as np
 
     from shottracer.detect import OnnxRfDetrBallDetector
@@ -35,14 +66,13 @@ def test_onnx_postprocessing_matches_rfdetr():
     logits[0, 9, 1] = 2.0  # person, sigmoid 0.88
     boxes[0, 9] = (0.25, 0.5, 0.2, 1.4)  # taller than the image: clamped
 
-    class Session:
+    class Session(FakeSession):
         def run(self, _outputs, feeds):
             assert feeds["input"].shape == (1, 3, 704, 704)
             return [boxes, logits]
 
     det = OnnxRfDetrBallDetector.__new__(OnnxRfDetrBallDetector)
-    det.session, det.input, det._run_lock = Session(), "input", threading.Lock()
-    det.names = {1: "person", 37: "sports ball"}
+    det._init([Session()])
     out = det._predict(np.zeros((1000, 2000, 3), np.uint8), 0.05)
     assert [k for k, _ in out] == ["person", "sports ball"]
     person, ball = out[0][1], out[1][1]
@@ -50,3 +80,68 @@ def test_onnx_postprocessing_matches_rfdetr():
     assert np.allclose((person.x1, person.y1, person.x2, person.y2), (300, 0, 700, 1000))
     assert abs(ball.conf - 0.5) < 1e-6
     assert np.allclose((ball.x1, ball.y1, ball.x2, ball.y2), (990, 740, 1010, 760))
+
+
+def _fake_detector(sessions: int = 1, batch: int = 1, dim="batch") -> OnnxRfDetrBallDetector:
+    det = OnnxRfDetrBallDetector.__new__(OnnxRfDetrBallDetector)
+    det._init([FakeSession(dim) for _ in range(sessions)], batch)
+    return det
+
+
+def _images(n: int) -> list[np.ndarray]:
+    rng = np.random.default_rng(3)
+    return [rng.integers(0, 255, (360 + 8 * i, 640, 3), np.uint8) for i in range(n)]
+
+
+def _key(people):
+    return [[(round(b.x1, 6), round(b.y1, 6), round(b.x2, 6), round(b.y2, 6), round(b.conf, 9)) for b in p] for p in people]
+
+
+def test_batched_and_parallel_detections_equal_one_by_one():
+    imgs = _images(7)
+    one = _fake_detector()
+    ref = [one.people(img) for img in imgs]
+    for sessions, batch in ((1, 4), (2, 1), (3, 2)):
+        det = _fake_detector(sessions, batch)
+        assert _key(det.people_many(imgs)) == _key(ref)
+        calls = [c for s in _sessions(det) for c in s.calls]
+        assert sum(calls) == len(imgs) and max(calls) <= batch
+    # A model with a fixed batch of 1 never gets more than one frame per call.
+    det = _fake_detector(1, 4, dim=1)
+    assert det.batch == 1 and _key(det.people_many(imgs)) == _key(ref)
+
+
+def _sessions(det):
+    out = []
+    while not det._free.empty():
+        out.append(det._free.get())
+    for s in out:
+        det._free.put(s)
+    return out
+
+
+def test_people_and_ball_on_one_frame_run_the_network_once():
+    det = _fake_detector()
+    frame = _images(1)[0]
+    det.people(frame)
+    det._predict(frame, 0.05)            # ball(): the same full frame, a lower threshold
+    det._predict(frame[100:300, 0:400], 0.05)   # the zoomed crop is a new image
+    assert _sessions(det)[0].calls == [1, 1]
+
+
+ONNX = Path(os.environ.get("GOLF_ONNX_MODEL", "") or Path(__file__).resolve().parents[2] / "models" / "rf-detr-large.onnx")
+
+
+@pytest.mark.skipif(not ONNX.exists(), reason="RF-DETR ONNX model not downloaded")
+def test_real_model_parallel_sessions_match_one_session():
+    pytest.importorskip("onnxruntime")
+    from shottracer.runtime import Runtime
+
+    rng = np.random.default_rng(0)
+    imgs = [rng.integers(0, 255, (540, 960, 3), np.uint8) for _ in range(3)]
+    one = OnnxRfDetrBallDetector(ONNX, Runtime(gpu=False))
+    two = OnnxRfDetrBallDetector(ONNX, Runtime(sessions=2, threads=2, gpu=False))
+    a = [one._predict(img, 0.01) for img in imgs]
+    b = [two._predict(img, 0.01) for img in imgs]
+    assert [[(k, x.x1, x.y1, x.conf) for k, x in d] for d in a] == [[(k, x.x1, x.y1, x.conf) for k, x in d] for d in b]
+    assert _key(one.people_many(imgs)) == _key(two.people_many(imgs))

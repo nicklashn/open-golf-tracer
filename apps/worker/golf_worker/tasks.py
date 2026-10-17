@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import gc
 import json
 import logging
 import math
@@ -17,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from golf_api import performance
 from golf_api.chronology import epoch
 from golf_api.db import session_scope, utcnow
 from golf_api.documents import clean_shot
@@ -335,6 +337,40 @@ def _resolve_round(project_id: str) -> None:
                     p.analysis = a
 
 
+def apply_performance() -> int:
+    """Hands the current performance profile to the engine; returns its revision (for step_down)."""
+    from shottracer import runtime
+
+    perf, data = performance.effective()
+    runtime.configure(runtime.Runtime(sessions=perf.sessions, batch=perf.batch, threads=perf.threads, gpu=perf.gpu))
+    return int(data.get("rev", 0))
+
+
+def _with_fallback(run: Callable[[], dict], report: Report) -> dict:
+    """Runs an analysis; out of (GPU) memory or a lost GPU device, it steps the saved profile down
+    and tries once more."""
+    rev = apply_performance()
+    try:
+        return run()
+    except Canceled:
+        raise
+    except Exception as exc:
+        if not performance.is_device_error(exc):
+            raise
+        change = performance.step_down(rev, str(exc) or type(exc).__name__)
+        log.warning("analysis ran out of memory or lost the GPU (%s); trying again with %s", exc,
+                    f"the {change['to']} profile" if change else "the current settings")
+        from shottracer.detect import get_detector
+
+        get_detector.cache_clear()   # frees the old sessions' GPU memory
+        gc.collect()
+        report(-1, "Out of memory – trying again with gentler settings")
+        apply_performance()
+        res = run()
+        res["perfFallback"] = change or {"to": performance.load().get("profile")}
+        return res
+
+
 def analyze(job: dict, report: Report) -> dict:
     from shottracer.pipeline import Options
     from shottracer.pipeline import analyze as run_analysis
@@ -370,12 +406,20 @@ def analyze(job: dict, report: Report) -> dict:
     to_green = (place or {}).get("toGreen")
     green_m = (place or {}).pop("greenM", None)   # only steers the analysis (putting)
     opt = Options(to_green=float(to_green) if to_green is not None else None, green_m=float(green_m) if green_m is not None else None)
-    res = run_analysis(src, opt, progress=progress, on_shot=on_shot)
+
+    def attempt() -> dict:
+        found.clear()
+        return run_analysis(src, opt, progress=progress, on_shot=on_shot)
+
+    res = _with_fallback(attempt, report)
     # The final list, not the streamed one: putts found later can settle earlier ones.
     found = [clean_shot(s, m.id) for s in res["shots"]]
     _store_analysis(project_id, m.id, found, "done", res.get("warnings"), place)
     _resolve_round(project_id)
-    return {"media_id": m.id, "shots": len(found), "seconds": res.get("seconds"), "media": res.get("media")}
+    out = {"media_id": m.id, "shots": len(found), "seconds": res.get("seconds"), "media": res.get("media")}
+    if res.get("perfFallback"):
+        out["perfFallback"] = res["perfFallback"]
+    return out
 
 
 def retrack(job: dict, report: Report) -> dict:
@@ -397,7 +441,7 @@ def retrack(job: dict, report: Report) -> dict:
         opt = Options(impact=t, ball=ball, slowmo=float(pl.get("slowmo") or 1))
     else:
         opt = Options(ball=ball, ref_time=t, slowmo=float(pl.get("slowmo") or 1))
-    res = run_analysis(src, opt, progress=progress)
+    res = _with_fallback(lambda: run_analysis(src, opt, progress=progress), report)
     if not res["shots"]:
         raise RuntimeError("The shot could not be tracked. Try clicking exactly on the ball before the strike.")
     shot = clean_shot(res["shots"][0], m.id)
@@ -407,4 +451,10 @@ def retrack(job: dict, report: Report) -> dict:
     return {"shot": shot}
 
 
-HANDLERS: dict[str, Callable[[dict, Report], dict]] = {"ingest": ingest, "analyze": analyze, "retrack": retrack}
+def tune(job: dict, report: Report) -> dict:
+    from .tuner import run_tuner
+
+    return run_tuner(report)
+
+
+HANDLERS: dict[str, Callable[[dict, Report], dict]] = {"ingest": ingest, "analyze": analyze, "retrack": retrack, "tune": tune}

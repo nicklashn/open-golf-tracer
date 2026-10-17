@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -529,20 +530,60 @@ def _verified_addresses(info: VideoInfo, det: BallDetector, strikes, report=lamb
     return sorted((a for a, _ in out), key=lambda a: a.verified)
 
 
+def _prefetch(info: VideoInfo, times, ahead: int = 2):
+    """(sec, idx, frame) for each time, in order, read a few frames ahead in a background
+    thread so seeking overlaps with the detector."""
+    pool = ThreadPoolExecutor(max_workers=1)
+    pending: deque = deque()
+    it = iter(times)
+    try:
+        for sec in it:
+            pending.append((float(sec), pool.submit(_at, info, float(sec))))
+            if len(pending) > ahead:
+                break
+        while pending:
+            sec, fut = pending.popleft()
+            nxt = next(it, None)
+            if nxt is not None:
+                pending.append((float(nxt), pool.submit(_at, info, float(nxt))))
+            yield (sec, *fut.result())
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def _scan_addresses(info: VideoInfo, det: BallDetector, report=lambda f: None, step: float = 1.0) -> list[Address]:
     """No usable audio: sample the video for a ball at address. Each run of detections at
     the same spot is one address; the strike is searched for right after it."""
     found: list[tuple[float, Ball, int, np.ndarray, object]] = []
     times = np.arange(0.0, max(0.0, info.duration - 0.5), step)
-    for i, sec in enumerate(times):
-        report(i / max(1, len(times)))
-        idx, frame = _at(info, float(sec))
-        if frame is None:
-            continue
-        golfer = pick_golfer(det.people(frame), info.width, info.height)
-        ball = det.ball(frame, golfer, allow_blob=False)
-        if ball and ball.conf >= 0.25:
-            found.append((float(sec), ball, idx, frame, golfer))
+    group: list[tuple[float, int, np.ndarray]] = []
+    n = max(getattr(det, "batch", 1), det.parallel)
+    pool = ThreadPoolExecutor(max_workers=det.parallel) if det.parallel > 1 else None
+
+    def look(group: list[tuple[float, int, np.ndarray]]) -> None:
+        # The samples are independent: people in one (batched) call, the ball searches side by side.
+        golfers = [pick_golfer(p, info.width, info.height) for p in det.people_many([f for _, _, f in group])]
+        search = lambda fg: det.ball(fg[0], fg[1], allow_blob=False)  # noqa: E731
+        pairs = [(f, g) for (_, _, f), g in zip(group, golfers)]
+        balls = list(pool.map(search, pairs)) if pool else [search(fg) for fg in pairs]
+        for (sec, idx, frame), golfer, ball in zip(group, golfers, balls):
+            if ball and ball.conf >= 0.25:
+                found.append((sec, ball, idx, frame, golfer))
+        group.clear()
+
+    try:
+        for i, (sec, idx, frame) in enumerate(_prefetch(info, times, ahead=n + 1)):
+            report(i / max(1, len(times)))
+            if frame is not None:
+                group.append((sec, idx, frame))
+            if len(group) >= n:
+                look(group)
+        if group:
+            look(group)
+    finally:
+        if pool:
+            pool.shutdown(cancel_futures=True)
+
     episodes: list[list] = []
     for f in found:
         last = episodes[-1][-1] if episodes else None
@@ -635,15 +676,23 @@ def _track_and_fit(info: VideoInfo, det: BallDetector, impact: Impact, ball: Bal
     i1 = int((impact.time + TRACK_SECONDS * opt.slowmo) * fps) + (k + 1) * step
     people_at = {int((impact.time + dt * opt.slowmo) * fps) for dt in (0.0, 0.3, 0.6)}
     frames, times, color_at_impact, people = [], [], None, []
-    for i, small in decode(info, start=i0, stop=i1, scale=sa):
-        if (i - i0) % step:
-            continue
-        if color_at_impact is None and i >= impact.frame:
-            color_at_impact = small.copy()
-        if any(i <= p < i + step for p in people_at):
-            people += [b for b in det.people(small) if b.h > 0.2 * small.shape[0]]
-        frames.append(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
-        times.append(i / fps)
+    # People are looked for beside the decode, not in its way.
+    pool = ThreadPoolExecutor(max_workers=det.parallel)
+    found_people = []
+    try:
+        for i, small in decode(info, start=i0, stop=i1, scale=sa):
+            if (i - i0) % step:
+                continue
+            if color_at_impact is None and i >= impact.frame:
+                color_at_impact = small.copy()
+            if any(i <= p < i + step for p in people_at):
+                found_people.append(pool.submit(det.people, small))
+            frames.append(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+            times.append(i / fps)
+        for fut in found_people:
+            people += [b for b in fut.result() if b.h > 0.2 * frames[0].shape[0]]
+    finally:
+        pool.shutdown(cancel_futures=True)
     if len(frames) < 2 * k + 3:
         raise RuntimeError(f"Too few frames after the impact at {impact.time:.1f} s.")
     times = np.array(times)
