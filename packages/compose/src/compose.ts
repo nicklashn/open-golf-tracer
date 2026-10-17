@@ -118,7 +118,7 @@ export function prepare(
   const shots = doc.shots.map((s) => {
     if (byId.has(s.id)) return { ...s, visible: keep.has(s.id) };
     const p = putts.get(s.id);
-    return p ? { ...s, visible: p.visible, putt: { end: s.putt?.end ?? s.impactTime, holed: p.holed } } : s;
+    return p ? { ...s, visible: p.visible, putt: { ...s.putt, end: s.putt?.end ?? s.impactTime, holed: p.holed } } : s;
   });
   const broll = a.noShots === 'broll' ? (q('noShots')?.clipIds ?? []) : [];
   return { doc: migrateProject({ ...doc, media, clips, shots }), broll, uncut, settled };

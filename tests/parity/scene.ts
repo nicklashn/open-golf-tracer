@@ -36,14 +36,17 @@ export function scene(): Project {
       },
     },
     clips: [{ id: 'c', kind: 'video', mediaId: 'm1', in: 0, out: 25, speed: 1 }],
-    shots: (shots as { shots: Record<string, unknown>[] }).shots.slice(0, 2).map((s, i) => ({
-      ...s,
-      mediaId: 'm1',
-      style:
-        i === 0
-          ? { preset: 'gradient', color: '#ff3b30', color2: '#ffc83d', landingMarker: true, impactFlash: true }
-          : { preset: 'neon', color: '#39ff88', comet: 0.8 },
-    })),
+    shots: [
+      ...(shots as { shots: Record<string, unknown>[] }).shots.slice(0, 2).map((s, i) => ({
+        ...s,
+        mediaId: 'm1',
+        style:
+          i === 0
+            ? { preset: 'gradient', color: '#ff3b30', color2: '#ffc83d', landingMarker: true, impactFlash: true }
+            : { preset: 'neon', color: '#39ff88', comet: 0.8 },
+      })),
+      puttShot((shots as { shots: Record<string, unknown>[] }).shots[0]),
+    ],
     layers: [
       base('text', 'text', 0.5, 0.1, { text: 'Parity 212 m', font: 'inter', weight: 800, size: 0.06 }),
       base('stat', 'statCard', 0.2, 0.35, { shotId: null }),
@@ -54,6 +57,16 @@ export function scene(): Project {
       base('dist', 'distance', 0.62, 0.62, { shotId: null, label: 'Carry' }),
     ],
   });
+}
+
+/** A holed putt with its roll line on: rolling at TIMES[1], fading out at TIMES[2]. */
+function puttShot(base: Record<string, unknown>) {
+  const path = Array.from({ length: 36 }, (_, i) => {
+    const t = 4.6 + (i / 35) * 2.9;
+    const e = 1 - (1 - i / 35) ** 2;
+    return { t, x: 0.58 + 0.12 * e + 0.05 * e ** 3, y: 0.95 - 0.3 * e };
+  });
+  return { ...base, id: 'putt', mediaId: 'm1', kind: 'putt', impactTime: 4.55, putt: { end: 7.5, holed: true, path, line: true } };
 }
 
 export const SIZE = { width: 960, height: 540 };

@@ -100,6 +100,16 @@ def _patch(g: np.ndarray, x: float, y: float, half: int) -> np.ndarray | None:
     return g[cy - half:cy + half + 1, cx - half:cx + half + 1].astype(np.float32)
 
 
+def _patch_at(g: np.ndarray, x: float, y: float, half: int) -> np.ndarray | None:
+    """A patch centred on the sub-pixel position (x, y): a template refreshed from rounded spots
+    creeps off the ball by up to half a pixel each time."""
+    if x - half < 1 or y - half < 1 or x + half + 2 > g.shape[1] or y + half + 2 > g.shape[0]:
+        return None
+    x0, y0 = int(x) - half - 1, int(y) - half - 1
+    win = g[y0:int(y) + half + 3, x0:int(x) + half + 3].astype(np.float32)
+    return cv2.getRectSubPix(win, (2 * half + 1, 2 * half + 1), (float(x) - x0, float(y) - y0))
+
+
 def _sub(a: float, b: float, c: float) -> float:
     d = a - 2 * b + c
     return 0.0 if abs(d) < 1e-6 else float(np.clip(0.5 * (a - c) / d, -0.5, 0.5))
@@ -147,7 +157,7 @@ def follow(frames: Iterable[tuple[float, np.ndarray]], start: tuple[float, float
                 break
             hit = _search(g, p0, start[0], start[1], 2 * r)
             x, y = (hit[0], hit[1]) if hit else start
-            tpl = _patch(g, x, y, half)
+            tpl = _patch_at(g, x, y, half)
             if tpl is None:
                 break
             hist.append((t, x, y))
@@ -176,7 +186,7 @@ def follow(frames: Iterable[tuple[float, np.ndarray]], start: tuple[float, float
         vs.append(y)
         hist.append((t, x, y))
         if score > 0.8:
-            p = _patch(g, x, y, half)
+            p = _patch_at(g, x, y, half)
             if p is not None:
                 tpl = 0.7 * tpl + 0.3 * p
     return Sightings(np.array(ts), np.array(us), np.array(vs), r, size)
@@ -316,6 +326,152 @@ def _holed(rolls: list[Roll]) -> None:
             ro.unsure = "the ball rolled out of view"
         else:
             ro.unsure = "the clip ends while the ball rolls"
+
+
+# --- the path it rolled (the roll line) --------------------------------------------------------
+
+PATH_FPS = 12.0         # points per second kept for drawing
+PATH_HALF_S = 0.3       # half-width of the local fit that smooths the sightings
+PATH_MIN_POINTS = 12    # the roll line needs at least this many sightings ...
+PATH_MIN_SEEN = 0.75    # ... a ball seen in this share of the roll's frames ...
+PATH_MAX_GAP_S = 0.4    # ... never lost longer than this while rolling ...
+PATH_RMS_R = 0.3        # ... sightings this close to the smoothed path (RMS, ball radii) ...
+PATH_JUMP_R = 1.5       # ... hardly any farther than this (a slip onto a putter, a shoe, a leaf):
+PATH_SLIPS = 0.05       #     at most this share of them, never two in a row ...
+PATH_WIGGLE_DEG = 35.0  # ... a path that bends one way (a break), not a zig-zag ...
+PATH_BACK_R = 0.6       # ... never runs back along itself ...
+PATH_STILL_R = 0.2      # ... and a lying ball that stays put in the picture (RMS): a steady camera
+
+
+@dataclass
+class RollPath:
+    t: np.ndarray       # s, PATH_FPS apart from the strike to the end of the roll
+    u: np.ndarray       # smoothed position (followed frames' pixels)
+    v: np.ndarray
+    ok: bool            # good enough to draw a line along
+    why: str            # why not ('' when ok)
+    rms: float          # r: sightings around the smoothed path
+    jump: float         # r: the farthest sighting from it
+    slips: int          # sightings farther than PATH_JUMP_R
+    gap: float          # s: longest time unseen while rolling
+    wiggle: float       # degrees of turning beyond the net bend
+    back: float         # r: farthest the smoothed path runs back
+    still: float        # r: RMS of the lying ball around its spot, before (and after) the roll
+
+
+def _local_fit(t: np.ndarray, x: np.ndarray, at: np.ndarray, half: float, w0: np.ndarray) -> np.ndarray:
+    """Locally weighted quadratic in time (tricube window `half` s), evaluated at `at`."""
+    out = np.empty(len(at))
+    for k, c in enumerate(at):
+        h = half
+        while True:
+            d = (t - c) / h
+            w = np.where(np.abs(d) < 1, (1 - np.abs(d) ** 3) ** 3, 0.0) * w0
+            if (w > 1e-6).sum() >= 4 or h > 4 * half:
+                break
+            h *= 1.5
+        sw = np.sqrt(w)
+        a = np.stack([np.ones_like(d), d, d * d], axis=1) * sw[:, None]
+        coef, *_ = np.linalg.lstsq(a, x * sw, rcond=None)
+        out[k] = coef[0]
+    return out
+
+
+def _bridge(t: np.ndarray, fu: np.ndarray, fv: np.ndarray, at: np.ndarray, pu: np.ndarray, pv: np.ndarray) -> None:
+    """Across a gap in the sightings (the ball behind a player) a local fit only extrapolates
+    from one side: there the path is a cubic from the fitted position and velocity at each edge."""
+    if len(t) < 3:
+        return
+    vu, vv = np.gradient(fu, t), np.gradient(fv, t)
+    for i in np.nonzero(np.diff(t) > 2.5 / FOLLOW_FPS)[0]:
+        a, b = t[i], t[i + 1]
+        h = b - a
+        for k in np.nonzero((at > a) & (at < b))[0]:
+            x = (at[k] - a) / h
+            h00, h10, h01, h11 = 2 * x**3 - 3 * x**2 + 1, x**3 - 2 * x**2 + x, -2 * x**3 + 3 * x**2, x**3 - x**2
+            pu[k] = h00 * fu[i] + h10 * h * vu[i] + h01 * fu[i + 1] + h11 * h * vu[i + 1]
+            pv[k] = h00 * fv[i] + h10 * h * vv[i] + h01 * fv[i + 1] + h11 * h * vv[i + 1]
+
+
+def _steady(s: Sightings, a: float, b: float) -> list[float]:
+    m = (s.t >= a) & (s.t <= b) & np.isfinite(s.u)
+    if m.sum() < 4:
+        return []
+    du, dv = s.u[m] - np.median(s.u[m]), s.v[m] - np.median(s.v[m])
+    return list(np.hypot(du, dv) / s.r)
+
+
+def roll_path(s: Sightings, ro: Roll) -> RollPath:
+    """The path the ball rolled, smoothed and thinned to PATH_FPS, and whether it is good enough
+    to draw a line along: seen often and without long gaps, close to a smooth curve that bends
+    one way and never runs back, filmed by a camera that holds still (a lying ball stays put)."""
+    r = s.r
+    t, u, v = ro.t, ro.u, ro.v
+    n = len(t)
+    at = np.append(np.arange(ro.start, ro.end, 1 / PATH_FPS), ro.end) if ro.end > ro.start else np.array([ro.start])
+    if n < 4:
+        z = np.full(len(at), float(u[0]) if n else math.nan)
+        return RollPath(at, z, np.full(len(at), float(v[0]) if n else math.nan), False, "too few sightings",
+                        math.inf, math.inf, 0, math.inf, math.inf, math.inf, math.inf)
+    w = np.ones(n)
+    res = np.zeros(n)
+    fu, fv = u, v
+    for _ in range(3):   # robust: a stray sighting loses its weight
+        fu, fv = _local_fit(t, u, t, PATH_HALF_S, w), _local_fit(t, v, t, PATH_HALF_S, w)
+        res = np.asarray(np.hypot(u - fu, v - fv), dtype=float)
+        scale = max(6 * float(np.median(res)), 0.3 * r)
+        w = np.where(res < scale, (1 - (res / scale) ** 2) ** 2, 0.0)
+    pu, pv = _local_fit(t, u, at, PATH_HALF_S, w), _local_fit(t, v, at, PATH_HALF_S, w)
+    _bridge(t, fu, fv, at, pu, pv)
+    pu[0], pv[0] = _local_fit(t, u, np.array([t[0]]), PATH_HALF_S, w)[0], _local_fit(t, v, np.array([t[0]]), PATH_HALF_S, w)[0]
+    if ro.ended == "rest":
+        # The roll is over once the ball creeps less than STILL_R: it ends where it then lies.
+        m = (s.t >= ro.end) & (s.t <= ro.end + REST_S) & np.isfinite(s.u)
+        if m.sum() >= 3:
+            pu[-1], pv[-1] = float(np.median(s.u[m])), float(np.median(s.v[m]))
+    # A lone slip of the follower (a frame on the putter, a shoe) loses its weight in the fit and
+    # is forgiven; a run of them, or many, is not.
+    far = np.asarray(res > PATH_JUMP_R * r, dtype=bool)
+    slips = int(far.sum())
+    run = bool((far[1:] & far[:-1]).any())
+    inl = res[~far] if (~far).any() else res
+    rms = float(np.sqrt(np.mean(inl ** 2)) / r)
+    jump = float(res.max() / r)
+    in_roll = (s.t >= ro.start) & (s.t <= ro.end) & np.isfinite(s.u)
+    seen_t = np.concatenate([[ro.start], s.t[in_roll], [ro.end]])
+    gap = float(np.diff(seen_t).max()) if len(seen_t) > 1 else 0.0
+    # Turning: headings between points at least a ball width apart.
+    keep_u, keep_v = [pu[0]], [pv[0]]
+    for x, y in zip(pu[1:], pv[1:]):
+        if math.hypot(x - keep_u[-1], y - keep_v[-1]) >= 2 * r:
+            keep_u.append(x)
+            keep_v.append(y)
+    head = np.unwrap(np.arctan2(np.diff(keep_v), np.diff(keep_u))) if len(keep_u) >= 3 else np.zeros(1)
+    dth = np.diff(head)
+    wiggle = float(np.degrees(np.abs(dth).sum() - abs(dth.sum()))) if len(dth) else 0.0
+    # Running back: progress along the overall direction that is undone later.
+    dx, dy = pu[-1] - pu[0], pv[-1] - pv[0]
+    norm = math.hypot(dx, dy)
+    prog = ((pu - pu[0]) * dx + (pv - pv[0]) * dy) / norm if norm > 0 else np.zeros(len(pu))
+    back = float((np.maximum.accumulate(prog) - prog).max() / r)
+    lying = _steady(s, ro.start - 1.0, ro.start - 0.1)
+    if ro.ended == "rest":
+        lying += _steady(s, ro.end + 0.1, ro.end + 1.0)
+    still = float(np.sqrt(np.mean(np.square(lying)))) if lying else math.inf
+    why = ""
+    if n < PATH_MIN_POINTS:
+        why = "too few sightings"
+    elif ro.seen < PATH_MIN_SEEN or gap > PATH_MAX_GAP_S:
+        why = "the ball was out of sight too long"
+    elif run or slips > max(1, PATH_SLIPS * n):
+        why = "sightings far off the path"
+    elif rms > PATH_RMS_R:
+        why = "the sightings jitter"
+    elif back > PATH_BACK_R or wiggle > PATH_WIGGLE_DEG:
+        why = "the path zig-zags"
+    elif still > PATH_STILL_R:
+        why = "the camera moves"
+    return RollPath(at, pu, pv, not why, why, rms, jump, slips, gap, wiggle, back, still)
 
 
 # --- confidence --------------------------------------------------------------------------------

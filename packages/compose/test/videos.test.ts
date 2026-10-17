@@ -1,6 +1,6 @@
 import { migrateProject, timelineDuration } from '@golf/schema';
 import { describe, expect, it } from 'vitest';
-import { highlightShort, playedShots, youtubeVideo } from '../src';
+import { highlightShort, playedShots, puttShort, youtubeVideo } from '../src';
 
 // A real flight (6.7 s) from the physics parity fixtures, in a 1080x1920 portrait clip.
 const params = [59.38, 0.557, 0.2887, 0.002126, -0.0008, 0.2177, -0.4986, 7.6239, 0.0059];
@@ -66,5 +66,31 @@ describe('make a video', () => {
     // Keyframes run forward through the joined shorts.
     const ts = v.format.reframe.keyframes.map((k) => k.t);
     expect([...ts].sort((x, y) => x - y)).toEqual(ts);
+  });
+});
+
+describe('roll lines', () => {
+  const path = [
+    { t: 20, x: 0.5, y: 0.8 },
+    { t: 21, x: 0.5, y: 0.6 },
+    { t: 22, x: 0.52, y: 0.5 },
+  ];
+  const withPutt = migrateProject({
+    ...doc,
+    shots: [...doc.shots, { ...shot('p1', 'a', 20), kind: 'putt', putt: { end: 22, holed: true, path, line: true } }],
+  });
+  const putt = withPutt.shots.find((s) => s.id === 'p1')!;
+
+  it('stay on in YouTube and highlight edits when switched on', () => {
+    for (const v of [youtubeVideo(withPutt, 'en', 'YT', {}, { putts: 'all' }), highlightShort(withPutt, 'en', 'HL', {}, { putts: 'all' })]) {
+      const p = v.shots.find((s) => s.id === 'p1')!;
+      expect(p.putt?.line).toBe(true);
+      expect(p.putt?.path).toEqual(path);
+    }
+  });
+
+  it('are left out of a putt’s own short unless asked for', () => {
+    expect(puttShort(withPutt, putt, 'Short').shots[0].putt).toMatchObject({ line: false, path, holed: true });
+    expect(puttShort(withPutt, putt, 'Short', { rollLine: true }).shots[0].putt?.line).toBe(true);
   });
 });

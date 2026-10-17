@@ -81,6 +81,12 @@ export function setPuttHoled(id: string, holed: boolean | null) {
   });
 }
 
+export function setPuttLine(id: string, line: boolean) {
+  updateShot('Roll line', id, (s) => {
+    if (s.putt) s.putt.line = line;
+  });
+}
+
 export function deleteShot(id: string) {
   E().edit(
     'Delete shot',

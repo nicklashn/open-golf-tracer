@@ -142,6 +142,23 @@ const PuttInspector = memo(function PuttInspector({ shot }: { shot: Shot }) {
             { value: 'unknown', label: t.shots.puttHoledUnknown },
           ]}
         />
+        {shot.putt?.path?.length ? (
+          <>
+            <Toggle label={t.shots.puttLine} checked={!!shot.putt.line} onChange={(v) => ops.setPuttLine(shot.id, v)} />
+            <p className="text-[12px] text-fg-muted">{t.shots.puttLineHint}</p>
+            {shot.putt.line ? (
+              <Row label={t.tracer.color}>
+                <ColorField
+                  label={t.tracer.color}
+                  value={shot.style.color}
+                  onChange={(c) => ops.setShotStyle(shot.id, { color: c, color2: null, preset: 'custom' }, 'color')}
+                />
+              </Row>
+            ) : null}
+          </>
+        ) : (
+          <p className="text-[12px] text-fg-muted">{t.shots.puttLineNone}</p>
+        )}
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="ghost" className="text-accent-fg" onClick={() => ops.deleteShot(shot.id)}>
             <Trash2 />

@@ -274,6 +274,25 @@ export function renderTracer(g: Geometry, style: TracerStyle, s: number, opt: Tr
 
   blur(glow, Math.max(2, g.w0 * 2.6) * gs);
 
+  return composite(body, core, glow, gs, style, fade, bx, by, W, H);
+}
+
+/**
+ * Colours the coverage masks of a line (glow under body under white-hot core) into a straight-
+ * alpha RGBA region at (bx, by). Shared by the tracer and the roll line.
+ */
+export function composite(
+  body: Mask,
+  core: Mask,
+  glow: Mask,
+  gs: number,
+  style: TracerStyle,
+  fade: number,
+  bx: number,
+  by: number,
+  W: number,
+  H: number,
+): RGBARegion | null {
   const c1 = hexRgb(style.color);
   const c2 = style.color2 ? hexRgb(style.color2) : c1;
   const glowK = style.glow;
@@ -318,6 +337,6 @@ export function renderTracer(g: Geometry, style: TracerStyle, s: number, opt: Tr
 }
 
 /** Landing ring seen in perspective: an ellipse flattened to sit on the ground. */
-function ringEllipse(m: Mask, x: number, y: number, radius: number, width: number, value: number): void {
+export function ringEllipse(m: Mask, x: number, y: number, radius: number, width: number, value: number): void {
   ellipseRing(m, x, y, radius, radius * 0.38, width, value);
 }

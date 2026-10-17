@@ -371,6 +371,9 @@ const en: Dict = {
     puttHoledYes: 'Yes',
     puttHoledNo: 'No',
     puttHoledUnknown: 'Unknown',
+    puttLine: 'Show roll line',
+    puttLineHint: 'A thin line on the green that follows the ball and grows as it rolls.',
+    puttLineNone: 'No roll line: the ball’s path could not be followed reliably enough – for example because the camera moved or the ball was hidden.',
     warnings: {
       low_confidence: 'We are not quite sure about this shot.',
       no_track: 'The ball could not be seen in flight, so the path is a guess. Drag the landing point to fix it.',

@@ -3,6 +3,7 @@ export * from './vector';
 export * from './text';
 export * from './painter';
 export * from './tracer';
+export * from './rollLine';
 export * from './anim';
 export * from './fonts';
 export * from './i18n';

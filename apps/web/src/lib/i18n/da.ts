@@ -370,6 +370,9 @@ const da = {
     puttHoledYes: 'Ja',
     puttHoledNo: 'Nej',
     puttHoledUnknown: 'Ved ikke',
+    puttLine: 'Vis rullelinje',
+    puttLineHint: 'En tynd linje på greenen, der følger boldens vej og vokser, mens den triller.',
+    puttLineNone: 'Ingen rullelinje: boldens vej kunne ikke følges sikkert nok – fx fordi kameraet bevægede sig, eller bolden var skjult.',
     warnings: {
       low_confidence: 'Vi er ikke helt sikre på dette slag.',
       no_track: 'Bolden kunne ikke ses i flugt, så banen er et bud. Træk i landingspunktet for at rette den.',
