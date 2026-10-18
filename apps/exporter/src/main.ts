@@ -80,7 +80,7 @@ async function aiFailed(job: { id: string }, e: unknown): Promise<boolean> {
   return true;
 }
 
-log('exporter starter', { worker, api: api.base, lanes: ['export', 'compose', 'ai_test'] });
+log('exporter starting', { worker, api: api.base, lanes: ['export', 'compose', 'ai_test'] });
 void lane(['export'], handle);
 void lane(['compose'], async (job) => {
   try {

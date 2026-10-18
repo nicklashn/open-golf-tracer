@@ -183,6 +183,8 @@ Remove-Tree (Join-Path $stage 'apps\web\.next\cache')
 # Everything of theirs is bundled into the builds, so the links would only take up space.
 Remove-Tree (Join-Path $stage 'node_modules\@golf')
 
+# THIRD_PARTY_NOTICES.txt from what is now in the stage (runtime\, site-packages, node_modules) - scripts/third_party_notices.py
+Step 'Third-party notices'; Invoke-Native $stagePy @((Join-Path $stage 'scripts\third_party_notices.py'), '--root', $stage)
 Write-Host "  stage: $(Get-FolderMB $stage) MB"
 if ($StageOnly) { Write-Host "`nStage ready: $stage" -ForegroundColor Green; return }
 

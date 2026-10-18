@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/misc';
 import { api } from '@/lib/api';
 import { useI18n } from '@/lib/i18n/client';
 import { useMe, type Me } from '@/lib/me';
+import { AboutSettings } from './AboutSettings';
 import { AiSettingsForm } from './AiSettings';
 import { useTheme } from './AppRoot';
 import { PerformanceSettings } from './PerformanceSettings';
@@ -120,6 +121,10 @@ export function SettingsPage() {
             {t.settings.exportData}
           </a>
         </Button>
+      </Section>
+
+      <Section id="about" title={t.about.title} lead={t.about.lead}>
+        <AboutSettings />
       </Section>
     </div>
   );

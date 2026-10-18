@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems go through a private report instead: see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Upload a 4K clip from …
+        2. Click …
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings → About → Version
+      placeholder: 0.5.4
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run it?
+      options:
+        - Windows installer
+        - From source (setup.bat / start.bat)
+        - From source (macOS / Linux)
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics file
+      description: |
+        Settings → About → **Save diagnostics** saves a zip with the version, your PC, the performance
+        settings, recent log lines and job summaries (keys and tokens are removed; no videos or projects).
+        Drag it into this box. Log lines can contain file names; look through it first if that matters to you.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, a short test clip (only if you own it), the error reference shown in the app.

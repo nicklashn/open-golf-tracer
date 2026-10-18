@@ -14,11 +14,14 @@
  * API_PORT / WEB_PORT (environment) move the API and the web app off :8000 / :3000, e.g. to run a
  * second copy beside the first; the web app, worker and exporter then talk to that API.
  * The ports in use are written to <data>/ports.json, see scripts/launcher.mjs.
+ * Everything the four print is also written (keys and tokens masked) to DATA_DIR/logs/app-YYYYMMDD.log,
+ * kept for 7 days – see scripts/applog.mjs.
  */
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createLog, redact } from './applog.mjs';
 import { answers, choosePorts, clearState, findRunning, upToDate, writeState } from './launcher.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,6 +54,16 @@ const single = args.has('--single');
 const openBrowser = args.has('--open') && !process.env.OGT_NO_BROWSER;
 let apiPort = Number(process.env.API_PORT || 8000);
 let webPort = Number(process.env.WEB_PORT || 3000);
+const readSecret = (f) => {
+  try {
+    return readFileSync(resolve(dataDir, f), 'utf8').trim();
+  } catch {
+    return '';
+  }
+};
+// Known secrets are masked by value too; anything shaped like a key or token by pattern (applog.mjs).
+const secrets = () => [readSecret('.secret'), readSecret('.internal-token'), setting('AI_API_KEY'), setting('SECRET_KEY'), setting('INTERNAL_TOKEN')];
+const logFile = createLog(resolve(dataDir, 'logs'), { secrets: secrets() });
 
 function openUrl(url) {
   if (!openBrowser) return;
@@ -86,14 +99,24 @@ const apiUrl = `http://127.0.0.1:${apiPort}`;
 // The web proxy, worker and exporter find the API by API_URL (default :8000).
 if (apiPort !== 8000) process.env.API_URL ??= apiUrl;
 
-const colors = { api: 36, worker: 35, exporter: 33, web: 32 };
+const colors = { api: 36, worker: 35, exporter: 33, web: 32, launcher: 37 };
 const procs = [];
+// The API writes data/.secret and data/.internal-token on its first start; read them again once it is up.
+let known = secrets();
+
+/** A launcher message: to the console and the log file. */
+function say(name, msg, out = process.stdout) {
+  out.write(`\x1b[${colors[name] ?? 37}m${name.padEnd(8)}\x1b[0m│ ${msg}\n`);
+  logFile.write(name, msg);
+}
 
 function run(name, cmd, cmdArgs, opts = {}) {
   const p = spawn(cmd, cmdArgs, {
     cwd: opts.cwd ?? root,
     env: { ...process.env, PYTHONUNBUFFERED: '1', NEXT_TELEMETRY_DISABLED: '1', HF_HUB_DISABLE_TELEMETRY: '1', ...opts.env },
     shell: win && cmd === npm,
+    // Its own process group, so shutdown() also stops what npm starts (next-server would outlive it).
+    detached: !win,
   });
   const tag = `\x1b[${colors[name]}m${name.padEnd(8)}\x1b[0m│ `;
   const pipe = (stream, out) => {
@@ -103,15 +126,21 @@ function run(name, cmd, cmdArgs, opts = {}) {
       const lines = buf.split(/\r?\n/);
       buf = lines.pop();
       for (const l of lines) {
-        out.write(tag + l + '\n');
-        opts.onLine?.(l);
+        const clean = redact(l, known);
+        out.write(tag + clean + '\n');
+        logFile.write(name, clean);
+        opts.onLine?.(clean);
       }
     });
   };
   pipe(p.stdout, process.stdout);
   pipe(p.stderr, process.stderr);
+  p.on('error', (e) => {
+    say(name, `could not start: ${e.message}`, process.stderr);
+    if (!stopping && opts.critical) shutdown(1);
+  });
   p.on('exit', (code) => {
-    process.stdout.write(`${tag}stoppede (${code})\n`);
+    say(name, `stopped (${code})`);
     if (!stopping && opts.critical) shutdown(1);
   });
   procs.push(p);
@@ -125,7 +154,7 @@ function shutdown(code = 0) {
   for (const p of procs) {
     try {
       if (win) spawn('taskkill', ['/pid', String(p.pid), '/f', '/t']);
-      else p.kill('SIGTERM');
+      else process.kill(-p.pid, 'SIGTERM');
     } catch {
       /* already gone */
     }
@@ -134,7 +163,7 @@ function shutdown(code = 0) {
 }
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
-process.on('SIGHUP', () => shutdown(0)); // Windows: the console window is being closed
+process.on('SIGHUP', () => shutdown(0)); // the console window or terminal closed: the children are in their own process groups
 process.on('exit', () => clearState(dataDir, process.pid));
 
 async function waitForApi(url, tries = 120) {
@@ -164,12 +193,15 @@ run('api', py, ['-m', 'uvicorn', 'golf_api.main:app', '--host', '127.0.0.1', '--
     console.error('  Dataene er fra en nyere version af Open Golf Tracer – installer den nyeste version.');
     console.error('  The data is from a newer version of Open Golf Tracer – install the newest version.');
     console.error(`  ${l.slice(i + NEWER_DATA.length)}\n`);
+    logFile.write('launcher', `The data is from a newer version of Open Golf Tracer: ${l.slice(i + NEWER_DATA.length)}`);
     shutdown(1);
   },
 });
+say('launcher', `starting${prod ? ' (prod)' : ''}; log file: ${logFile.dir}`);
 const ok = await waitForApi(`${apiUrl}/api/health`);
+known = secrets();
 if (!ok) {
-  if (!stopping) console.error('API’et startede ikke. Se loggen ovenfor.');
+  if (!stopping) say('launcher', `The API did not start. See the messages above, or the log file in ${logFile.dir}`, process.stderr);
   shutdown(1);
 } else {
   writeState(dataDir, { web: webPort, api: apiPort, pid: process.pid });
@@ -194,6 +226,7 @@ if (!ok) {
   } else {
     run('web', npm, ['run', prod ? 'start' : 'dev', '-w', '@golf/web', ...hostArgs], { critical: true });
   }
+  logFile.write('launcher', `running at http://localhost:${webPort} (API ${apiUrl}, LISTEN_HOST ${host})`);
   console.log(`\n  Open Golf Tracer is running at \x1b[1mhttp://localhost:${webPort}\x1b[0m  (API: ${apiUrl}/api/docs)\n`);
   if (host !== '127.0.0.1') {
     console.log(`  \x1b[33mLISTEN_HOST=${host}: the web app is reachable from the network. There is no login –`);

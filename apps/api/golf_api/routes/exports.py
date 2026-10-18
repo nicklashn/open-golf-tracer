@@ -2,7 +2,6 @@
 "Make a video for me"), all of those as one zip, and opening the exports folder on this PC."""
 from __future__ import annotations
 
-import ipaddress
 import os
 import shutil
 import subprocess
@@ -22,6 +21,7 @@ from ..db import get_db
 from ..deps import current_user
 from ..documents import merged_document, validate_document
 from ..errors import ApiError, not_found
+from ..local_only import local_request
 from ..media_urls import export_url
 from ..models import Export, Job, Media, Project, User, new_id
 from ..space import export_need, need_space
@@ -155,22 +155,6 @@ def download_batch(batch: str, background: BackgroundTasks, db: Session = Depend
 
 class OpenFolderIn(BaseModel):
     exportId: str | None = Field(None, max_length=40)
-
-
-def _loopback(host: str | None) -> bool:
-    try:
-        return host is not None and ipaddress.ip_address(host.strip().strip("[]")).is_loopback
-    except ValueError:
-        return host == "localhost"
-
-
-def local_request(request: Request) -> bool:
-    """True only for a browser on this PC: the connection comes from the loopback address, and so
-    does every hop the web app's proxy names (it adds the browser's address to X-Forwarded-For)."""
-    if not _loopback(request.client.host if request.client else None):
-        return False
-    hops = [h for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
-    return all(_loopback(h) for h in hops)
 
 
 def _reveal(path: Path, select_file: Path | None) -> None:

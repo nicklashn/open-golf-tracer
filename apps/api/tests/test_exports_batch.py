@@ -95,6 +95,6 @@ def test_open_folder_only_for_this_pc(app, monkeypatch):
 
 @pytest.mark.parametrize("host,ok", [("127.0.0.1", True), ("::1", True), ("10.0.0.2", False), (None, False), ("testclient", False)])
 def test_loopback(host, ok):
-    from golf_api.routes.exports import _loopback
+    from golf_api.local_only import _loopback
 
     assert _loopback(host) is ok

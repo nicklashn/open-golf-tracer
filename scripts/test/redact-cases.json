@@ -1,0 +1,21 @@
+{
+  "comment": "Shared by apps/api/tests/test_about.py (golf_api/redact.py) and scripts/test/applog.test.ts (scripts/applog.mjs). Each secret must vanish; each keep must survive.",
+  "cases": [
+    { "in": "Authorization: Bearer abcDEF1234567890xyz", "secret": "abcDEF1234567890xyz", "keep": "Authorization: Bearer" },
+    { "in": "headers={'authorization': 'Basic dXNlcjpwYXNzd29yZDEyMw=='}", "secret": "dXNlcjpwYXNzd29yZDEyMw==" },
+    { "in": "{\"apiKey\": \"plain-secret-value-123\", \"model\": \"gpt-5\"}", "secret": "plain-secret-value-123", "keep": "gpt-5" },
+    { "in": "AI_API_KEY=whatever-key-987654", "secret": "whatever-key-987654" },
+    { "in": "x-api-key: sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA", "secret": "AAAAAAAAAAAAAAAAAAAAAAAA" },
+    { "in": "error calling OpenAI with sk-proj-abcdefghijklmnopqrstuvwxyz0123", "secret": "abcdefghijklmnopqrstuvwxyz0123", "keep": "error calling OpenAI" },
+    { "in": "refresh_token=rt_9f8e7d6c5b4a39281706&grant_type=refresh_token", "secret": "rt_9f8e7d6c5b4a39281706", "keep": "grant_type" },
+    { "in": "GET /api/ai/chatgpt/callback?code=ac_SECRETCODE42&state=st_SECRETSTATE42", "secret": "SECRETCODE42", "keep": "/api/ai/chatgpt/callback" },
+    {
+      "in": "id token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVl rejected",
+      "secret": "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+      "keep": "rejected"
+    },
+    { "in": "GET /api/m/eyJpZCI6Im1lZF8xMjMiLCJleHAiOjF9.QWxhZGRpbjpvcGVuIHNlc2FtZQ/proxy.mp4", "secret": "QWxhZGRpbjpvcGVuIHNlc2FtZQ", "keep": "proxy.mp4" },
+    { "in": "job job_abc123 (analyze) done in 12.3 s, tokens: 5123", "keep": "job job_abc123 (analyze) done in 12.3 s, tokens: 5123" },
+    { "in": "max_tokens=16000 input_tokens=812", "keep": "max_tokens=16000 input_tokens=812" }
+  ]
+}
