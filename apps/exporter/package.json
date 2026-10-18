@@ -1,6 +1,6 @@
 {
   "name": "@golf/exporter",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -11,10 +11,10 @@
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
-    "@golf/compose": "0.4.0",
-    "@golf/physics": "0.4.0",
-    "@golf/render": "0.4.0",
-    "@golf/schema": "0.4.0",
+    "@golf/compose": "0.6.0",
+    "@golf/physics": "0.6.0",
+    "@golf/render": "0.6.0",
+    "@golf/schema": "0.6.0",
     "@napi-rs/canvas": "^1.0.9"
   },
   "devDependencies": {
