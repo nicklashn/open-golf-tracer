@@ -904,7 +904,7 @@ const da = {
     privacy: 'Privatliv',
     geoLookup: 'Slå baner op på OpenStreetMap',
     geoLookupHint:
-      'Når en video har GPS, sendes positionen til OpenStreetMaps offentlige servere (Overpass), så appen kan finde bane, hul og afstand til greenen. Slået fra bliver positionen på din PC, og hullet skal vælges selv. "Mål på kort" spørger stadig OpenStreetMap, når du selv åbner kortet.',
+      'Når en video har GPS, sendes positionen til OpenStreetMaps offentlige servere (Overpass), så appen kan finde bane, hul og afstand til greenen. Slået fra bliver positionen på din pc, og hullet skal vælges selv. «Mål på kort» spørger stadig OpenStreetMap, når du selv åbner kortet.',
     geoLookupEnv: 'Slået fra med GEO_LOOKUP=0 i .env.',
   },
   storage: {
