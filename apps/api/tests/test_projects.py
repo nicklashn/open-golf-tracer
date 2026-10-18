@@ -178,3 +178,69 @@ def test_finished_export_can_be_watched_as_well_as_downloaded(client, tiny_video
         row.status, row.storage_key = "succeeded", "x/exports/e.mp4"
     done = client.get(f"/api/exports/{e['id']}").json()
     assert done["url"] and done["previewUrl"] and done["url"] != done["previewUrl"]
+
+
+def test_export_job_carries_the_ui_language(client, tiny_video):
+    """The exporter draws stat cards and dates in the language the user asked for the export in."""
+    from golf_api.db import session_scope
+    from golf_api.models import Export, Job
+
+    pid = upload(client, tiny_video)["projectId"]
+    e = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}, "locale": "da"}).json()
+    plain = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}}).json()
+    odd = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}, "locale": "xx"}).json()
+    with session_scope() as db:
+        def payload(x):
+            return db.get(Job, db.get(Export, x["id"]).job_id).payload
+
+        assert payload(e)["locale"] == "da"
+        # Without one (older web apps) the account's language is used.
+        assert payload(plain)["locale"] in ("da", "en") and payload(odd)["locale"] in ("da", "en")
+
+
+def test_conflicting_document_can_be_kept_as_a_copy(client):
+    """"Save mine as a copy" in the conflict dialog: the editor's document becomes a new project,
+    the saved one stays as the other window left it."""
+    p = client.post("/api/projects", json={"name": "Runde 1"}).json()
+    v = client.get(f"/api/projects/{p['id']}").json()["docVersion"]
+    assert client.put(f"/api/projects/{p['id']}/document", json={"document": _doc("Theirs"), "baseVersion": v}).status_code == 200
+    copy = client.post(f"/api/projects/{p['id']}/duplicate", json={"document": _doc("Mine"), "name": "Mine (kopi)"}).json()
+    assert copy["id"] != p["id"]
+    assert client.get(f"/api/projects/{copy['id']}").json()["document"]["name"] == "Mine (kopi)"
+    assert client.get(f"/api/projects/{p['id']}").json()["document"]["name"] == "Theirs"
+    bad = client.post(f"/api/projects/{p['id']}/duplicate", json={"document": {"schemaVersion": 1, "clips": [{"kind": "x"}]}})
+    assert bad.status_code == 422
+    # Without a body it is the plain duplicate.
+    assert client.post(f"/api/projects/{p['id']}/duplicate").status_code == 200
+
+
+def test_a_full_round_of_shots_can_be_saved(client):
+    """A round with practice swings and two cameras has several hundred shots (LIMITS.shots = 600)."""
+    p = client.post("/api/projects", json={"name": "Runde 1"}).json()
+    v = client.get(f"/api/projects/{p['id']}").json()["docVersion"]
+    shot = {"id": "s", "mediaId": "m", "impactTime": 1, "camera": {"cx": 0.5, "cy": 0.5}, "anchor": {"x": 0.5, "y": 0.9},
+            "params": [40, 0.2, 0, 0.1, 0.1, 0, 0, 0, 0], "auto": {"params": [40, 0.2, 0, 0.1, 0.1, 0, 0, 0, 0],
+                                                                     "anchor": {"x": 0.5, "y": 0.9}, "impactTime": 1}}
+    doc = {**_doc(), "shots": [{**shot, "id": f"s{i}"} for i in range(600)]}
+    r = client.put(f"/api/projects/{p['id']}/document", json={"document": doc, "baseVersion": v})
+    assert r.status_code == 200, r.text
+    doc["shots"].append({**shot, "id": "s600"})
+    r = client.put(f"/api/projects/{p['id']}/document", json={"document": doc, "baseVersion": v + 1})
+    assert r.status_code == 422 and r.json()["error"]["details"]["path"] == "shots"
+
+
+def test_export_keeps_the_youtube_text_for_my_videos(client, tiny_video):
+    """The made video's description and chapters, as the export dialog showed them, can be copied later."""
+    from golf_api.db import session_scope
+    from golf_api.models import Job
+
+    pid = upload(client, tiny_video)["projectId"]
+    text = "Golfrunde på Testbane.\n\n0:00 Hul 1 – par 4\n0:40 Hul 2 – par 3\n1:30 Hul 3 – par 5"
+    e = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "youtube1080"}, "publishText": text}).json()
+    assert e["settings"]["publishText"] == text
+    assert client.get("/api/exports").json()["exports"][0]["settings"]["publishText"] == text
+    # The worker gets the export settings as they were (no text in them).
+    with session_scope() as db:
+        assert "publishText" not in db.get(Job, e["jobId"]).payload["settings"]
+    plain = client.post(f"/api/projects/{pid}/exports", json={"settings": {"preset": "original"}}).json()
+    assert "publishText" not in plain["settings"]

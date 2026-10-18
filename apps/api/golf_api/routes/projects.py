@@ -40,6 +40,12 @@ class SaveIn(BaseModel):
     force: bool = False
 
 
+class DuplicateIn(BaseModel):
+    # The editor's own document (a save that conflicted, kept as a copy); default: the saved one.
+    document: dict | None = None
+    name: str | None = Field(None, max_length=120)
+
+
 class VersionIn(BaseModel):
     label: str = Field("", max_length=120)
 
@@ -96,11 +102,27 @@ def summary(db: Session, p: Project) -> dict:
     }
 
 
+def made_from(db: Session, user: User) -> dict[str, dict]:
+    """Which project each generated video came from: the "Make a video for me" job (compose) that
+    made it, its source project and what kind of video it made. Read from the jobs' results, so
+    projects made before this was shown are grouped too."""
+    out: dict[str, dict] = {}
+    rows = db.scalars(select(Job).where(Job.user_id == user.id, Job.kind == "compose", Job.status == "succeeded")
+                      .order_by(Job.created_at)).all()
+    for j in rows:
+        for made in (j.result or {}).get("projects") or []:
+            if isinstance(made, dict) and made.get("id"):
+                out[str(made["id"])] = {"sourceId": j.project_id, "runId": j.id, "runKind": (j.result or {}).get("kind")}
+    return out
+
+
 @router.get("")
 def list_projects(db: Session = Depends(get_db), user: User = Depends(current_user)):
     rows = db.scalars(select(Project).where(Project.user_id == user.id, Project.deleted_at.is_(None))
                       .order_by(Project.updated_at.desc())).all()
-    return {"projects": [summary(db, p) for p in rows]}
+    origin = made_from(db, user)
+    none = {"sourceId": None, "runId": None, "runKind": None}
+    return {"projects": [{**summary(db, p), **origin.get(p.id, none)} for p in rows]}
 
 
 @router.post("")
@@ -122,6 +144,10 @@ def create_demo(locale: str | None = None, db: Session = Depends(get_db), user: 
 @router.get("/{project_id}")
 def load_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
+    from .disk import restore_previews
+
+    if restore_previews(db, p) or db.dirty:   # previews deleted under Settings → Storage come back
+        db.commit()
     return {**summary(db, p), "document": merged_document(p), "docVersion": p.doc_version,
             "media": [public_media(m) for m in _project_media(db, p)]}
 
@@ -155,9 +181,14 @@ def delete_project(project_id: str, db: Session = Depends(get_db), user: User = 
 
 
 @router.post("/{project_id}/duplicate")
-def duplicate_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def duplicate_project(project_id: str, body: DuplicateIn | None = None, db: Session = Depends(get_db),
+                      user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
-    q = copy_project(db, user, p, merged_document(p), f"{p.name} (copy)")
+    doc = merged_document(p)
+    if body is not None and body.document is not None:
+        doc = validate_document(body.document)
+        _check_media(db, p, doc)
+    q = copy_project(db, user, p, doc, (body.name if body and body.name else None) or f"{p.name} (copy)")
     db.commit()
     return summary(db, q)
 
@@ -198,6 +229,13 @@ def _rename_media(doc: dict, old: str, new: str) -> None:
             layer["props"]["mediaId"] = new
 
 
+def _check_media(db: Session, p: Project, doc: dict) -> None:
+    media_ids = {m.id for m in _project_media(db, p)}
+    unknown = [mid for mid in doc.get("media", {}) if mid not in media_ids]
+    if unknown:
+        raise ApiError(422, "unknown_media", "The project refers to files that do not exist.", {"media": unknown})
+
+
 @router.put("/{project_id}/document")
 def save_document(project_id: str, body: SaveIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     p = get_project(db, user, project_id)
@@ -205,10 +243,7 @@ def save_document(project_id: str, body: SaveIn, db: Session = Depends(get_db), 
         raise ApiError(409, "version_conflict", "The project was changed elsewhere. Reload or overwrite.",
                        {"docVersion": p.doc_version})
     doc = validate_document(body.document)
-    media_ids = {m.id for m in _project_media(db, p)}
-    unknown = [mid for mid in doc.get("media", {}) if mid not in media_ids]
-    if unknown:
-        raise ApiError(422, "unknown_media", "The project refers to files that do not exist.", {"media": unknown})
+    _check_media(db, p, doc)
     p.document = doc
     p.name = (doc.get("name") or p.name)[:120]
     p.doc_version += 1

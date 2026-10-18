@@ -186,6 +186,12 @@ export function primaryMedia(project: Pick<Project, 'media' | 'clips'>): MediaRe
   return Object.values(project.media).find((m) => m.kind === 'video') ?? null;
 }
 
+/** HDR on the timeline: none of the clips, all of them, or a mix (exported as SDR). */
+export function timelineHdr(project: Pick<Project, 'media' | 'clips'>): 'none' | 'all' | 'mixed' {
+  const flags = new Set(project.clips.map((c) => !!project.media[c.mediaId]?.hdr));
+  return flags.size > 1 ? 'mixed' : flags.has(true) ? 'all' : 'none';
+}
+
 /** Orders shots as they are played: by where their video sits on the timeline, then by time. */
 export function byTimeline(clips: readonly Clip[]): (a: { mediaId: string; impactTime: number }, b: { mediaId: string; impactTime: number }) => number {
   const first = new Map<string, number>();

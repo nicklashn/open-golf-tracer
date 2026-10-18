@@ -12,6 +12,7 @@ import { puttShort, shortFor } from './shorts';
 import { byHole, roundMedia } from './chronology';
 import { clipOrder, summarize } from './summary';
 import { highlightShort, playedShots, shownPutts, unsurePuttHoles, youtubeVideo } from './videos';
+import { publishInfo } from './publish';
 
 type Locale = 'da' | 'en';
 
@@ -171,8 +172,22 @@ function withTemplateLook(doc: Project, template: string | null): Project {
   return tpl ? { ...doc, shots: doc.shots.map((s) => ({ ...s, style: { ...tpl.style } })) } : doc;
 }
 
-/** Builds the video(s) the plan describes. Empty when no shot is left to show. */
+/**
+ * Builds the video(s) the plan describes, each with its text for posting (`publish`: the AI's
+ * description or one from the facts, and chapter titles per hole). Empty when no shot is left.
+ */
 export function compose(source: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined, opts: ComposeOptions): ComposedVideo[] {
+  const videos = composeVideos(source, plan, answers, opts);
+  if (!videos.length) return videos;
+  const summary = summarize(source);
+  const scores = holeScores(summary, resolveAnswers(plan, answers));
+  const { doc } = prepare(source, plan, answers);
+  const shown = [...playedShots(doc), ...doc.shots.filter((x) => x.kind === 'putt' && x.visible)].map((x) => x.id);
+  const publish = publishInfo(summary, plan, answers, scores, opts.locale, source.units, shown);
+  return videos.map((v) => ({ ...v, document: migrateProject({ ...v.document, publish }) }));
+}
+
+function composeVideos(source: Project, plan: VideoPlan, answers: PlanAnswers | null | undefined, opts: ComposeOptions): ComposedVideo[] {
   const { doc: prepared, broll, uncut, settled } = prepare(source, plan, answers);
   const doc = withTemplateLook(prepared, plan.template);
   const names = opts.names ?? {};

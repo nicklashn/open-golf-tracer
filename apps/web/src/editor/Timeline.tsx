@@ -27,9 +27,11 @@ import { Kbd } from '@/components/ui/misc';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
+import { refreshMedia } from './mediaUrls';
 import * as ops from './ops';
 import { snapTime, timelineRemap } from './ripple';
 import { onReveal } from './reveal';
+import { shotList, shotName } from './shotGroups';
 import { selectedClipIds, useEditor, type MediaInfo } from './store';
 
 const LABEL_W = 92;
@@ -74,7 +76,13 @@ function useWaveform(m: MediaInfo | undefined) {
     let alive = true;
     let p = waveCache.get(id);
     if (!p) {
+      // An expired signed URL (403) is renewed once (mediaUrls.ts).
       p = fetch(url)
+        .then(async (r) => {
+          if (r.ok) return r;
+          const fresh = (await refreshMedia(id))?.urls.waveform;
+          return fresh ? fetch(fresh) : r;
+        })
         .then((r) => r.json())
         .then((j: { peaks: string }) => {
           const bin = atob(j.peaks);
@@ -872,9 +880,13 @@ const TracerTrack = memo(function TracerTrack({
   selected: string | null;
 }) {
   const { t } = useI18n();
+  const shots = useEditor((x) => x.doc.shots);
+  const media = useEditor((x) => x.doc.media);
+  // The same names as the shot list (numbered within the hole in a round).
+  const numbers = useMemo(() => shotList({ shots, media }).numbers, [shots, media]);
   return (
     <>
-      {bars.map(({ s, start, end }, i) => (
+      {bars.map(({ s, start, end }) => (
         <button
           key={s.id}
           type="button"
@@ -894,7 +906,7 @@ const TracerTrack = memo(function TracerTrack({
           onClick={() => ops.jumpToShot(s)}
         >
           {s.confidence < 0.6 ? <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden /> : null}
-          <span className="truncate">{s.label || (s.kind === 'putt' ? t.shots.putt : t.shots.shot.replace('{n}', String(i + 1)))}</span>
+          <span className="truncate">{shotName(s, numbers.get(s.id) ?? 0, t)}</span>
         </button>
       ))}
     </>

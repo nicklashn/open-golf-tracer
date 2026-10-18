@@ -1,0 +1,31 @@
+# Weekly update PRs for the pinned GitHub Actions (commit SHAs), npm and the Python lock files.
+# The bundled Windows binaries (installer/versions.psd1) are updated by hand, see that file.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  # requirements-lock.txt and requirements-dev-lock.txt pin every package with hashes; after a
+  # Dependabot PR, run `npm run lock:py` if CI says the two lock files disagree.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]

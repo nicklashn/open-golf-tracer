@@ -405,7 +405,7 @@
     },
     "shots": {
       "default": [],
-      "maxItems": 200,
+      "maxItems": 600,
       "type": "array",
       "items": {
         "type": "object",
@@ -3161,6 +3161,39 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 10
+          }
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "default": "",
+          "type": "string",
+          "maxLength": 120
+        },
+        "description": {
+          "default": "",
+          "type": "string",
+          "maxLength": 5000
+        },
+        "intro": {
+          "default": "Intro",
+          "type": "string",
+          "maxLength": 100
+        },
+        "holes": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 100
           }
         }
       }

@@ -1,38 +1,195 @@
 name: Windows installer
 
-# Builds OpenGolfTracer-Setup-<version>.exe. A pushed tag (v0.2.0) attaches it to a GitHub release;
-# a manual run or a pull request that changes the installer keeps it as a workflow artifact.
+# Builds OpenGolfTracer-Setup-<version>.exe and tests it: a silent install into a folder with a
+# space and Danish letters, the app started from its shortcut command, /api/health, one analysis
+# of the demo clip, an update over the running app, then a silent uninstall.
+#
+# A release (a v* tag pushed, or the "Prepare release" workflow) first checks that the tag is
+# "v" + the version in package.json and runs all of CI; only then is the installer built and
+# attached to a DRAFT release with generated notes, which the maintainer publishes by hand.
+# A pull request that touches what goes into the installer, or a manual run, keeps it as an artifact.
 on:
   push:
     tags: ['v*']
   pull_request:
-    paths: ['installer/**', '.github/workflows/installer.yml']
+    paths:
+      - 'installer/**'
+      - '.github/workflows/installer.yml'
+      - '.github/workflows/ci.yml'
+      - 'requirements*.txt'
+      - 'apps/*/requirements.txt'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'apps/*/package.json'
+      - 'apps/exporter/build.mjs'
+      - 'apps/web/next.config.ts'
+      - 'apps/web/scripts/**'
+      - 'shottracer/detect.py'
+      - 'scripts/dev.mjs'
+      - 'scripts/launcher.mjs'
+      - 'scripts/smoke.mjs'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag (vX.Y.Z), already pushed
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # The tag being released, or empty for a pull request / manual test build.
+  TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
-  installer:
-    runs-on: windows-latest
-    timeout-minutes: 60
+  version:
+    name: Tag matches package.json
+    if: inputs.tag != '' || github.ref_type == 'tag'
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Inno Setup
-        shell: pwsh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Compare
         run: |
-          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          want="v$(jq -r .version package.json)"
+          if [ "$TAG" != "$want" ]; then
+            echo "::error title=Version mismatch::The tag is $TAG but package.json says $want. Run the 'Prepare release' workflow (or node scripts/bump-version.mjs) for the version first, then tag that commit."
+            exit 1
+          fi
+          echo "Releasing $TAG"
+
+  ci:
+    name: CI
+    if: inputs.tag != '' || github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+
+  installer:
+    needs: [version, ci]
+    # On a pull request or a manual run the two above are skipped; any failure stops the build.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG || github.ref }}
+          persist-credentials: false
+      - name: Inno Setup (the version pinned in installer/versions.psd1)
+        run: |
+          $inno = (Import-PowerShellDataFile installer/versions.psd1).InnoSetup
+          $exe = Join-Path $env:RUNNER_TEMP "innosetup-$($inno.Version).exe"
+          Invoke-WebRequest $inno.Url -OutFile $exe
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $inno.Sha256) { throw "Checksum mismatch for $($inno.Url)" }
+          $dir = Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          $p = Start-Process $exe -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$dir`"" -Wait -PassThru
+          if ($p.ExitCode) { throw "Inno Setup did not install ($($p.ExitCode))" }
+          Add-Content $env:GITHUB_ENV "ISCC=$(Join-Path $dir 'ISCC.exe')"
       - name: Build
-        shell: pwsh
         run: |
-          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { '' }
-          powershell -NoProfile -ExecutionPolicy Bypass -File installer\build.ps1 -Version "$version"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
+          powershell -NoProfile -ExecutionPolicy Bypass -File installer\build.ps1 -Version "$env:TAG" -Iscc "$env:ISCC"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installer
           path: installer/dist/*.exe
-      - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
+          if-no-files-found: error
+
+      # --- Smoke test of the installer itself ---
+      - name: Install silently (folder with a space and Danish letters)
+        run: |
+          $setup = (Get-ChildItem installer/dist/*.exe | Select-Object -First 1).FullName
+          $app = Join-Path $env:RUNNER_TEMP "S$([char]0xF8)ren $([char]0xE5)\Open Golf Tracer"
+          Add-Content $env:GITHUB_ENV "SETUP=$setup" -Encoding utf8
+          Add-Content $env:GITHUB_ENV "APP_DIR=$app" -Encoding utf8
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=`"$env:RUNNER_TEMP\install.log`" /DIR=`"$app`"" -Wait -PassThru
+          if ($p.ExitCode) { throw "Setup failed ($($p.ExitCode)), see install.log" }
+          foreach ($f in 'OpenGolfTracer.cmd', '.env', 'runtime\python\python.exe', 'models\rf-detr-large.onnx', 'apps\web\.next\standalone\apps\web\server.js') {
+            if (-not (Test-Path (Join-Path $app $f))) { throw "Not installed: $f" }
+          }
+          foreach ($f in 'tests', 'docs', 'installer', '.github') { if (Test-Path (Join-Path $app $f)) { throw "Should not be installed: $f" } }
+      - name: Start the installed app and analyse the demo clip
+        env:
+          OGT_NO_BROWSER: '1'
+        run: |
+          Start-Process (Join-Path $env:APP_DIR 'OpenGolfTracer.cmd') -WorkingDirectory $env:APP_DIR -NoNewWindow `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\app.log" -RedirectStandardError "$env:RUNNER_TEMP\app.err.log"
+          & (Join-Path $env:APP_DIR 'runtime\node\node.exe') scripts/smoke.mjs --data (Join-Path $env:APP_DIR 'data') --analyze --timeout 1500
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $health = curl.exe -sf --noproxy '*' "http://127.0.0.1:$((Get-Content (Join-Path $env:APP_DIR 'data\ports.json') -Raw | ConvertFrom-Json).api)/api/health" | ConvertFrom-Json
+          $want = if ($env:TAG) { $env:TAG.TrimStart('v') } else { (Get-Content package.json -Raw | ConvertFrom-Json).version }
+          if ($health.version -ne $want) { throw "The installed app reports version $($health.version), expected $want" }
+          # The shortcut clicked a second time: the running copy is found, nothing new starts.
+          $second = & (Join-Path $env:APP_DIR 'OpenGolfTracer.cmd') | Out-String
+          Write-Host $second
+          if ($second -notmatch 'already running') { throw 'A second start did not find the running app' }
+      - name: Update over the running app (setup closes it)
+        run: |
+          $pid0 = Get-Content (Join-Path $env:APP_DIR 'data\app.pid')
+          $p = Start-Process $env:SETUP -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=`"$env:RUNNER_TEMP\update.log`" /DIR=`"$env:APP_DIR`"" -Wait -PassThru
+          if ($p.ExitCode) { throw "Update failed ($($p.ExitCode)), see update.log" }
+          if (Get-Process -Id $pid0 -ErrorAction SilentlyContinue) { throw 'Setup left the running app open' }
+          Set-Content (Join-Path $env:APP_DIR '.env') "# kept by uninstall`n" -Encoding utf8
+      - name: Uninstall silently (closes the app, keeps data and .env)
+        env:
+          OGT_NO_BROWSER: '1'
+        run: |
+          Start-Process (Join-Path $env:APP_DIR 'OpenGolfTracer.cmd') -WorkingDirectory $env:APP_DIR -NoNewWindow `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\app2.log" -RedirectStandardError "$env:RUNNER_TEMP\app2.err.log"
+          & (Join-Path $env:APP_DIR 'runtime\node\node.exe') scripts/smoke.mjs --data (Join-Path $env:APP_DIR 'data') --timeout 300
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $pid0 = Get-Content (Join-Path $env:APP_DIR 'data\app.pid')
+          Start-Process (Join-Path $env:APP_DIR 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait
+          # The uninstaller runs on from a copy in %TEMP%; wait until it has removed the program.
+          for ($i = 0; $i -lt 120 -and (Test-Path (Join-Path $env:APP_DIR 'unins000.exe')); $i++) { Start-Sleep 1 }
+          if (Test-Path (Join-Path $env:APP_DIR 'unins000.exe')) { throw 'Uninstall did not finish' }
+          if (Get-Process -Id $pid0 -ErrorAction SilentlyContinue) { throw 'Uninstall left the app running' }
+          foreach ($f in 'runtime', 'apps', 'node_modules', 'models') { if (Test-Path (Join-Path $env:APP_DIR $f)) { throw "Uninstall left $f" } }
+          foreach ($f in 'data', '.env') { if (-not (Test-Path (Join-Path $env:APP_DIR $f))) { throw "Uninstall removed $f" } }
+      - name: Logs
+        if: always()
+        run: |
+          foreach ($f in 'install.log', 'update.log', 'app.log', 'app.err.log', 'app2.log', 'app2.err.log') {
+            $path = Join-Path $env:RUNNER_TEMP $f
+            if (Test-Path $path) { Write-Host "::group::$f"; Get-Content $path -Tail 200; Write-Host '::endgroup::' }
+          }
+          if ($env:APP_DIR -and (Test-Path (Join-Path $env:APP_DIR 'data\app.pid'))) {
+            taskkill /F /T /PID (Get-Content (Join-Path $env:APP_DIR 'data\app.pid')) 2>$null
+          }
+          exit 0
+
+  release:
+    name: Draft release
+    needs: installer
+    if: inputs.tag != '' || github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # The only job that may write to the repository, and only for a tag that passed everything above.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          files: installer/dist/*.exe
+          name: installer
+          path: dist
+      - name: Release made by hand already?
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A release published in the GitHub UI stays published (the installer is added to it);
+          # otherwise a draft is made.
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: ${{ steps.existing.outputs.state != 'published' }}
+          generate_release_notes: true
+          files: dist/*.exe
+          fail_on_unmatched_files: true

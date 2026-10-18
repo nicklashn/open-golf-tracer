@@ -16,7 +16,7 @@ import { basename, extname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
-import { itemPlace, reasonText, type PlanQuestion } from '@golf/compose';
+import { itemPlace, parseAiError, reasonText, type PlanQuestion } from '@golf/compose';
 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.avi', '.webm']);
 
@@ -176,7 +176,10 @@ async function main(): Promise<void> {
   const files = videoFiles(positionals);
   if (!files.length) throw new Error('No videos given. Usage: npm run autovideo -- <folder|files…> [--yes]');
   const locale = values.locale === 'da' ? 'da' : 'en';
-  const preference = [values.preference, values.kind ? `${values.kind === 'shorts' ? 'one short per shot' : values.kind}` : ''].filter(Boolean).join(', ');
+  const preference = values.preference ?? '';
+  // The format goes as its own field (as the dialog's cards do); the preference only adds to it.
+  const kind = values.kind ?? null;
+  if (kind && !['youtube', 'highlight', 'shorts'].includes(kind)) throw new Error('--kind must be youtube, highlight or shorts');
 
   const c = new Client(values.api!.replace(/\/$/, ''));
   const stateFile = resolve(values.out!, '.autovideo-uploads.json');
@@ -198,7 +201,7 @@ async function main(): Promise<void> {
     console.error(`  ! ${j.kind === 'analyze' ? 'Analysis' : 'Processing'} of a clip failed: ${j.error || 'unknown error'} – the video is made from the rest.`);
 
   const fileAnswers = values.answers ? (JSON.parse(readFileSync(values.answers, 'utf8')) as Record<string, string>) : null;
-  let job = await c.call<Job>('POST', '/autovideo', { projectId: project.id, preference, locale, yes: values.yes, answers: fileAnswers });
+  let job = await c.call<Job>('POST', '/autovideo', { projectId: project.id, kind, preference, locale, yes: values.yes, answers: fileAnswers });
   for (;;) {
     await sleep(1000);
     const { jobs } = await c.call<{ jobs: Job[] }>('GET', `/jobs?project_id=${project.id}`);
@@ -208,7 +211,8 @@ async function main(): Promise<void> {
       const questions = (job.result.questions ?? []) as PlanQuestion[];
       const answers = await ask(questions, locale);
       job = await c.call<Job>('POST', `/jobs/${job.id}/answers`, { answers });
-    } else if (job.status === 'failed' || job.status === 'canceled') throw new Error(`The video failed: ${job.error || job.status}`);
+    } else if (job.status === 'failed' || job.status === 'canceled')
+      throw new Error(`The video failed: ${parseAiError(job.error)?.message || job.error || job.status}`);
     else if (job.status === 'succeeded') break;
   }
   process.stderr.write('\n');

@@ -2,7 +2,7 @@
 
 import { Download, FolderOpen, History, Play, RotateCcw, Sparkles, X } from 'lucide-react';
 import Link from 'next/link';
-import { outputSize, primaryMedia, type ExportPreset } from '@golf/schema';
+import { outputSize, primaryMedia, timelineHdr, type ExportPreset } from '@golf/schema';
 import { useEffect, useState } from 'react';
 import { Birdie } from '@/components/mascot/Birdie';
 import { Button } from '@/components/ui/button';
@@ -15,7 +15,10 @@ import { api, errorMessage } from '@/lib/api';
 import { relativeTime } from '@/lib/format';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
-import { saveNow } from './autosave';
+import { jobMessage } from '@/lib/jobMessage';
+import { publishText } from '@golf/compose';
+import { YoutubeText } from '@/components/app/YoutubeText';
+import { flush } from './autosave';
 import { useEditor } from './store';
 import { migrateProject } from '@golf/schema';
 
@@ -36,7 +39,7 @@ export interface ExportRow {
 }
 
 export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean; onOpenChange: (o: boolean) => void; onStarted: (e: ExportRow) => void }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const doc = useEditor((s) => s.doc);
   const inPoint = useEditor((s) => s.inPoint);
   const outPoint = useEditor((s) => s.outPoint);
@@ -46,6 +49,7 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
   const [range, setRange] = useState<'all' | 'selection'>('all');
   const [busy, setBusy] = useState(false);
   const media = primaryMedia(doc);
+  const hdrClips = timelineHdr(doc);
 
   useEffect(() => {
     if (open)
@@ -55,11 +59,16 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
   const aspect = preset === 'shorts' ? '9:16' : doc.format.aspect;
   const size = media ? outputSize(aspect, preset, media) : null;
   const hasSelection = inPoint != null && outPoint != null && outPoint > inPoint;
+  const part = range === 'selection' && hasSelection ? { start: inPoint, end: outPoint } : null;
+  // A made video's description and chapters, timed from the timeline as it is now (and the part exported).
+  const youtube = doc.publish ? publishText(doc, part) : '';
 
   async function start() {
     setBusy(true);
     try {
-      await saveNow(true);
+      // The export renders the document sent with it; saving first only must not overwrite
+      // another window's changes (a conflict opens the dialog and stops here).
+      if (!(await flush()).ok && useEditor.getState().saveState === 'conflict') return;
       const body = {
         settings: {
           preset,
@@ -68,6 +77,9 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
           range: range === 'selection' && hasSelection ? { start: inPoint, end: outPoint } : null,
         },
         document: useEditor.getState().doc,
+        // Graphics (stat cards, units, dates) are drawn in the language the user sees.
+        locale,
+        ...(youtube ? { publishText: youtube } : {}),
       };
       const e = await api<ExportRow>(`/projects/${useEditor.getState().projectId}/exports`, { body });
       onStarted(e);
@@ -117,7 +129,7 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
                 ]}
               />
             </div>
-            {media?.hdr ? (
+            {hdrClips !== 'none' ? (
               <div>
                 <p className="mb-1.5 text-[13px] font-medium">{t.exporter.hdr}</p>
                 <Segmented
@@ -129,7 +141,9 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
                     { value: 'sdr', label: t.exporter.hdrSdr },
                   ]}
                 />
-                <p className="mt-1 text-[12px] text-fg-subtle">{t.exporter.hdrHint}</p>
+                <p className="mt-1 text-[12px] text-fg-subtle" data-testid="export-hdr-hint">
+                  {hdrClips === 'mixed' && hdr === 'keep' ? t.exporter.hdrMixed : t.exporter.hdrHint}
+                </p>
               </div>
             ) : null}
             <div>
@@ -145,6 +159,7 @@ export function ExportDialog({ open, onOpenChange, onStarted }: { open: boolean;
               />
             </div>
           </div>
+          {youtube ? <YoutubeText text={youtube} rows={5} /> : null}
           <div className="space-y-1 text-[13px] text-fg-muted">
             {size ? (
               <p className="tabular">
@@ -186,7 +201,12 @@ export function ExportStatus({ items, onClear }: { items: ExportRow[]; onClear: 
                       ? t.exporter.queued
                       : f(t.exporter.running, { pct: Math.round(e.progress * 100) })}
               </p>
-              {e.status === 'failed' && e.error ? <p className="line-clamp-2 text-[12px] text-fg-muted">{e.error}</p> : null}
+              {e.status === 'failed' && e.error ? <p className="line-clamp-2 text-[12px] text-fg-muted">{jobMessage(e.error, t)}</p> : null}
+              {e.status === 'running' && e.message ? (
+                <p className="text-[12px] text-fg-muted" data-testid="export-step">
+                  {jobMessage(e.message, t)}
+                </p>
+              ) : null}
               {e.status === 'queued' || e.status === 'running' ? <p className="text-[12px] text-fg-muted">{t.exporter.notify}</p> : null}
               {e.status === 'succeeded' ? (
                 <p className="text-[12px] text-fg-muted" data-testid="export-saved-to">
@@ -257,6 +277,8 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const projectId = useEditor((s) => s.projectId);
   const [rows, setRows] = useState<VersionRow[] | null>(null);
   const [label, setLabel] = useState('');
+  const [confirming, setConfirming] = useState<VersionRow | null>(null);
+  const [busy, setBusy] = useState(false);
   const load = () =>
     api<{ versions: VersionRow[] }>(`/projects/${projectId}/versions`).then(
       (r) => setRows(r.versions),
@@ -267,26 +289,30 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   async function saveNamed() {
-    await saveNow(true);
+    // A named version is taken of what the server has: save first, never over another window's.
+    if (!(await flush()).ok) return;
     await api(`/projects/${projectId}/versions`, { body: { label } });
     setLabel('');
     void load();
   }
   async function restore(id: string) {
-    if (!confirm(t.versions.restoreConfirm)) return;
-    await saveNow(true);
-    const r = await api<{ docVersion: number; document: unknown }>(`/projects/${projectId}/versions/${id}/restore`, { method: 'POST' });
-    useEditor.setState({
-      doc: migrateProject(r.document),
-      docVersion: r.docVersion,
-      saveState: 'saved',
-      past: [],
-      future: [],
-      revision: useEditor.getState().revision + 1,
-      selection: null,
-    });
-    toast.success(t.versions.restored);
-    onOpenChange(false);
+    setBusy(true);
+    try {
+      // "The current one is saved first" – unless another window saved meanwhile (the conflict
+      // dialog then asks), then nothing is restored.
+      if (!(await flush()).ok) return;
+      const r = await api<{ docVersion: number; document: unknown }>(`/projects/${projectId}/versions/${id}/restore`, { method: 'POST' });
+      useEditor.getState().adopt({ doc: migrateProject(r.document), docVersion: r.docVersion });
+      // In/out points belong to the timeline that was replaced.
+      useEditor.setState({ inPoint: null, outPoint: null, selection: null });
+      toast.success(t.versions.restored);
+      setConfirming(null);
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(errorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -319,7 +345,7 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                   {relativeTime(v.createdAt, locale)} · {f(t.versions.items, { shots: v.shots, layers: v.layers })}
                 </p>
               </div>
-              <Button size="sm" variant="ghost" onClick={() => void restore(v.id)}>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming(v)}>
                 <RotateCcw />
                 {t.versions.restore}
               </Button>
@@ -328,6 +354,19 @@ export function VersionsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
           {rows && !rows.length ? <li className="px-3 py-6 text-center text-sm text-fg-muted">—</li> : null}
         </ul>
       </DialogContent>
+      <Dialog open={!!confirming} onOpenChange={(o) => !o && setConfirming(null)}>
+        <DialogContent title={t.versions.restoreTitle} description={t.versions.restoreConfirm} closeLabel={t.common.close}>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setConfirming(null)}>
+              {t.common.cancel}
+            </Button>
+            <Button variant="primary" loading={busy} onClick={() => confirming && void restore(confirming.id)} data-testid="restore-confirm">
+              <RotateCcw />
+              {t.versions.restore}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

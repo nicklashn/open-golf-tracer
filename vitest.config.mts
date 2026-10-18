@@ -9,7 +9,7 @@ export default defineConfig({
   // apps/web's tsconfig preserves JSX for Next; tests of components compile it here.
   oxc: { jsx: { runtime: 'automatic' } },
   test: {
-    include: ['packages/*/test/**/*.test.ts', 'apps/exporter/test/**/*.test.ts', 'apps/web/test/**/*.test.{ts,tsx}'],
+    include: ['packages/*/test/**/*.test.ts', 'scripts/test/**/*.test.ts', 'apps/exporter/test/**/*.test.ts', 'apps/web/test/**/*.test.{ts,tsx}'],
     environment: 'node',
     testTimeout: 60_000,
   },

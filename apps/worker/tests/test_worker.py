@@ -66,6 +66,21 @@ def test_proxy_cmds_gpu_first_with_cpu_fallback(monkeypatch):
     assert len(tasks.proxy_cmds(Path("in.mp4"), Path("proxy.webm"), None, PROBE, vp9=True)) == 1
 
 
+def test_an_hdr_proxy_is_tone_mapped_after_it_is_made_small(monkeypatch):
+    """Tone mapping is float maths per pixel: on the 1280 px frames at most 60 per second, not
+    the full-size ones (2x faster on a 1080p60 iPhone HLG clip; 4K or 120 fps gain more)."""
+    from golf_worker import tasks
+
+    monkeypatch.setattr(tasks, "cuda_ok", lambda: False)
+    monkeypatch.setattr(tasks, "tonemap_filter", lambda: "TONEMAP")
+    hdr = {**PROBE, "hdr": True, "codec": "hevc", "pix_fmt": "yuv420p10le", "fps": 119.88, "width": 3840, "height": 2160}
+    (cmd,) = tasks.proxy_cmds(Path("in.mov"), Path("proxy.mp4"), Path("thumbs.jpg"), hdr)
+    chain = cmd[cmd.index("-filter_complex") + 1].split(",split=")[0].removeprefix("[0:v:0]").split(",")
+    assert chain == ["fps=60", "scale=1280:-2:flags=area", "TONEMAP", "format=yuv420p"]
+    (cmd,) = tasks.proxy_cmds(Path("in.mp4"), Path("proxy.mp4"), None, PROBE)
+    assert "TONEMAP" not in cmd[cmd.index("-filter_complex") + 1]
+
+
 def test_ingest_falls_back_when_the_gpu_fails(client, tiny_video, monkeypatch, caplog):
     from golf_worker import tasks
 
@@ -144,3 +159,34 @@ def test_analysis_job_finds_shots(client):
     assert abs(rt["result"]["shot"]["impactTime"] - 11.0) < 0.05
     os.environ.pop("X", None)
     json.dumps(doc)
+
+
+def test_place_lookup_respects_the_setting_and_env(client, monkeypatch, tmp_path):
+    """Settings → "Look courses up on OpenStreetMap" off (or GEO_LOOKUP=0): the analysis keeps
+    the GPS but sends nothing to Overpass."""
+    from golf_api import config
+    from golf_api.db import session_scope
+    from golf_api.models import Media
+    from golf_api.routes import geo
+    from golf_worker import tasks
+
+    calls = []
+    monkeypatch.setattr(geo, "place_at", lambda lat, lon: calls.append((lat, lon)) or {"course": "X", "hole": "1"})
+    monkeypatch.setattr(geo, "green_distance", lambda lat, lon: 100)
+    uid = client.get("/api/account").json()["user"]["id"]
+    with session_scope() as db:
+        m = Media(user_id=uid, filename="a.mp4", kind="video", storage_key="x", probe={"geo": {"lat": 56.2, "lon": 9.7}})
+        db.add(m)
+        db.flush()
+        db.expunge(m)
+    src = tmp_path / "a.mp4"
+    assert tasks._place(m, src)["course"] == "X" and len(calls) == 1
+    client.patch("/api/account", json={"geo_lookup": False})
+    assert tasks._place(m, src) == {"geo": {"lat": 56.2, "lon": 9.7}} and len(calls) == 1
+    client.patch("/api/account", json={"geo_lookup": True})
+    monkeypatch.setenv("GEO_LOOKUP", "0")
+    config.settings.cache_clear()
+    try:
+        assert tasks._place(m, src) == {"geo": {"lat": 56.2, "lon": 9.7}} and len(calls) == 1
+    finally:
+        config.settings.cache_clear()

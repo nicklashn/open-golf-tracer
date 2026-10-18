@@ -29,10 +29,11 @@ function fakeApi(
       },
       progress: rec('progress', { continue: true }),
       complete: rec('complete', { ok: true }),
+      checkpoint: rec('checkpoint', { ok: true }),
     },
   };
 }
-const ops = (calls: { op: string }[]) => calls.map((c) => c.op).filter((o) => o !== 'progress' && o !== 'jobAi');
+const ops = (calls: { op: string }[]) => calls.map((c) => c.op).filter((o) => o !== 'progress' && o !== 'jobAi' && o !== 'checkpoint');
 
 describe('compose job', () => {
   it('waits while the analysis runs', async () => {
@@ -78,13 +79,17 @@ describe('compose job', () => {
   });
 });
 
-/** An OpenAI-compatible provider answering from a list; counts the calls it gets. */
+/** A provider answering from a list (OpenAI-compatible, or Ollama's own API); counts the calls it gets. */
 function fakeProvider(answers: string[], usage = { prompt_tokens: 1000, completion_tokens: 100 }, status = 200) {
   const bodies: { messages: { content: string }[] }[] = [];
-  const doFetch = (async (_url: string, init: RequestInit) => {
+  const doFetch = (async (url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
     const content = answers.shift() ?? '{}';
     if (status !== 200) return new Response(JSON.stringify({ error: { message: 'bad key' } }), { status });
+    if (url.endsWith('/api/chat'))
+      return new Response(JSON.stringify({ message: { content }, prompt_eval_count: usage.prompt_tokens, eval_count: usage.completion_tokens }), {
+        status: 200,
+      });
     return new Response(JSON.stringify({ choices: [{ message: { content } }], usage }), { status: 200 });
   }) as unknown as typeof fetch;
   return { bodies, doFetch };
@@ -95,7 +100,7 @@ describe('compose job with an AI model', () => {
   it('makes at most two calls: the plan, then once more after the answers', async () => {
     const provider = fakeProvider([
       JSON.stringify({ title: 'Søndagsrunden', questions: [{ id: 'retake:s2:s3', text: 'Var hul 2 et omslag?' }] }),
-      JSON.stringify({ title: 'Søndagsrunden', shotTexts: [{ shotId: 's3', text: 'Andet forsøg sad!' }], description: 'To huller i Testbane.' }),
+      JSON.stringify({ title: 'Søndagsrunden', shotTexts: [{ shot: 3, text: 'Andet forsøg sad!' }], description: 'To huller i Testbane.' }),
     ]);
     const first = fakeApi(0, AI);
     expect(await handleCompose(first.api, { id: 'j', payload: { project_id: 'p', locale: 'da' } }, () => {}, provider.doFetch)).toBe('asked');
@@ -121,7 +126,7 @@ describe('compose job with an AI model', () => {
       notes: string[];
     };
     expect(result.usage).toMatchObject({ calls: 2, inputTokens: 2000 });
-    expect(result.description).toBe('To huller i Testbane.');
+    expect(result.description.split('\n')[0]).toBe('To huller i Testbane.');
     expect(result.notes[0]).toContain('llama3.1');
     const doc = second.calls.find((c) => c.op === 'derive')!.args[2] as { layers: { type: string; props: { text?: string } }[] };
     expect(doc.layers.some((l) => l.type === 'text' && l.props.text === 'Andet forsøg sad!')).toBe(true);
@@ -245,7 +250,91 @@ describe('the AI never fails the video', () => {
     const f = fakeApi(0, { ...AI, provider: 'openai-compatible', apiKey: 'sk-SECRET-123456789' });
     expect(await handleCompose(f.api, { id: 'j', payload: { project_id: 'p', locale: 'en', yes: true } }, () => {}, provider.doFetch)).toBe('done');
     const r = done(f);
-    expect(r.notes[0]).toMatch(/^The AI could not be used \(.*rejected the API key \(401\)\), so the plan was made by fixed rules\.$/);
+    expect(r.notes[0]).toBe('The AI could not be used (localhost:11434 rejected the key or sign-in), so the plan was made by fixed rules.');
     expect(JSON.stringify(r)).not.toContain('sk-SECRET');
+  });
+});
+
+describe('a job that runs again (attempt 2) does not pay twice', () => {
+  /** The API as a retry sees it: the payload keeps what `checkpoint` saved. */
+  function retrying(ai: Record<string, unknown>, failDerive: number[]) {
+    const f = fakeApi(0, ai);
+    let derives = 0;
+    const saved: Record<string, unknown> = {};
+    const api = {
+      ...f.api,
+      checkpoint: async (_id: string, data: Record<string, unknown>) => {
+        f.calls.push({ op: 'checkpoint', args: [data] });
+        Object.assign(saved, JSON.parse(JSON.stringify(data)));
+        return { ok: true };
+      },
+      derive: async (...args: unknown[]) => {
+        const n = ++derives;
+        if (failDerive.includes(n)) throw new Error('API POST /derive → 500');
+        f.calls.push({ op: 'derive', args });
+        return { id: `new${n}`, name: String(args[1]) };
+      },
+    };
+    return { ...f, api, saved };
+  }
+
+  it('a failure after the AI plan: the retry starts from the saved plan, no new call, tokens kept', async () => {
+    const provider = fakeProvider(['{"title": "Fra AI"}', '{"title": "Igen"}']);
+    const f = retrying(AI, [1]);
+    const payload = { project_id: 'p', locale: 'da', yes: true };
+    await expect(handleCompose(f.api, { id: 'j', payload }, () => {}, provider.doFetch)).rejects.toThrow('500');
+    expect(provider.bodies).toHaveLength(1);
+    expect(f.saved).toMatchObject({ plan: { title: 'Fra AI' }, usage: { calls: 1 } });
+    // The queue sends the job again with its payload as the checkpoint left it.
+    expect(await handleCompose(f.api, { id: 'j', payload: { ...payload, ...f.saved } }, () => {}, provider.doFetch)).toBe('done');
+    expect(provider.bodies).toHaveLength(1);
+    const r = f.calls.find((c) => c.op === 'complete')!.args[1] as { title: string; usage: { calls: number } };
+    expect(r.title).toBe('Fra AI');
+    expect(r.usage.calls).toBe(1);
+  });
+
+  it('a failure after the answers were applied: the second AI call is not made again', async () => {
+    const provider = fakeProvider(['{"title": "Første"}', '{"title": "Efter svar"}']);
+    const first = fakeApi(0, AI);
+    await handleCompose(first.api, { id: 'j', payload: { project_id: 'p', locale: 'da' } }, () => {}, provider.doFetch);
+    const asked = first.calls.find((c) => c.op === 'awaitAnswers')!.args[1] as { plan: unknown; usage: unknown };
+    const f = retrying(AI, [1]);
+    const payload = { project_id: 'p', locale: 'da', plan: asked.plan, usage: asked.usage, answers: { 'retake:s2:s3': 'last' } };
+    await expect(handleCompose(f.api, { id: 'j', payload }, () => {}, provider.doFetch)).rejects.toThrow();
+    expect(provider.bodies).toHaveLength(2);
+    expect(f.saved).toMatchObject({ answered: true, plan: { title: 'Efter svar' }, usage: { calls: 2 } });
+    expect(await handleCompose(f.api, { id: 'j', payload: { ...payload, ...f.saved } }, () => {}, provider.doFetch)).toBe('done');
+    expect(provider.bodies).toHaveLength(2);
+    expect((f.calls.find((c) => c.op === 'complete')!.args[1] as { title: string }).title).toBe('Efter svar');
+  });
+
+  it('videos already saved are not saved twice', async () => {
+    const f = retrying({ provider: 'none', model: '', baseUrl: '', apiKey: '', maxTokens: 8000 }, [2]);
+    const payload = { project_id: 'p', kind: 'shorts', yes: true };
+    await expect(handleCompose(f.api, { id: 'j', payload })).rejects.toThrow();
+    expect(f.saved).toMatchObject({ derived: [{ id: 'new1' }] });
+    await handleCompose(f.api, { id: 'j', payload: { ...payload, ...f.saved } });
+    const r = f.calls.find((c) => c.op === 'complete')!.args[1] as { projects: { id: string }[] };
+    expect(r.projects.map((x) => x.id)).toEqual(['new1', 'new3', 'new4']);
+    expect(f.calls.filter((c) => c.op === 'derive')).toHaveLength(3);
+  });
+});
+
+describe('the format and the text for YouTube', () => {
+  it('the format comes as its own field: a wish naming another format does not change it', async () => {
+    const f = fakeApi();
+    await handleCompose(f.api, { id: 'j', payload: { project_id: 'p', kind: 'highlight', preference: 'youtube, hele runden', yes: true } });
+    const r = f.calls.find((c) => c.op === 'complete')!.args[1] as { kind: string };
+    expect(r.kind).toBe('highlight');
+  });
+
+  it('without AI: a description from the facts on the made project and in the result', async () => {
+    const f = fakeApi();
+    await handleCompose(f.api, { id: 'j', payload: { project_id: 'p', kind: 'youtube', locale: 'da', yes: true } });
+    const r = f.calls.find((c) => c.op === 'complete')!.args[1] as { description: string };
+    expect(r.description).toMatch(/^Golfrunde på Testbane/);
+    const doc = f.calls.find((c) => c.op === 'derive')!.args[2] as { publish: { description: string; holes: Record<string, string> } };
+    expect(doc.publish.description).toBe(r.description.split('\n\n')[0]);
+    expect(doc.publish.holes['1']).toMatch(/^Hul 1 – par 4/);
   });
 });

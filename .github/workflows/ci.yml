@@ -4,27 +4,41 @@ on:
   push:
     branches: [main, 'feature/**']
   pull_request:
+  # The release workflow (installer.yml) runs all of this on the tag before it builds anything.
+  workflow_call:
+
+# Read-only token everywhere; actions are pinned to commit SHAs (Dependabot keeps them current).
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   NEXT_TELEMETRY_DISABLED: '1'
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  # The same Node and Python as the Windows installer bundles (installer/versions.psd1; the npm
+  # that ships with that Node is used as it is). tests/python/test_release.py keeps them in step.
+  # (The Windows job uses the bundled Python build itself.)
+  NODE_VERSION: '24.21.0'
+  PYTHON_VERSION: '3.12.15'
 
 jobs:
   web:
     name: TypeScript – lint, typecheck, unit tests, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - run: npm install -g npm@11
       - run: npm ci
+      # The exporter tests render real exports.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
@@ -34,25 +48,113 @@ jobs:
     name: Python – ruff, pyright, pytest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: '3.12'
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-            apps/api/requirements.txt
-      - name: FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Install
+          cache-dependency-path: requirements-dev-lock.txt
+      - name: FFmpeg and OpenCV's system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libgl1
+      - name: Install (the locked versions, checked against their hashes)
         run: |
           python -m venv .venv
-          .venv/bin/pip install -r apps/worker/requirements.txt -r requirements-dev.txt
-          .venv/bin/pip install --force-reinstall --no-deps opencv-python-headless
+          .venv/bin/pip install --require-hashes -r requirements-dev-lock.txt
       - run: .venv/bin/ruff check .
       - run: .venv/bin/pyright
       - run: .venv/bin/python -m pytest
+
+  windows:
+    name: Windows – pytest and app smoke test (non-ASCII data folder)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      # The Python and FFmpeg builds the installer bundles (python.org has no Windows builds of
+      # 3.12 security releases, so setup-python cannot provide this one).
+      - name: Python and FFmpeg (installer/versions.psd1)
+        run: |
+          $pins = Import-PowerShellDataFile installer/versions.psd1
+          foreach ($tool in 'Python', 'FFmpeg') {
+            $pin = $pins[$tool]
+            $file = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName(([Uri]$pin.Url).AbsolutePath))
+            Invoke-WebRequest $pin.Url -OutFile $file
+            if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $pin.Sha256) { throw "Checksum mismatch for $($pin.Url)" }
+            tar -xf $file -C $env:RUNNER_TEMP
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          Add-Content $env:GITHUB_PATH (Join-Path $env:RUNNER_TEMP "ffmpeg-$($pins.FFmpeg.Version)-essentials_build\bin")
+          Add-Content $env:GITHUB_ENV "BUNDLED_PYTHON=$(Join-Path $env:RUNNER_TEMP 'python\python.exe')"
+      - name: pip cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-windows-${{ hashFiles('requirements-dev-lock.txt') }}
+      - name: Install (the locked versions, checked against their hashes)
+        run: |
+          & $env:BUNDLED_PYTHON -m venv .venv
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .venv\Scripts\python -m pip install --require-hashes --only-binary :all: -r requirements-dev-lock.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Ball detector model (cached)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: models/rf-detr-large.onnx
+          key: rf-detr-large-onnx-${{ hashFiles('shottracer/detect.py') }}
+      - run: .venv\Scripts\python scripts\fetch_model.py
+      # A Danish user name puts the data (and the install) under a path like C:\Users\Søren å\...
+      # (cv2.imwrite/VideoCapture and numba's cache have broken on such paths before).
+      - name: A data folder with a space and non-ASCII letters
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "S$([char]0xF8)ren $([char]0xE5)"
+          Add-Content $env:GITHUB_ENV "OGT_TEST_DIR=$dir" -Encoding utf8
+          # numba's cache sits next to the code, which the installer puts under the user's profile.
+          Add-Content $env:GITHUB_ENV "NUMBA_CACHE_DIR=$(Join-Path $dir 'numba')" -Encoding utf8
+      - name: pytest (not slow)
+        run: |
+          .venv\Scripts\python -m pytest --basetemp "$env:OGT_TEST_DIR\pytest"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - run: npm ci
+      - run: npm run build
+      - name: Start the app (--single, with :3000 and :8000 held by another program)
+        env:
+          OGT_NO_BROWSER: '1'
+        run: |
+          $env:DATA_DIR = Join-Path $env:OGT_TEST_DIR 'data'
+          # Something else on the usual ports: the launcher must move to free ones.
+          foreach ($port in 3000, 8000) { Start-Process (Resolve-Path .venv\Scripts\python.exe) -ArgumentList '-m', 'http.server', $port, '--bind', '127.0.0.1' -WindowStyle Hidden }
+          Start-Sleep 2
+          Start-Process node -ArgumentList 'scripts/dev.mjs', '--prod', '--single' -NoNewWindow `
+            -RedirectStandardOutput app.log -RedirectStandardError app.err.log
+          node scripts/smoke.mjs --data $env:DATA_DIR --analyze --timeout 1500
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $ports = Get-Content (Join-Path $env:DATA_DIR 'ports.json') -Raw | ConvertFrom-Json
+          if ($ports.web -eq 3000 -or $ports.api -eq 8000) { throw "Expected other ports than 3000/8000: $($ports | ConvertTo-Json -Compress)" }
+          # A second start finds the running copy instead of starting another.
+          $second = node scripts/dev.mjs --prod --single | Out-String
+          Write-Host $second
+          if ($LASTEXITCODE -or $second -notmatch 'already running') { throw 'A second start did not find the running app' }
+      - name: Stop the app
+        if: always()
+        run: |
+          if ($env:OGT_TEST_DIR -and (Test-Path (Join-Path $env:OGT_TEST_DIR 'data\app.pid'))) {
+            taskkill /F /T /PID (Get-Content (Join-Path $env:OGT_TEST_DIR 'data\app.pid'))
+          }
+          exit 0
+      - name: App log
+        if: failure()
+        run: Get-Content app.log, app.err.log -ErrorAction SilentlyContinue
 
   e2e:
     name: Playwright – renderer parity and end-to-end
@@ -63,44 +165,44 @@ jobs:
       # Playwright's Chromium has no H.264 decoder, so the worker makes VP9 proxies.
       PROXY_CODEC: vp9
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-            apps/api/requirements.txt
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Python environment
+          cache-dependency-path: requirements-lock.txt
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libgl1
+      - name: Python environment (exactly what the installer ships)
         run: |
           python -m venv .venv
-          .venv/bin/pip install -r apps/worker/requirements.txt
-          .venv/bin/pip install --force-reinstall --no-deps opencv-python-headless
+          .venv/bin/pip install --require-hashes -r requirements-lock.txt
       - name: Ball detector model (cached)
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: models/rf-detr-large.onnx
           key: rf-detr-large-onnx-${{ hashFiles('shottracer/detect.py') }}
       - run: .venv/bin/python scripts/fetch_model.py
-      - run: npm install -g npm@11 && npm ci
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
+      # Builds the standalone web server and the exporter bundle, which dev.mjs --prod runs, as
+      # in the installed app.
       - run: npm run build
       - name: Start the app
         run: |
           node scripts/dev.mjs --prod > app.log 2>&1 &
-          for i in $(seq 1 120); do curl -sf http://localhost:3000 >/dev/null && exit 0; sleep 1; done
+          for i in $(seq 1 120); do curl -sf --noproxy '*' http://localhost:3000 >/dev/null && exit 0; sleep 1; done
           cat app.log; exit 1
       - run: npx playwright test
       - name: App log
         if: failure()
         run: cat app.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: playwright-report

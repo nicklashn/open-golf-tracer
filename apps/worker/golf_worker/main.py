@@ -26,14 +26,15 @@ for p in (ROOT, ROOT / "apps" / "api"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from golf_api import jobs, logging_setup, performance  # noqa: E402
+from golf_api import jobs, logging_setup, performance, space  # noqa: E402
 from golf_api.config import settings  # noqa: E402
 from golf_api.db import session_scope  # noqa: E402
 from golf_api.main import migrate  # noqa: E402
 from golf_api.models import Job, Media  # noqa: E402
 
+from . import awake  # noqa: E402
 from .ffmpeg import Canceled  # noqa: E402
-from .tasks import HANDLERS  # noqa: E402
+from .tasks import HANDLERS, release_files  # noqa: E402
 
 log = logging.getLogger("golf.worker")
 
@@ -58,9 +59,18 @@ def run_job(job_id: str) -> None:
         j = db.get(Job, job_id)
         assert j is not None
         job = {**jobs.public(j), "payload": j.payload}
+        lease = j.lease
     canceled = threading.Event()
+    lost = threading.Event()        # queued again while we were away (the PC slept): not ours any more
     last = {"p": 0.0, "msg": "", "t": 0.0}
     stop = threading.Event()
+
+    def beat(progress: float | None, message: str | None) -> None:
+        state = jobs.beat(job_id, lease, progress, message)
+        if state == jobs.LOST:
+            lost.set()
+        if state != jobs.OK:
+            canceled.set()
 
     def report(progress: float, message: str) -> bool:
         if progress >= 0:
@@ -69,44 +79,56 @@ def run_job(job_id: str) -> None:
         now = time.monotonic()
         if now - last["t"] > 0.4:              # do not hammer the database
             last["t"] = now
-            if not jobs.heartbeat(job_id, last["p"], message):
-                canceled.set()
+            beat(last["p"], message)
         return not canceled.is_set()
 
-    def beat():
+    def beats():
         while not stop.wait(HEARTBEAT_S):
-            if not jobs.heartbeat(job_id, last["p"], last["msg"] or None):
-                canceled.set()
+            beat(last["p"], last["msg"] or None)
 
-    t = threading.Thread(target=beat, daemon=True)
+    t = threading.Thread(target=beats, daemon=True)
     t.start()
     t0 = time.perf_counter()
     try:
-        result = HANDLERS[job["kind"]](job, report)
+        with awake.held():
+            result = HANDLERS[job["kind"]](job, report)
         with session_scope() as db:
             j = db.get(Job, job_id)
-            jobs.complete(db, j, result)
-        log.info("job %s (%s) done in %.1f s", job_id, job["kind"], time.perf_counter() - t0)
-    except Canceled:
-        with session_scope() as db:
-            j = db.get(Job, job_id)
-            j.cancel_requested = True
-            jobs.fail(db, j, "Cancelled by the user", retry=False)
-        log.info("job %s cancelled", job_id)
+            if j is None or not jobs.complete(db, j, result, lease):
+                log.info("job %s (%s) finished, but another worker has it now; result dropped", job_id, job["kind"])
+            else:
+                log.info("job %s (%s) done in %.1f s", job_id, job["kind"], time.perf_counter() - t0)
     except Exception as exc:
-        tb = traceback.format_exc()
-        log.error("job %s (%s) failed: %s", job_id, job["kind"], exc)
-        jobs.append_log(job_id, tb)
-        retry = not isinstance(exc, (LookupError, ValueError))
-        with session_scope() as db:
-            j = db.get(Job, job_id)
-            jobs.fail(db, j, str(exc) or exc.__class__.__name__, retry=retry)
-            if j.status == "failed" and j.kind == "ingest" and j.media_id:
-                m = db.get(Media, j.media_id)
-                if m:
-                    m.status = "failed"
+        if lost.is_set():
+            # Not a cancel and not a failure: the job's new run reports on it.
+            log.info("job %s (%s) stopped: it was queued again while this worker was away", job_id, job["kind"])
+        elif isinstance(exc, Canceled):
+            with session_scope() as db:
+                j = db.get(Job, job_id)
+                if j is not None and jobs.owns(j, lease):
+                    j.cancel_requested = True
+                    jobs.fail(db, j, "Cancelled by the user", retry=False, lease=lease)
+            log.info("job %s cancelled", job_id)
+        else:
+            tb = traceback.format_exc()
+            log.error("job %s (%s) failed: %s", job_id, job["kind"], exc)
+            jobs.append_log(job_id, tb)
+            error = str(exc) or exc.__class__.__name__
+            full = isinstance(exc, space.DiskFull) or space.disk_full(exc) or "No space left on device" in error
+            if full and f"[{space.DISK_FULL}]" not in error:
+                error = f"[{space.DISK_FULL}] The disk is full. {error}"
+            # A full disk stays full until the user makes room: no retry.
+            retry = not full and not isinstance(exc, (LookupError, ValueError))
+            with session_scope() as db:
+                j = db.get(Job, job_id)
+                if j is not None and jobs.fail(db, j, error, retry=retry, lease=lease):
+                    if j.status == "failed" and j.kind == "ingest" and j.media_id:
+                        m = db.get(Media, j.media_id)
+                        if m:
+                            m.status = "failed"
     finally:
         stop.set()
+        release_files()
 
 
 def claimable(db, lane: str, kinds: list[str]) -> list[str]:

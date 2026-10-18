@@ -12,4 +12,4 @@ if errorlevel 1 (
   echo == Building the web app ==
   call npm run build || (pause & exit /b 1)
 )
-node scripts\dev.mjs --prod --open %*
+node scripts\dev.mjs --prod --open --single %*

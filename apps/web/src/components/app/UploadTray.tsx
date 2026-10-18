@@ -25,17 +25,19 @@ export function UploadTray() {
                   {it.status === 'error' ? `${t.upload.failed}: ${it.name}` : it.status === 'done' ? it.name : f(t.upload.uploading, { name: it.name })}
                 </p>
                 <p className="tabular mt-0.5 text-[12px] text-fg-muted">
-                  {it.status === 'preparing'
-                    ? t.upload.preparing
-                    : it.status === 'validating'
-                      ? t.upload.validating
-                      : it.status === 'done'
-                        ? t.upload.done
-                        : it.status === 'error'
-                          ? errorMessage(it.error, t)
-                          : it.status === 'canceled'
-                            ? t.jobs.canceled
-                            : `${bytes(it.sent, locale)} / ${bytes(it.size, locale)}${it.speed ? ` · ${f(t.upload.speed, { speed: bytes(it.speed, locale) })}` : ''}${left != null ? ` · ${f(t.upload.remaining, { time: left > 90 ? `${Math.ceil(left / 60)} min` : `${Math.ceil(left)} s` })}` : ''}`}
+                  {it.status === 'waiting'
+                    ? t.upload.waiting
+                    : it.status === 'preparing'
+                      ? t.upload.preparing
+                      : it.status === 'validating'
+                        ? t.upload.validating
+                        : it.status === 'done'
+                          ? t.upload.done
+                          : it.status === 'error'
+                            ? errorMessage(it.error, t)
+                            : it.status === 'canceled'
+                              ? t.jobs.canceled
+                              : `${bytes(it.sent, locale)} / ${bytes(it.size, locale)}${it.speed ? ` · ${f(t.upload.speed, { speed: bytes(it.speed, locale) })}` : ''}${left != null ? ` · ${f(t.upload.remaining, { time: left > 90 ? `${Math.ceil(left / 60)} min` : `${Math.ceil(left)} s` })}` : ''}`}
                 </p>
               </div>
               {it.status === 'done' ? (

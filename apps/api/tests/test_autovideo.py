@@ -105,3 +105,39 @@ def test_answers_take_a_choice_per_shot(client, tiny_video):
     assert r.status_code == 200, r.text
     too_many = {f"shot:s{i}": "drop" for i in range(300)}
     assert client.post("/api/autovideo", json={"projectId": p["id"], "answers": too_many}).status_code == 422
+
+
+def test_format_is_its_own_field(client, tiny_video):
+    p, _ = _round(client, tiny_video)
+    job = client.post("/api/autovideo", json={"projectId": p["id"], "kind": "highlight", "preference": "YouTube"}).json()
+    claimed = client.post("/api/internal/jobs/claim", json={"kinds": ["compose"], "worker": "x"}, headers=_internal()).json()["job"]
+    assert claimed["id"] == job["id"]
+    assert claimed["payload"]["kind"] == "highlight" and claimed["payload"]["preference"] == "YouTube"
+    assert client.post("/api/autovideo", json={"projectId": p["id"], "kind": "cinema"}).status_code == 422
+
+
+def test_checkpoint_keeps_the_ai_plan_for_a_retry(client, tiny_video):
+    """A failure after the AI calls must not make the retry call (and pay for) them again."""
+    p, _ = _round(client, tiny_video)
+    _finish_media_jobs(p["id"])
+    auth = _internal()
+    job = client.post("/api/autovideo", json={"projectId": p["id"]}).json()
+    # Not running yet: nothing to keep.
+    assert client.post(f"/api/internal/jobs/{job['id']}/checkpoint", json={"data": {"x": 1}}, headers=auth).status_code == 409
+    client.post("/api/internal/jobs/claim", json={"kinds": ["compose"], "worker": "x"}, headers=auth)
+    plan = {"kind": "youtube", "includeShotIds": [], "title": "T"}
+    usage = {"calls": 1, "inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 0, "cacheWriteTokens": 0}
+    r = client.post(f"/api/internal/jobs/{job['id']}/checkpoint", json={"data": {"plan": plan, "usage": usage}}, headers=auth)
+    assert r.status_code == 200, r.text
+    client.post(f"/api/internal/jobs/{job['id']}/fail", json={"error": "boom", "retry": True}, headers=auth)
+
+    from golf_api.db import session_scope
+    from golf_api.models import Job
+
+    with session_scope() as db:
+        j = db.get(Job, job["id"])
+        assert j.status == "queued"
+        j.run_after = j.created_at  # no backoff in the test
+    again = client.post("/api/internal/jobs/claim", json={"kinds": ["compose"], "worker": "x"}, headers=auth).json()["job"]
+    assert again["payload"]["plan"] == plan and again["payload"]["usage"] == usage
+    assert again["payload"]["project_id"] == p["id"]

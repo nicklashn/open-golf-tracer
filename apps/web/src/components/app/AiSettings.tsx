@@ -5,7 +5,7 @@
  * and never comes back – the page only ever sees it masked. "ChatGPT (your plan)" signs in with
  * ChatGPT instead (OpenAI's flow for local apps); the tokens stay on the server.
  */
-import { CHATGPT_USAGE_URL, typicalTokenEstimate } from '@golf/compose';
+import { CHATGPT_USAGE_URL, DEFAULT_AI_MAX_TOKENS, largeRound, typicalTokenEstimate, videoTokenEstimate } from '@golf/compose';
 import { ExternalLink, LogOut, PlugZap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import { Select, Switch } from '@/components/ui/controls';
 import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
 import { Field, Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/toast';
+import { aiErrorText } from '@/lib/aiError';
 import { api, errorMessage } from '@/lib/api';
 import type { JobInfo } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
@@ -20,6 +21,8 @@ import { useI18n } from '@/lib/i18n/client';
 type Provider = 'server' | 'none' | 'ollama' | 'openai-compatible' | 'anthropic' | 'chatgpt';
 
 export interface AiSettingsInfo {
+  /** Only on a save: the stored key was removed because the provider or address changed. */
+  keyCleared?: boolean;
   provider: Provider;
   model: string;
   baseUrl: string;
@@ -87,15 +90,22 @@ export function ManageUsage() {
   );
 }
 
-/** "≈ N tokens per video" for a full round with what is switched on, and a warning when the ceiling is too low. */
+/**
+ * "≈ N tokens per video" for a full round with what is switched on (both plan calls, and the
+ * pictures' own allowance), what a large round needs, and a warning when the ceiling is too low.
+ */
 function TokenBudget({ maxTokens, vision }: { maxTokens: number; vision: boolean }) {
   const { t, f, locale } = useI18n();
   const e = useMemo(() => typicalTokenEstimate({ vision }), [vision]);
+  const large = useMemo(() => {
+    const r = largeRound();
+    return videoTokenEstimate(r.summary, '', r.plan).needed;
+  }, []);
   const n = (v: number) => (Math.ceil(v / 100) * 100).toLocaleString(locale === 'da' ? 'da-DK' : 'en-GB');
   return (
     <div className="grid gap-1 text-[13px]" data-testid="ai-estimate">
       <p className="text-fg-muted">
-        {f(t.aiPlan.estimate, { total: n(e.total), plan: n(e.plan) })}
+        {f(t.aiPlan.estimate, { total: n(e.total), plan: n(e.plan) })} {f(t.aiPlan.estimateLarge, { needed: n(large) })}
         {vision ? ` ${f(t.aiPlan.estimateVision, { n: n(e.vision) })}` : ''}
       </p>
       {maxTokens < e.needed ? (
@@ -104,6 +114,58 @@ function TokenBudget({ maxTokens, vision }: { maxTokens: number; vision: boolean
         </p>
       ) : null}
     </div>
+  );
+}
+
+/** Provider and origin a stored key is sent to (the server drops the key when this changes). */
+export function keyTarget(provider: string, baseUrl: string, defaults: AiSettingsInfo['defaults']): string {
+  const url = baseUrl.trim() || defaults[provider]?.baseUrl || '';
+  try {
+    return `${provider} ${new URL(url).origin}`;
+  } catch {
+    return `${provider} ${url}`;
+  }
+}
+
+const MIN_TOKENS = 500;
+const MAX_TOKENS = 200_000;
+const clampTokens = (v: number) => Math.min(MAX_TOKENS, Math.max(MIN_TOKENS, Math.round(v)));
+
+/**
+ * The ceiling as typed: the text is the user's while they type (clearing the field to type a new
+ * number does not snap back to the default); the number follows whenever the text is one, and
+ * the field shows the number in range again when it loses focus.
+ */
+function TokenField({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const { t } = useI18n();
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    setText((x) => (Number(x) === value ? x : String(value)));
+  }, [value]);
+  return (
+    <Field label={t.ai.maxTokens} hint={t.ai.maxTokensHint}>
+      {(p) => (
+        <Input
+          {...p}
+          type="number"
+          min={MIN_TOKENS}
+          max={MAX_TOKENS}
+          step={500}
+          value={text}
+          data-testid="ai-max-tokens"
+          onChange={(e) => {
+            setText(e.target.value);
+            const v = Number(e.target.value);
+            if (e.target.value.trim() && Number.isFinite(v) && v > 0) onChange(Math.round(v));
+          }}
+          onBlur={() => {
+            const v = clampTokens(value);
+            setText(String(v));
+            if (v !== value) onChange(v);
+          }}
+        />
+      )}
+    </Field>
   );
 }
 
@@ -235,9 +297,9 @@ function ChatGptPanel({ info, model, onModel, reload }: { info: AiSettingsInfo; 
 export function AiSettingsForm() {
   const { t, f } = useI18n();
   const [info, setInfo] = useState<AiSettingsInfo | null>(null);
-  const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: 16000, vision: false });
+  const [form, setForm] = useState({ provider: 'server' as Provider, model: '', baseUrl: '', apiKey: '', maxTokens: DEFAULT_AI_MAX_TOKENS, vision: false });
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
-  const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
+  const [test, setTest] = useState<{ ok: boolean; text: string; limit?: boolean } | null>(null);
 
   const [welcome, setWelcome] = useState(false);
 
@@ -276,6 +338,9 @@ export function AiSettingsForm() {
 
   const own = form.provider !== 'server' && form.provider !== 'none' && form.provider !== 'chatgpt';
   const defaults = own ? info?.defaults[form.provider] : undefined;
+  // Saving without a new key while pointing somewhere else removes the stored one.
+  const keyWillClear =
+    !!info?.keyMasked && !form.apiKey.trim() && keyTarget(info.provider, info.baseUrl, info.defaults) !== keyTarget(form.provider, form.baseUrl, info.defaults);
 
   async function save(apiKey?: string) {
     setBusy('save');
@@ -284,7 +349,7 @@ export function AiSettingsForm() {
         provider: form.provider,
         model: form.model,
         baseUrl: form.baseUrl,
-        maxTokens: form.maxTokens,
+        maxTokens: clampTokens(form.maxTokens),
         vision: form.vision,
         ...(apiKey !== undefined ? { apiKey } : {}),
       };
@@ -292,7 +357,8 @@ export function AiSettingsForm() {
       setInfo(s);
       setForm((x) => ({ ...x, apiKey: '' }));
       setTest(null);
-      toast.success(t.ai.saved);
+      if (s.keyCleared) toast.info(t.ai.saved, t.ai.keyCleared);
+      else toast.success(t.ai.saved);
     } catch (e) {
       toast.error(errorMessage(e, t));
     } finally {
@@ -309,13 +375,20 @@ export function AiSettingsForm() {
         await new Promise((r) => setTimeout(r, 1000));
         const { jobs } = await api<{ jobs: JobInfo[] }>('/jobs');
         const j = jobs.find((x) => x.id === job.id);
+        // The test has a lane of its own in the exporter: still queued after a while means no exporter.
+        if (j?.status === 'queued' && i === 4) setTest({ ok: true, text: t.ai.testQueued });
+        if (j?.status === 'queued' && i >= 30) {
+          await api(`/jobs/${job.id}/cancel`, { method: 'POST' }).catch(() => {});
+          setTest({ ok: false, text: t.ai.testNotStarted });
+          return;
+        }
         if (j?.status === 'succeeded') {
           const r = j.result as { model: string; usage: { inputTokens: number; outputTokens: number }; ms: number };
           setTest({ ok: true, text: f(t.ai.testOk, { model: r.model, tokens: r.usage.inputTokens + r.usage.outputTokens, ms: r.ms }) });
           return;
         }
         if (j && (j.status === 'failed' || j.status === 'canceled')) {
-          setTest({ ok: false, text: `${t.ai.testFailed}: ${j.error}` });
+          setTest({ ok: false, text: `${t.ai.testFailed}: ${aiErrorText(j.error, t).text}`, limit: aiErrorText(j.error, t).limit });
           return;
         }
       }
@@ -351,19 +424,7 @@ export function AiSettingsForm() {
       {form.provider === 'chatgpt' ? (
         <>
           <ChatGptPanel info={info} model={form.model} onModel={(m) => setForm((x) => ({ ...x, model: m }))} reload={reload} />
-          <Field label={t.ai.maxTokens} hint={t.ai.maxTokensHint}>
-            {(p) => (
-              <Input
-                {...p}
-                type="number"
-                min={500}
-                max={200000}
-                step={500}
-                value={form.maxTokens}
-                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 16000 })}
-              />
-            )}
-          </Field>
+          <TokenField value={form.maxTokens} onChange={(v) => setForm((x) => ({ ...x, maxTokens: v }))} />
         </>
       ) : null}
       {own ? (
@@ -386,7 +447,10 @@ export function AiSettingsForm() {
             )}
           </Field>
           {form.provider !== 'ollama' ? (
-            <Field label={t.ai.apiKey} hint={info.keyMasked ? `${f(t.ai.keySaved, { key: info.keyMasked })} ${t.ai.apiKeyHint}` : t.ai.apiKeyHint}>
+            <Field
+              label={t.ai.apiKey}
+              hint={info.keyMasked && !keyWillClear ? `${f(t.ai.keySaved, { key: info.keyMasked })} ${t.ai.apiKeyHint}` : t.ai.apiKeyHint}
+            >
               {(p) => (
                 <Input
                   {...p}
@@ -399,19 +463,7 @@ export function AiSettingsForm() {
               )}
             </Field>
           ) : null}
-          <Field label={t.ai.maxTokens} hint={t.ai.maxTokensHint}>
-            {(p) => (
-              <Input
-                {...p}
-                type="number"
-                min={500}
-                max={200000}
-                step={500}
-                value={form.maxTokens}
-                onChange={(e) => setForm({ ...form, maxTokens: Number(e.target.value) || 16000 })}
-              />
-            )}
-          </Field>
+          <TokenField value={form.maxTokens} onChange={(v) => setForm((x) => ({ ...x, maxTokens: v }))} />
         </>
       ) : null}
       {form.provider !== 'none' ? (
@@ -433,6 +485,11 @@ export function AiSettingsForm() {
       {form.provider !== 'none' && (form.provider !== 'server' || info.server.provider !== 'none') ? (
         <TokenBudget maxTokens={form.provider === 'server' ? info.effective.maxTokens : form.maxTokens} vision={form.vision} />
       ) : null}
+      {keyWillClear ? (
+        <p role="status" className="text-[13px] text-accent-fg" data-testid="ai-key-will-clear">
+          {t.ai.keyWillClear}
+        </p>
+      ) : null}
       <p className="text-[13px] text-fg-muted" data-testid="ai-privacy">
         {aiPrivacy(t, info.effective)}
       </p>
@@ -453,7 +510,7 @@ export function AiSettingsForm() {
       {test ? (
         <p role="status" className={test.ok ? 'text-sm text-fg' : 'text-sm text-accent-fg'}>
           {test.text}
-          {!test.ok && test.text.includes(CHATGPT_USAGE_URL) ? (
+          {!test.ok && test.limit ? (
             <>
               {' '}
               <ManageUsage />

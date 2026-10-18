@@ -30,7 +30,11 @@ Anthropic, paste a key if the service needs one, and click **Test connection** �
 
 To build the installer yourself: `powershell -ExecutionPolicy Bypass -File installer\build.ps1`
 (needs Git and [Inno Setup 6](https://jrsoftware.org/isinfo.php): `winget install JRSoftware.InnoSetup`).
-Pushing a `v*` tag builds it on GitHub Actions and attaches it to the release.
+Everything it bundles is pinned to an exact version and SHA-256 in `installer/versions.psd1`, and the
+Python packages come from `requirements-lock.txt` (with hashes). Releases are made by GitHub Actions,
+see [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
+The installer owns the program folder except `data\` and `.env`: an update replaces everything else,
+`models\` included, so keep a detector model of your own elsewhere (`GOLF_ONNX_MODEL` in `.env`).
 
 The steps below are for running from the source code.
 
@@ -53,7 +57,9 @@ The steps below are for running from the source code.
    a minute. The browser then opens at <http://localhost:3000>.
 3. Click **"Try a sample video"** or upload your own.
 
-Close the window to stop the app.
+Close the window to stop the app. When another program already uses port 3000 or 8000, `start.bat`
+(and the installed app) pick free ports and say so in the window; starting it a second time only
+opens the browser on the running copy.
 
 ### macOS / Linux
 
@@ -89,6 +95,37 @@ several). Other names are refused.
 > projects. Only do this on a network you trust (your home network) – never on public Wi-Fi or
 > directly on the internet. The API itself always stays on `127.0.0.1`; the web app proxies to it.
 
+## Security and privacy
+
+- **Other programs and users on this PC can reach it.** `127.0.0.1` keeps other devices out, but
+  any program or Windows/macOS/Linux user account on the same PC can open the app and its API
+  (`127.0.0.1:8000`) – there is no login. Don't run it on a PC shared with people you don't
+  trust. Web sites in your browser can't: writes from other sites are refused, and so are host
+  names other than localhost, IP addresses and `ALLOWED_HOSTS` (DNS rebinding).
+- **Secrets on disk.** The AI key and the ChatGPT sign-in tokens are kept in the database in
+  `data/`. On Windows they are encrypted with DPAPI for your Windows user (a copied database or
+  backup can't be read elsewhere, and after moving to another PC you enter the key or sign in
+  again). On macOS/Linux they are stored as plain text, as are `AI_API_KEY` in `.env` and the
+  app's own keys in `data/.secret` and `data/.internal-token` on every OS: they are protected
+  only by the permissions of your user folder. Keys never reach the browser, logs, projects or
+  the data export.
+
+### What leaves your PC
+
+Videos, projects and exports stay on your PC. These are the only things sent elsewhere:
+
+| What | To | When |
+|---|---|---|
+| A video's GPS position | OpenStreetMap's public Overpass servers (`overpass-api.de`, `maps.mail.ru`, `overpass.kumi.systems`) | During each analysis of a video with GPS, to find the course, hole and distance to the green. Turn it off under **Settings → Privacy** ("Look courses up on OpenStreetMap") or with `GEO_LOOKUP=0` |
+| The map position / your search text | Overpass and Nominatim (`nominatim.openstreetmap.org`) | When you open "Measure on the map" or search in it |
+| Map tiles for the area shown | `tile.openstreetmap.org`, satellite tiles from Esri (`server.arcgisonline.com`) | Loaded by your browser while the map is open |
+| A text summary of the round (project and course name, date, hole, club and distances per shot – never videos or file names) and your wish for the video | The AI provider you chose (OpenAI-compatible, Anthropic, ChatGPT; nothing with Ollama on your own PC) | Only with "Make a video for me" and an AI provider chosen. With still frames (`AI_VISION` / Settings → AI) a few frames from the green are sent too |
+| Sign-in and token refresh | OpenAI (`auth.openai.com`, `api.openai.com`) | Only with "ChatGPT (your plan)". The tokens stay on the server |
+| A download of the ball-detection model | GitHub (this repository's releases) | Once, if `models/` doesn't have it yet |
+| The app's version (in the `User-Agent`) when asking for the newest release | GitHub (`api.github.com`) | At most once a day, from the API (not your browser). Turn it off under **Settings → About** ("Check for new versions"), see [docs/privacy.md](docs/privacy.md) |
+
+There is no telemetry (Next.js and Hugging Face telemetry are switched off).
+
 ## Configuration
 
 Everything has sensible defaults, and nothing has to be set. To change something, edit `.env`
@@ -105,6 +142,7 @@ Everything has sensible defaults, and nothing has to be set. To change something
 | `EXPORT_CPU` | `1` forces CPU encoding even when a GPU encoder exists |
 | `NEXT_PUBLIC_MAP_SATELLITE` | Satellite map in "Measure on map": empty = auto, `1` = always, `0` = never |
 | `LISTEN_HOST`, `ALLOWED_HOSTS` | Network access, see above |
+| `GEO_LOOKUP` | `0` never looks courses up on OpenStreetMap from a video's GPS, see [What leaves your PC](#what-leaves-your-pc) |
 | `LOG_LEVEL` | `INFO` by default |
 | `AI_PROVIDER`, `AI_MODEL`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MAX_TOKENS`, `AI_VISION` | Optional AI model for "Make video for me", see below |
 
@@ -142,11 +180,26 @@ you turn that on (`AI_VISION`, below).
 | `AI_MODEL` | provider default | e.g. `llama3.1`, `gpt-4o-mini`, `claude-haiku-5-5` |
 | `AI_BASE_URL` | provider default | e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://openrouter.ai/api/v1` |
 | `AI_API_KEY` | – | Never sent to the browser, logged, or stored in projects or the data export |
-| `AI_MAX_TOKENS` | `16000` | Token ceiling for the plan calls of one video (in + out); above it the plan is made by fixed rules and a note says why – the video is still made. Settings → AI shows about how many tokens a full round needs |
+| `AI_MAX_TOKENS` | `20000` | Token ceiling for the plan calls of one video (in + out); above it the plan is made by fixed rules and a note says why – the video is still made. Settings → AI shows about how many tokens a full round needs |
 | `AI_VISION` | `0` | `1` = when the putt count on a hole is unsure, the model looks at up to 8 still frames from the green instead of asking you: taken at each putt the analysis found (strike, where the ball stopped, 1 s after the last) and cropped around ball, cup and player (max 768 px). The model answers simple questions per frame and the app counts. Needs a model that can see images (Ollama's default `llama3.1` cannot: use e.g. `llama3.2-vision`); one call per hole, at most 6 per video, up to about 7 000 tokens each, from a separate allowance of 30 000 tokens on top of `AI_MAX_TOKENS`. With Ollama the frames stay on the PC; with a cloud provider they are sent there. Answers below 0.7 confidence are asked as usual |
 
 The same can be chosen in the app under **Settings → AI** (with "Test connection"); otherwise the
 `.env` defaults are used. Token usage is shown when the video is done.
+
+With **Ollama** the app talks to Ollama's own API (`/api/chat`, the `/v1` in the address is fine) and
+sets the context window (`num_ctx`) to what the round needs: Ollama's default of 2–4k tokens would
+silently cut a whole round short. If you point other tools at Ollama's OpenAI endpoint, set
+`OLLAMA_CONTEXT_LENGTH=16384` (or more) on the Ollama server for the same reason. OpenAI's reasoning
+models (`gpt-5`, `o3`, `o4-mini` …) work too: they get `max_completion_tokens` and no temperature.
+
+A request that timed out is never sent again (the provider may already have billed it; its tokens
+are counted), and a video that has to be made again after a later error reuses the plan the AI
+already made – `AI_MAX_TOKENS` is per video, not per attempt.
+
+Without AI (and with it), a made video gets a **text for YouTube**: a description from the facts of the
+round (course, day, score, highlights – or the AI's description) and chapters with exact times from the
+timeline (`0:00 Intro`, `1:12 Hul 1 – par 4 – birdie` …). It is shown when the video is done, in the
+export dialog and under My videos, with a **Copy for YouTube** button.
 
 #### Use your ChatGPT plan (Sign in with ChatGPT, preview)
 
@@ -202,6 +255,35 @@ expires or you disconnect the app in ChatGPT, sign in again.
   (detector sessions, analyses at once, within 80 % of the graphics memory); out-of-memory errors step it down.
 - **Settings:** language, units, theme and a data export of all your projects. Every feature is free.
 - English and Danish, light and dark theme, keyboard shortcuts (`?` in the editor), WCAG AA.
+
+## Backup and restore
+
+Everything the app keeps is in its data folder: `%LOCALAPPDATA%\Programs\Open Golf Tracer\data`
+for the Windows installer, `data/` in a source checkout. **Settings → About** shows the path and
+opens it.
+
+- **Back up:** stop the app (close the black window, or Ctrl+C), then copy the whole `data` folder
+  to another disk or a cloud folder. It holds the database (projects, settings), the uploaded
+  videos, exports and logs. Keep the copy private: the AI key and the ChatGPT sign-in, if you set
+  them up, are stored in the database too.
+- **Restore:** stop the app, put the copied `data` folder back in place of the current one, and start
+  the app. Use the same or a newer app version than the one that made the copy; a newer version
+  updates the database by itself when it starts.
+- **Settings → Your data → Download my data** is a JSON export of your projects and settings for
+  reading or moving to another tool. It is not a backup: it has no videos and cannot be imported
+  back into the app.
+
+## Logs, bug reports and updates
+
+- The launcher writes everything the app prints to `data/logs/app-YYYYMMDD.log` (the last 7 days are
+  kept), so the messages are still there after the window is closed. Keys and tokens are masked.
+- Found a bug? **Settings → About → Save diagnostics** saves a zip with the version, your PC
+  (OS, GPU, FFmpeg), the performance settings, recent log lines and job summaries, with keys and
+  tokens removed. Attach it to a [bug report](https://github.com/nicklashn/open-golf-tracer/issues/new?template=bug.yml).
+  Security problems: see [SECURITY.md](SECURITY.md).
+- Once a day the app asks GitHub whether a newer version exists and shows a small banner if so.
+  Turn it off under **Settings → About**. What is sent: [docs/privacy.md](docs/privacy.md).
+- What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 

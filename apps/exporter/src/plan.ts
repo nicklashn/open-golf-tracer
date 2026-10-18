@@ -1,7 +1,14 @@
 /**
- * Builds the ffmpeg command for an export: clips (trim, speed, freeze), reframing crop,
- * scaling, HDR keep/tone-map, audio (clip audio, music, fades) and the RGBA overlay input
- * from stdin. Pure function of the project, so it is unit-tested without running ffmpeg.
+ * Builds the ffmpeg commands for an export. Every clip is rendered on its own (trim, speed,
+ * freeze, reframing crop, scaling, HDR keep/tone-map and its overlay from stdin) into a
+ * segment, the sound of the whole export is mixed once (clip audio, music, fades), and the
+ * segments are joined without re-encoding. One clip at a time keeps memory flat however many
+ * cuts a round has. Pure functions of the project, so they are unit-tested without ffmpeg.
+ *
+ * Timing: every clip boundary is snapped to the output frame grid, so a clip gets exactly
+ * round(end·fps) − round(start·fps) frames and the export has round(duration·fps) frames.
+ * `times` says which timeline second each export frame shows; the overlay is rendered at
+ * those times and the sound is cut at the same frame boundaries, so nothing drifts.
  */
 import {
   aspectRatio,
@@ -34,31 +41,72 @@ export interface Encoders {
   tonemap: string;
 }
 
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface PlanInput {
   project: Project;
   settings: ExportSettings;
   media: Record<string, MediaFile>;
   maxShortSide?: number;
   encoders: Encoders;
-  output: string;
-  /** Overlay box (output px); null = nothing drawn. */
-  overlay: { x: number; y: number; w: number; h: number } | null;
+}
+
+/** Output frame rate as a fraction (59.94 is 60000/1001, so frame times are exact). */
+export interface Rate {
+  num: number;
+  den: number;
+}
+
+/** The part of one clip that is in the export. */
+export interface Segment {
+  /** Index in project.clips. */
+  clip: number;
+  /** First export frame of the segment, and how many frames it has. */
+  start: number;
+  frames: number;
+  /** Clip frames left out at the start (a range that begins inside the clip). */
+  skip: number;
+}
+
+/** Overlay of one segment: one box, and the segment frames that are piped (others draw nothing). */
+export interface SegmentOverlay {
+  box: Box;
+  /** Segment-local frame ranges [from, to), in order; frames outside them are not sent. */
+  runs: [number, number][];
 }
 
 export interface Plan {
-  args: string[];
   width: number;
   height: number;
   fps: number;
+  rate: Rate;
   duration: number;
   /** Timeline seconds of output frame 0 (range start). */
   t0: number;
   frames: number;
+  /** Timeline frame (on the output grid) of export frame 0. */
+  firstFrame: number;
+  /** Timeline second shown by each export frame. */
+  times: Float64Array;
+  segments: Segment[];
   hdr: boolean;
+  /** HDR was asked for, but the clips mix HDR and SDR (or HDR kinds), so the export is SDR. */
+  mixedHdr: boolean;
   aspect: Aspect;
+  /** What the command builders need. */
+  project: Project;
+  media: Record<string, MediaFile>;
+  encoders: Encoders;
+  color: Record<string, string>;
 }
 
 const f6 = (v: number) => (Math.round(v * 1e6) / 1e6).toString();
+const SR = 48000;
 
 /** atempo only accepts 0.5..2 (100 in newer builds); chain it for larger factors. */
 export function atempoChain(speed: number): string[] {
@@ -76,158 +124,190 @@ export function atempoChain(speed: number): string[] {
   return out;
 }
 
-/** ffmpeg expression for one crop coordinate over a clip (t = seconds since clip start). */
-export function cropExpr(keys: readonly ReframeKey[], axis: 'cx' | 'cy', clipStart: number, srcLen: number, cropLen: number): string {
-  const px = (k: ReframeKey) => Math.min(Math.max(k[axis] * srcLen - cropLen / 2, 0), srcLen - cropLen);
-  if (keys.length === 0) return f6((srcLen - cropLen) / 2);
-  if (keys.length === 1) return f6(px(keys[0]));
-  const T = `(t+${f6(clipStart)})`;
-  // Nested if: before the first key, between keys (smoothstep), after the last.
-  let expr = f6(px(keys[keys.length - 1]));
+/**
+ * ffmpeg expression of one reframe key value at timeline time `T` (an ffmpeg expression), as
+ * reframeAt() has it: the first key's value before it, smoothstep between keys, the last after.
+ */
+export function keyExpr(keys: readonly ReframeKey[], get: (k: ReframeKey) => number, T: string): string {
+  if (keys.length === 1) return f6(get(keys[0]));
+  let expr = f6(get(keys[keys.length - 1]));
   for (let i = keys.length - 1; i >= 1; i--) {
     const a = keys[i - 1];
     const b = keys[i];
     const span = Math.max(1e-6, b.t - a.t);
     const u = `clip((${T}-${f6(a.t)})/${f6(span)},0,1)`;
-    const seg = `(${f6(px(a))}+(${f6(px(b) - px(a))})*${u}*${u}*(3-2*${u}))`;
+    const seg = `(${f6(get(a))}+(${f6(get(b) - get(a))})*${u}*${u}*(3-2*${u}))`;
     expr = `if(lt(${T},${f6(b.t)}),${seg},${expr})`;
   }
-  return `if(lt(${T},${f6(keys[0].t)}),${f6(px(keys[0]))},${expr})`;
+  return `if(lt(${T},${f6(keys[0].t)}),${f6(get(keys[0]))},${expr})`;
+}
+
+/**
+ * ffmpeg expression for one crop coordinate over a clip (t = seconds since clip start): the
+ * centre is interpolated between the keys and the crop then kept in the frame, as cropAt() does.
+ */
+export function cropExpr(keys: readonly ReframeKey[], axis: 'cx' | 'cy', clipStart: number, srcLen: number, cropLen: number): string {
+  if (keys.length === 0) return f6((srcLen - cropLen) / 2);
+  const c = keyExpr(keys, (k) => k[axis], `(t+${f6(clipStart)})`);
+  return `clip(${c}*${srcLen}-${f6(cropLen / 2)},0,${f6(srcLen - cropLen)})`;
+}
+
+/** The nearest even size (yuv420p), at most `max`. */
+const even = (v: number, max: number) => Math.min(max, Math.max(2, Math.round(v / 2) * 2));
+
+/**
+ * The filters that cut the reframed picture out of a clip's frames (before scaling to W×H), with
+ * the keys' zoom as cropAt() applies it: the crop of the target aspect (cw×ch at zoom 1) divided by
+ * the zoom. One zoom for all keys is a plain crop of that size. A zoom that changes needs a crop
+ * whose size changes, which ffmpeg's crop can't do: the zoom-1 crop is placed so that it holds the
+ * zoomed crop (it always can – see below), and zoompan cuts the zoomed crop out of it and scales
+ * it to W×H.
+ */
+export function reframeFilters(
+  keys: readonly ReframeKey[],
+  clipStart: number,
+  src: { width: number; height: number },
+  cw: number,
+  ch: number,
+  out: { W: number; H: number; rate: string },
+): string[] {
+  const { width: mw, height: mh } = src;
+  const zooms = new Set(keys.map((k) => k.zoom ?? 1));
+  if (zooms.size <= 1) {
+    const z = keys.length ? (keys[0].zoom ?? 1) : 1;
+    const w = z === 1 ? cw : even(cw / z, cw);
+    const h = z === 1 ? ch : even(ch / z, ch);
+    if (w >= mw && h >= mh) return [];
+    return [`crop=w=${w}:h=${h}:x='${cropExpr(keys, 'cx', clipStart, mw, w)}':y='${cropExpr(keys, 'cy', clipStart, mh, h)}':exact=1`];
+  }
+  // Per axis at timeline time T: the zoomed crop's length L = len/Z and its start s (centre kept in
+  // the frame); the zoom-1 crop starts at b = clip(s + L/2 - len/2, 0, src - len). Unclamped, b
+  // centres the zoom-1 crop on the zoomed one; clamped at 0, s + L/2 < len/2, so s + L < len;
+  // clamped at the far edge the same mirrored: the zoomed crop is always inside.
+  const axis = (T: string, k: 'cx' | 'cy', srcLen: number, len: number) => {
+    const Z = keyExpr(keys, (x) => x.zoom ?? 1, T);
+    const L = `(${len}/${Z})`;
+    const start = `clip(${keyExpr(keys, (x) => x[k], T)}*${srcLen}-${L}/2,0,${srcLen}-${L})`;
+    const base = `clip(${start}+${L}/2-${len / 2},0,${srcLen - len})`;
+    return { Z, start, base };
+  };
+  const T = `(t+${f6(clipStart)})`;
+  const Ti = `(it+${f6(clipStart)})`;
+  const x = axis(T, 'cx', mw, cw);
+  const y = axis(T, 'cy', mh, ch);
+  const xi = axis(Ti, 'cx', mw, cw);
+  const yi = axis(Ti, 'cy', mh, ch);
+  return [
+    `crop=w=${cw}:h=${ch}:x='${x.base}':y='${y.base}':exact=1`,
+    // zoompan's x/y are in the zoom-1 crop; `it` is the frame's time, like crop's `t`.
+    `zoompan=z='${xi.Z}':x='${xi.start}-${xi.base}':y='${yi.start}-${yi.base}':d=1:s=${out.W}x${out.H}:fps=${out.rate}`,
+  ];
+}
+
+/** 29.97/59.94/23.976 as their exact NTSC fractions, whole rates as themselves. */
+export function frameRate(fps: number): Rate {
+  if (Math.abs(fps - Math.round(fps)) < 1e-3) return { num: Math.round(fps), den: 1 };
+  const ntsc = Math.round(fps * 1.001);
+  if (Math.abs(fps - ntsc / 1.001) < 5e-3) return { num: ntsc * 1000, den: 1001 };
+  return { num: Math.round(fps * 1000), den: 1000 };
+}
+
+const rateArg = (r: Rate) => (r.den === 1 ? `${r.num}` : `${r.num}/${r.den}`);
+
+/** Same transfer and primaries (the output can carry only one set of HDR tags). */
+function sameHdrKind(a: MediaFile, b: MediaFile): boolean {
+  return (a.color?.color_trc ?? '') === (b.color?.color_trc ?? '') && (a.color?.color_primaries ?? '') === (b.color?.color_primaries ?? '');
 }
 
 export function buildPlan(inp: PlanInput): Plan {
   const { project, settings, media, encoders } = inp;
   const first = project.clips[0];
-  if (!first) throw new Error('Projektet har ingen klip.');
+  if (!first) throw new Error('The project has no clips');
   const primary = media[first.mediaId];
-  if (!primary) throw new Error('Videoen mangler.');
+  if (!primary) throw new Error('The video is missing');
+  project.clips.forEach((c, i) => {
+    if (!media[c.mediaId]) throw new Error(`Clip ${i + 1} is missing its video`);
+  });
   // Shorts are vertical by definition.
   const aspect: Aspect = settings.preset === 'shorts' ? '9:16' : project.format.aspect;
   const proj: Project = aspect === project.format.aspect ? project : { ...project, format: { ...project.format, aspect } };
   const { width: W, height: H } = outputSize(aspect, settings.preset, primary, inp.maxShortSide);
   const fps = settings.fps === 'source' ? Math.min(60, Math.round(primary.fps * 1000) / 1000 || 30) : settings.fps;
+  const rate = frameRate(fps);
+  const F = rate.num / rate.den;
+  // HDR is kept only when every clip is HDR of the same kind: SDR clips tagged as HLG/PQ
+  // would look wrong, so a mix is exported as SDR (the HDR clips tone-mapped).
+  const clipMedia = project.clips.map((c) => media[c.mediaId]);
+  const allHdr = clipMedia.every((m) => m.hdr && sameHdrKind(m, primary));
+  const keepHdr = settings.hdr === 'keep' && allHdr;
+  const mixedHdr = settings.hdr === 'keep' && !allHdr && clipMedia.some((m) => m.hdr);
+
+  // The frame grid: clip i covers frames [B[i], B[i+1]) of the timeline.
   const total = timelineDuration(project);
+  const starts = clipStarts(project.clips);
+  const grid = (t: number) => Math.round(t * F);
+  const B = [...starts.map(grid), grid(total)];
   const t0 = settings.range ? Math.max(0, Math.min(settings.range.start, total)) : 0;
   const t1 = settings.range ? Math.max(t0 + 0.1, Math.min(settings.range.end, total)) : total;
-  const duration = t1 - t0;
-  const keepHdr = settings.hdr === 'keep' && primary.hdr;
-  const starts = clipStarts(project.clips);
-  const ratio = aspectRatio(aspect, primary);
-  const keys = proj.format.reframe.mode === 'center' || aspect === 'original' ? [] : proj.format.reframe.keyframes;
+  const g0 = Math.min(grid(t0), B[B.length - 1] - 1);
+  const g1 = Math.min(B[B.length - 1], Math.max(g0 + 1, grid(t1)));
+  if (g1 <= g0) throw new Error('The video is too short to export');
 
-  const args: string[] = ['-y', '-hide_banner', '-nostdin', '-v', 'error'];
-  const graph: string[] = [];
-  let input = 0;
-  const pairs: string[] = [];
-  const pixfmt = keepHdr ? 'yuv420p10le' : 'yuv420p';
-
+  const segments: Segment[] = [];
+  const times = new Float64Array(g1 - g0);
   project.clips.forEach((c, i) => {
-    const m = media[c.mediaId];
-    if (!m) throw new Error(`Klip ${i + 1} mangler sin video.`);
+    const a = Math.max(B[i], g0);
+    const b = Math.min(B[i + 1], g1);
+    if (b <= a) return;
+    segments.push({ clip: i, start: a - g0, frames: b - a, skip: a - B[i] });
+    // The clip shows clip-local second j/fps at its frame j (see segmentArgs); a frame that
+    // rounding puts at the clip's very end still belongs to the clip.
     const d = clipDuration(c);
-    const vi = input++;
-    if (c.kind === 'video') args.push('-ss', f6(c.in), '-t', f6(c.out - c.in), '-i', m.path);
-    else args.push('-ss', f6(Math.max(0, Math.min(c.at, m.duration - 0.05))), '-i', m.path);
-    // Crop in source pixels for the project's aspect (panning keyframes on the timeline).
-    let cw: number;
-    let ch: number;
-    if (m.width / m.height > ratio) {
-      ch = m.height;
-      cw = ch * ratio;
-    } else {
-      cw = m.width;
-      ch = cw / ratio;
-    }
-    cw = Math.max(2, Math.floor(cw / 2) * 2);
-    ch = Math.max(2, Math.floor(ch / 2) * 2);
-    const v: string[] = [];
-    if (c.kind === 'video') v.push(`setpts=(PTS-STARTPTS)/${f6(c.speed)}`);
-    else v.push('trim=end_frame=1', 'setpts=PTS-STARTPTS', `tpad=stop_mode=clone:stop_duration=${f6(d)}`);
-    if (m.hdr && !keepHdr) v.push(encoders.tonemap);
-    v.push(`fps=${f6(fps)}`);
-    const blurFill = proj.format.fill === 'blur' && aspect !== 'original' && Math.abs(m.width / m.height - ratio) > 0.01;
-    if (blurFill) {
-      // The whole video centred on a blurred, darkened copy of itself – placed exactly like
-      // cropAt() places it, so tracers and graphics line up. The blur runs at 1/8 size (fast).
-      const crop = cropAt(proj, m, 0);
-      const fw = Math.min(W, Math.max(2, Math.round((m.width * W) / crop.w / 2) * 2));
-      const fh = Math.min(H, Math.max(2, Math.round((m.height * W) / crop.w / 2) * 2));
-      const bw = Math.max(16, Math.round(W / 16) * 2);
-      const bh = Math.max(16, Math.round(H / 16) * 2);
-      graph.push(`[${vi}:v]${v.join(',')},split=2[bg${i}][fg${i}]`);
-      graph.push(
-        `[bg${i}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},gblur=sigma=${Math.max(2, Math.round(bw / 40))},` +
-          `eq=brightness=-0.06:saturation=0.85,scale=${W}:${H}:flags=bilinear[bb${i}]`,
-      );
-      graph.push(`[fg${i}]scale=${fw}:${fh}:flags=lanczos[ff${i}]`);
-      graph.push(`[bb${i}][ff${i}]overlay=x=${Math.round((W - fw) / 2)}:y=${Math.round((H - fh) / 2)},setsar=1,format=${pixfmt},trim=duration=${f6(d)}[v${i}]`);
-    } else {
-      if (cw < m.width || ch < m.height) {
-        v.push(`crop=w=${cw}:h=${ch}:x='${cropExpr(keys, 'cx', starts[i], m.width, cw)}':y='${cropExpr(keys, 'cy', starts[i], m.height, ch)}':exact=1`);
-      }
-      v.push(`scale=${W}:${H}:flags=lanczos`, 'setsar=1', `format=${pixfmt}`, `trim=duration=${f6(d)}`);
-      graph.push(`[${vi}:v]${v.join(',')}[v${i}]`);
-    }
-    // Audio of the clip (silence for freezes, muted clips and videos without sound).
-    const vol = c.kind === 'video' && !c.muted && !project.audio.muted ? c.volume * project.audio.originalVolume : 0;
-    if (c.kind === 'video' && m.hasAudio && vol > 0) {
-      const a = ['asetpts=PTS-STARTPTS', ...atempoChain(c.speed), `volume=${f6(vol)}`, 'aresample=48000', 'aformat=channel_layouts=stereo'];
-      graph.push(`[${vi}:a]${a.join(',')},apad,atrim=duration=${f6(d)}[a${i}]`);
-    } else {
-      graph.push(`anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${f6(d)}[a${i}]`);
-    }
-    pairs.push(`[v${i}][a${i}]`);
+    for (let g = a; g < b; g++) times[g - g0] = starts[i] + Math.min(((g - B[i]) * rate.den) / rate.num, Math.max(0, d - 1e-6));
   });
-  graph.push(`${pairs.join('')}concat=n=${project.clips.length}:v=1:a=1[vcat][acat]`);
 
-  // Music.
-  const music: string[] = [];
-  for (const [k, a] of project.audioTracks.entries()) {
-    const m = media[a.mediaId];
-    if (!m || a.start >= total) continue;
-    const len = Math.min(a.out - a.in, total - a.start);
-    if (len <= 0) continue;
-    const ii = input++;
-    args.push('-ss', f6(a.in), '-t', f6(len), '-i', m.path);
-    const f = [`asetpts=PTS-STARTPTS`, 'aresample=48000', 'aformat=channel_layouts=stereo', `volume=${f6(a.volume)}`];
-    if (a.fadeIn > 0) f.push(`afade=t=in:st=0:d=${f6(Math.min(a.fadeIn, len / 2))}`);
-    if (a.fadeOut > 0) f.push(`afade=t=out:st=${f6(Math.max(0, len - a.fadeOut))}:d=${f6(Math.min(a.fadeOut, len / 2))}`);
-    if (a.start > 0) f.push(`adelay=${Math.round(a.start * 1000)}:all=1`);
-    graph.push(`[${ii}:a]${f.join(',')}[m${k}]`);
-    music.push(`[m${k}]`);
-  }
-  let aout = '[acat]';
-  if (music.length) {
-    graph.push(`[acat]${music.join('')}amix=inputs=${music.length + 1}:duration=first:normalize=0:dropout_transition=0[amix]`);
-    aout = '[amix]';
-  }
+  return {
+    width: W,
+    height: H,
+    fps: F,
+    rate,
+    duration: ((g1 - g0) * rate.den) / rate.num,
+    t0: times[0],
+    frames: g1 - g0,
+    firstFrame: g0,
+    times,
+    segments,
+    hdr: keepHdr,
+    mixedHdr,
+    aspect,
+    project: proj,
+    media,
+    encoders,
+    color: primary.color ?? {},
+  };
+}
 
-  // Overlay from stdin (rawvideo RGBA of the overlay box).
-  let vout = '[vcat]';
-  if (inp.overlay) {
-    const oi = input++;
-    args.push('-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${inp.overlay.w}x${inp.overlay.h}`, '-r', f6(fps), '-i', 'pipe:0');
-    graph.push(`[${oi}:v]setpts=PTS-STARTPTS+${f6(t0)}/TB[ov]`);
-    graph.push(`[vcat][ov]overlay=x=${inp.overlay.x}:y=${inp.overlay.y}:eof_action=pass:format=auto[vov]`);
-    vout = '[vov]';
-  }
-  if (settings.range) {
-    graph.push(`${vout}trim=start=${f6(t0)}:end=${f6(t1)},setpts=PTS-STARTPTS[vr]`);
-    graph.push(`${aout}atrim=start=${f6(t0)}:end=${f6(t1)},asetpts=PTS-STARTPTS[ar]`);
-    vout = '[vr]';
-    aout = '[ar]';
-  }
-  graph.push(`${vout}format=${pixfmt}[vfinal]`);
-  args.push('-filter_complex', graph.join(';'), '-map', '[vfinal]', '-map', aout);
+/** Timeline time of export frame k: what the overlay draws over that frame. */
+export function frameTime(plan: Pick<Plan, 'times'>, k: number): number {
+  return plan.times[k];
+}
 
-  if (keepHdr) {
+/** Export sample (48 kHz) where export frame k begins, so sound is cut where the picture is. */
+export function sampleAt(plan: Pick<Plan, 'rate'>, k: number): number {
+  return Math.round((k * SR * plan.rate.den) / plan.rate.num);
+}
+
+function videoCodecArgs(plan: Plan): string[] {
+  const { encoders } = plan;
+  const args: string[] = [];
+  if (plan.hdr) {
     args.push(
       ...(encoders.hevc === 'hevc_nvenc'
         ? ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '20', '-b:v', '0', '-profile:v', 'main10']
         : ['-c:v', 'libx265', '-preset', 'medium', '-crf', '20', '-x265-params', 'log-level=error']),
     );
     args.push('-pix_fmt', encoders.hevc === 'hevc_nvenc' ? 'p010le' : 'yuv420p10le', '-tag:v', 'hvc1');
-    for (const [k, v] of Object.entries(primary.color ?? {})) args.push(`-${k}`, v);
+    for (const [k, v] of Object.entries(plan.color)) args.push(`-${k}`, v);
   } else {
     args.push(
       ...(encoders.h264 === 'h264_nvenc'
@@ -236,11 +316,170 @@ export function buildPlan(inp: PlanInput): Plan {
     );
     args.push('-pix_fmt', 'yuv420p', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709');
   }
-  args.push('-r', f6(fps), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-t', f6(duration), inp.output);
-  return { args, width: W, height: H, fps, duration, t0, frames: Math.ceil(duration * fps - 1e-6), hdr: keepHdr, aspect };
+  return args;
 }
 
-/** Timeline time of overlay frame k (frame-centred sampling is not used: ffmpeg overlays by pts). */
-export function frameTime(plan: Pick<Plan, 't0' | 'fps'>, k: number): number {
-  return plan.t0 + k / plan.fps;
+/** setpts expression placing piped overlay frame N on its segment frame (runs skip blank frames). */
+function overlayPts(runs: readonly [number, number][], rate: Rate): string {
+  let n = 0;
+  const offs = runs.map(([a, b]) => {
+    const o = { from: n, shift: a - n };
+    n += b - a;
+    return o;
+  });
+  let idx = `N+${offs[offs.length - 1].shift}`;
+  for (let r = offs.length - 2; r >= 0; r--) idx = `if(lt(N,${offs[r + 1].from}),N+${offs[r].shift},${idx})`;
+  return `round((${idx})*${rate.den}/(${rate.num}*TB))`;
+}
+
+/** Overlay is on only in its runs (between runs the last piped frame would otherwise linger). */
+function overlayEnable(runs: readonly [number, number][], rate: Rate): string {
+  const sec = (f: number) => f6(((f - 0.5) * rate.den) / rate.num);
+  return runs.map(([a, b]) => `between(t,${sec(a)},${sec(b)})`).join('+');
+}
+
+/** One clip's frames of the export, overlay included, as a video-only file. */
+export function segmentArgs(plan: Plan, seg: Segment, overlay: SegmentOverlay | null, output: string): string[] {
+  const { project: proj, media, encoders, rate } = plan;
+  const c = proj.clips[seg.clip];
+  const m = media[c.mediaId];
+  const W = plan.width;
+  const H = plan.height;
+  const aspect = plan.aspect;
+  const ratio = aspectRatio(aspect, media[proj.clips[0].mediaId]);
+  const keys = proj.format.reframe.mode === 'center' || aspect === 'original' ? [] : proj.format.reframe.keyframes;
+  const clipStart = clipStarts(proj.clips)[seg.clip];
+  const pixfmt = plan.hdr ? 'yuv420p10le' : 'yuv420p';
+
+  const args: string[] = ['-y', '-hide_banner', '-nostdin', '-v', 'error'];
+  // A source frame past the out point too: a clip shorter than a source frame still has one.
+  if (c.kind === 'video')
+    args.push('-ss', f6(m.duration > 0.05 ? Math.min(c.in, m.duration - 0.05) : c.in), '-t', f6(c.out - c.in + 1 / Math.max(1, m.fps)), '-i', m.path);
+  else args.push('-ss', f6(Math.max(0, Math.min(c.at, m.duration - 0.05))), '-i', m.path);
+  const graph: string[] = [];
+  // Crop in source pixels for the project's aspect (panning keyframes on the timeline).
+  let cw: number;
+  let ch: number;
+  if (m.width / m.height > ratio) {
+    ch = m.height;
+    cw = ch * ratio;
+  } else {
+    cw = m.width;
+    ch = cw / ratio;
+  }
+  cw = Math.max(2, Math.floor(cw / 2) * 2);
+  ch = Math.max(2, Math.floor(ch / 2) * 2);
+  const v: string[] = [];
+  if (c.kind === 'video') v.push(`setpts=(PTS-STARTPTS)/${f6(c.speed)}`);
+  else v.push('trim=end_frame=1', 'setpts=PTS-STARTPTS');
+  if (m.hdr && !plan.hdr) v.push(encoders.tonemap);
+  v.push(`fps=${rateArg(rate)}`);
+  // Exactly the segment's frames: the last frame is held if the source runs short of the
+  // grid (and a freeze is one frame held), the clip-local frame j is clip second j/fps.
+  const cut = `tpad=stop_mode=clone:stop=-1,trim=start_frame=${seg.skip}:end_frame=${seg.skip + seg.frames},setpts=PTS-STARTPTS`;
+  const blurFill = proj.format.fill === 'blur' && aspect !== 'original' && Math.abs(m.width / m.height - ratio) > 0.01;
+  if (blurFill) {
+    // The whole video centred on a blurred, darkened copy of itself – placed exactly like
+    // cropAt() places it, so tracers and graphics line up. The blur runs at 1/8 size (fast).
+    const crop = cropAt(proj, m, 0);
+    const fw = Math.min(W, Math.max(2, Math.round((m.width * W) / crop.w / 2) * 2));
+    const fh = Math.min(H, Math.max(2, Math.round((m.height * W) / crop.w / 2) * 2));
+    const bw = Math.max(16, Math.round(W / 16) * 2);
+    const bh = Math.max(16, Math.round(H / 16) * 2);
+    graph.push(`[0:v]${v.join(',')},split=2[bg][fg]`);
+    graph.push(
+      `[bg]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},gblur=sigma=${Math.max(2, Math.round(bw / 40))},` +
+        `eq=brightness=-0.06:saturation=0.85,scale=${W}:${H}:flags=bilinear[bb]`,
+    );
+    graph.push(`[fg]scale=${fw}:${fh}:flags=lanczos[ff]`);
+    graph.push(`[bb][ff]overlay=x=${Math.round((W - fw) / 2)}:y=${Math.round((H - fh) / 2)},setsar=1,format=${pixfmt},${cut}[base]`);
+  } else {
+    v.push(...reframeFilters(keys, clipStart, m, cw, ch, { W, H, rate: rateArg(rate) }));
+    v.push(`scale=${W}:${H}:flags=lanczos`, 'setsar=1', `format=${pixfmt}`, cut);
+    graph.push(`[0:v]${v.join(',')}[base]`);
+  }
+
+  // Overlay from stdin (rawvideo RGBA of the overlay box, only the frames in its runs).
+  let vout = '[base]';
+  if (overlay && overlay.runs.length) {
+    const { box, runs } = overlay;
+    args.push('-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${box.w}x${box.h}`, '-r', rateArg(rate), '-i', 'pipe:0');
+    graph.push(`[1:v]setpts='${overlayPts(runs, rate)}'[ov]`);
+    graph.push(`[base][ov]overlay=x=${box.x}:y=${box.y}:eof_action=pass:format=auto:enable='${overlayEnable(runs, rate)}'[vov]`);
+    vout = '[vov]';
+  }
+  graph.push(`${vout}format=${pixfmt}[vfinal]`);
+  args.push('-filter_complex', graph.join(';'), '-map', '[vfinal]', ...videoCodecArgs(plan));
+  args.push('-r', rateArg(rate), '-an', '-f', 'mp4', output);
+  return args;
+}
+
+/** The sound of the whole export (clip audio cut on the frame grid, then music) as AAC. */
+export function audioArgs(plan: Plan, output: string): string[] {
+  const { project, media } = plan;
+  const args: string[] = ['-y', '-hide_banner', '-nostdin', '-v', 'error'];
+  const graph: string[] = [];
+  let input = 0;
+  const parts: string[] = [];
+  const toSamples = (frames: number) => sampleAt(plan, frames);
+  for (const [n, seg] of plan.segments.entries()) {
+    const c = project.clips[seg.clip];
+    const m = media[c.mediaId];
+    const count = toSamples(seg.start + seg.frames) - toSamples(seg.start);
+    // Audio of the clip (silence for freezes, muted clips and videos without sound).
+    const vol = c.kind === 'video' && !c.muted && !project.audio.muted ? c.volume * project.audio.originalVolume : 0;
+    if (c.kind === 'video' && m.hasAudio && vol > 0) {
+      const ii = input++;
+      args.push('-ss', f6(c.in), '-t', f6(c.out - c.in), '-i', m.path);
+      const skip = toSamples(seg.skip);
+      const a = ['asetpts=PTS-STARTPTS', ...atempoChain(c.speed), `volume=${f6(vol)}`, `aresample=${SR}`, 'aformat=channel_layouts=stereo'];
+      graph.push(`[${ii}:a]${a.join(',')},apad,atrim=start_sample=${skip}:end_sample=${skip + count},asetpts=PTS-STARTPTS[a${n}]`);
+    } else {
+      graph.push(`anullsrc=channel_layout=stereo:sample_rate=${SR},atrim=end_sample=${count}[a${n}]`);
+    }
+    parts.push(`[a${n}]`);
+  }
+  graph.push(`${parts.join('')}concat=n=${parts.length}:v=0:a=1[acat]`);
+
+  // Music, placed on the timeline (export second 0 is the range start's frame).
+  const total = timelineDuration(project);
+  const start = (plan.firstFrame * plan.rate.den) / plan.rate.num;
+  const music: string[] = [];
+  for (const [k, a] of project.audioTracks.entries()) {
+    const m = media[a.mediaId];
+    if (!m || a.start >= total) continue;
+    const len = Math.min(a.out - a.in, total - a.start);
+    const at = a.start - start; // export second the music starts at (negative: started before)
+    if (len <= 0 || at >= plan.duration || at + len <= 0) continue;
+    const ii = input++;
+    args.push('-ss', f6(a.in), '-t', f6(len), '-i', m.path);
+    const f = [`asetpts=PTS-STARTPTS`, `aresample=${SR}`, 'aformat=channel_layouts=stereo', `volume=${f6(a.volume)}`];
+    if (a.fadeIn > 0) f.push(`afade=t=in:st=0:d=${f6(Math.min(a.fadeIn, len / 2))}`);
+    if (a.fadeOut > 0) f.push(`afade=t=out:st=${f6(Math.max(0, len - a.fadeOut))}:d=${f6(Math.min(a.fadeOut, len / 2))}`);
+    if (at < 0) f.push(`atrim=start_sample=${Math.round(-at * SR)}`, 'asetpts=PTS-STARTPTS');
+    else if (at > 0) f.push(`adelay=${Math.round(at * SR)}S:all=1`);
+    graph.push(`[${ii}:a]${f.join(',')}[m${k}]`);
+    music.push(`[m${k}]`);
+  }
+  let aout = '[acat]';
+  if (music.length) {
+    graph.push(`[acat]${music.join('')}amix=inputs=${music.length + 1}:duration=first:normalize=0:dropout_transition=0[amix]`);
+    aout = '[amix]';
+  }
+  graph.push(`${aout}atrim=end_sample=${toSamples(plan.frames)}[afinal]`);
+  args.push('-filter_complex', graph.join(';'), '-map', '[afinal]', '-c:a', 'aac', '-b:a', '192k', '-f', 'mp4', output);
+  return args;
+}
+
+/** Joins the segments (no re-encode) and the sound into the finished file. */
+export function muxArgs(plan: Plan, segmentList: string, audio: string, output: string): string[] {
+  return [
+    ...['-y', '-hide_banner', '-nostdin', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', segmentList, '-i', audio],
+    ...['-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', ...(plan.hdr ? ['-tag:v', 'hvc1'] : []), '-movflags', '+faststart', '-f', 'mp4', output],
+  ];
+}
+
+/** concat demuxer list for the segment files. */
+export function concatList(files: readonly string[]): string {
+  return files.map((f) => `file '${f.replace(/'/g, `'\\''`)}'\n`).join('');
 }

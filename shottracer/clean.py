@@ -10,13 +10,14 @@ each shot gets a window, in source seconds, that the generated videos stay insid
 - `to`: before someone walks toward the camera, walks into the picture, moves big near the lens
   or the camera is picked up (large global shift, sudden blur) after the strike.
 
-Cheap signals only: a separate ffmpeg decode at 10 samples/s and ~192 px (gray), frame
+Cheap signals only: an ffmpeg decode at ~10 samples/s and ~192 px (gray) – for a full shot the
+part up to the end of the track comes from the track's own decode (pipeline) – frame
 differences, connected moving regions measured against the golfer's box (found at address
 anyway), phase correlation for global shift and the Laplacian for blur.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import cv2
@@ -208,19 +209,51 @@ def window(m: Motion, impact: float, land: float, slowmo: float = 1.0, putt: boo
     return {"from": round(max(0.0, frm), 3), "to": round(max(to, frm + 0.1), 3)}
 
 
-def measure_span(info: VideoInfo, t0: float, t1: float, golfer: Box | None) -> Motion:
-    """Decode [t0, t1] (source seconds) at RATE samples/s and LONG_SIDE px and measure it."""
+@dataclass(frozen=True)
+class Span:
+    """The frames a scan of [t0, t1] measures: every `every`-th from `start` (exclusive `stop`)."""
+    start: int
+    stop: int
+    every: int
+    scale: float
+
+    def decode_args(self, start: int | None = None, stop: int | None = None) -> dict:
+        """decode() arguments for these samples, or for those of them in [start, stop)."""
+        return {"start": max(self.start, start or 0), "stop": self.stop if stop is None else min(self.stop, stop),
+                "scale": self.scale, "gray": True, "every": self.every, "phase": self.start}
+
+
+def span(info: VideoInfo, t0: float, t1: float) -> Span:
+    """The samples of [t0, t1] (source seconds): ~RATE per second (a whole number of frames
+    apart, so the samples are the same frames however the decode is split) at LONG_SIDE px."""
     t0 = max(0.0, t0)
     t1 = min(info.duration, t1)
     start = int(t0 * info.fps)
     stop = max(start + 1, int(np.ceil(t1 * info.fps)))
-    scale = min(1.0, LONG_SIDE / max(1, info.long_side))
-    first = start / info.fps
-    frames = decode(info, start=start, stop=stop, scale=scale, gray=True, rate=RATE)
-    try:
-        return measure(((first + (i - start) / RATE, g) for i, g in frames), golfer, (info.width, info.height))
-    finally:
-        frames.close()
+    return Span(start, stop, max(1, round(info.fps / RATE)), min(1.0, LONG_SIDE / max(1, info.long_side)))
+
+
+def measure_span(info: VideoInfo, t0: float, t1: float, golfer: Box | None, head: list[tuple[int, np.ndarray]] | None = None,
+                 stopped: Callable[[], bool] = lambda: False) -> Motion:
+    """Decode [t0, t1] (source seconds) at ~RATE samples/s and LONG_SIDE px and measure it.
+    `head`: (index, frame) samples of this span decoded already (its start, in order), e.g. by
+    the track; `stopped` ends the decode early (a cancelled analysis)."""
+    sp = span(info, t0, t1)
+    got = [(i, g) for i, g in head or [] if sp.start <= i < sp.stop]
+    if [i for i, _ in got] != list(range(sp.start, sp.stop, sp.every))[: len(got)]:
+        got = []   # not this span's samples from its start: decode it all
+    samples = [(i / info.fps, g) for i, g in got]
+    nxt = got[-1][0] + sp.every if got else sp.start
+    if nxt < sp.stop:
+        frames = decode(info, **sp.decode_args(start=nxt))
+        try:
+            for i, g in frames:
+                if stopped():
+                    break
+                samples.append((i / info.fps, g))
+        finally:
+            frames.close()
+    return measure(samples, golfer, (info.width, info.height))
 
 
 def scan_range(impact: float, slowmo: float = 1.0, land: float | None = None) -> tuple[float, float]:

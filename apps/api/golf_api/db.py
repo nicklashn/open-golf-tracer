@@ -86,6 +86,16 @@ def SessionLocal() -> Session:  # noqa: N802
     return _Session()
 
 
+def write_lock(db: Session) -> None:
+    """Takes the database's write lock now, before reading rows the session will rewrite.
+    pysqlite only starts a transaction at the first INSERT/UPDATE, so a plain read-modify-write
+    lets another writer commit in between and its change is silently overwritten. Already in a
+    transaction (after a write), the lock is held. Other databases: read with FOR UPDATE."""
+    conn = db.connection()
+    if conn.dialect.name == "sqlite" and not conn.connection.dbapi_connection.in_transaction:  # type: ignore[union-attr]
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+
 def get_db() -> Iterator[Session]:
     db = SessionLocal()
     try:

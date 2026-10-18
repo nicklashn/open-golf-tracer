@@ -190,6 +190,13 @@ export function PerformanceSettings() {
     );
   }
 
+  /** nvidia-smi names NVIDIA cards only; on AMD/Intel the ball search still runs on the card (DirectML). */
+  const gpuLine = gpu
+    ? f(T.gpu, { name: gpu.name, gb: gb(gpu.vramMb) })
+    : info.cpuOnly || hw.inference === 'CPU'
+      ? T.noGpu
+      : f(T.gpuVia, { device: tuned?.gpu || T.gpuUnnamed, provider: hw.inference });
+
   return (
     <div className="grid max-w-xl gap-5" data-testid="performance-settings">
       <div className="rounded-md border border-border p-4 text-[13px]">
@@ -199,7 +206,7 @@ export function PerformanceSettings() {
             {f(T.cpu, { n: hw.cpuCores })}
             {hw.ram.totalMb ? ` · ${f(T.ram, { gb: gb(hw.ram.totalMb) })}` : ''}
           </li>
-          <li>{gpu ? f(T.gpu, { name: gpu.name, gb: gb(gpu.vramMb) }) : T.noGpu}</li>
+          <li data-testid="perf-gpu">{gpuLine}</li>
           <li>{f(T.inference, { device: T.devices[info.cpuOnly ? 'CPU' : hw.inference] })}</li>
         </ul>
       </div>

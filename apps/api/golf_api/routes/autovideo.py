@@ -2,6 +2,8 @@
 when it stops to ask. The work itself (summary, plan, compose) runs in the Node exporter."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
@@ -31,6 +33,8 @@ def _short_map(v: dict[str, str] | None, limit: int, max_len: int) -> dict[str, 
 
 class AutoVideoIn(BaseModel):
     projectId: str = Field(max_length=40)
+    # The format picked on a card; the free-text wish cannot change it. None = from the wish.
+    kind: str | None = Field(None, pattern="^(youtube|highlight|shorts)$")
     preference: str = Field("", max_length=1000)
     locale: str = Field("en", pattern="^(da|en)$")
     # Layer names as the user's layer panel shows them, so generated layers read the same.
@@ -70,6 +74,7 @@ def start(body: AutoVideoIn, db: Session = Depends(get_db), user: User = Depends
         raise ApiError(422, "unknown_media", "Some of the chosen clips are not in this project.")
     payload = {
         "project_id": p.id,
+        "kind": body.kind,
         "preference": body.preference.strip(),
         "locale": body.locale,
         "names": body.names,
@@ -107,9 +112,21 @@ class AiSettingsIn(BaseModel):
     baseUrl: str = Field("", max_length=300, pattern=r"^(|https?://\S+)$")
     # None keeps the stored key, "" removes it.
     apiKey: str | None = Field(None, max_length=400)
-    maxTokens: int = Field(16000, ge=500, le=200_000)
+    maxTokens: int = Field(20000, ge=500, le=200_000)
     # Still frames from the green when the putt count is unsure; None keeps the stored choice.
     vision: bool | None = None
+
+
+def _key_target(provider: str, base_url: str) -> tuple[str, str]:
+    """Provider and origin (scheme://host:port) a key would be sent to; an empty URL means the
+    provider's default address."""
+    u = urlsplit(base_url or ai.DEFAULTS.get(provider, {}).get("baseUrl", ""))
+    try:
+        port = u.port
+    except ValueError:
+        port = None
+    scheme = u.scheme.lower()
+    return provider, f"{scheme}://{(u.hostname or '').lower()}:{port or {'http': 80, 'https': 443}.get(scheme, '')}"
 
 
 @router.get("/ai/settings")
@@ -123,6 +140,11 @@ def put_ai_settings(body: AiSettingsIn, db: Session = Depends(get_db), user: Use
     if row is None:
         row = AiSettings(user_id=user.id, api_key="", vision=ai.effective(db, user.id)["vision"])
         db.add(row)
+    # A stored key belongs to the host it was entered for: never send it to another provider or
+    # address unless the user types it again for that one.
+    key_cleared = False
+    if body.apiKey is None and row.api_key and _key_target(row.provider, row.base_url) != _key_target(body.provider, body.baseUrl.strip()):
+        row.api_key, key_cleared = "", True
     row.provider, row.model, row.base_url, row.max_tokens = body.provider, body.model.strip(), body.baseUrl.strip(), body.maxTokens
     if body.apiKey is not None:
         row.api_key = body.apiKey.strip()
@@ -130,7 +152,7 @@ def put_ai_settings(body: AiSettingsIn, db: Session = Depends(get_db), user: Use
         row.vision = body.vision
     row.updated_at = utcnow()
     db.commit()
-    return ai.public(db, user)
+    return {**ai.public(db, user), "keyCleared": key_cleared}
 
 
 @router.post("/ai/test")

@@ -7,6 +7,7 @@ README.md, "Use it from another device").
 """
 from __future__ import annotations
 
+import hmac
 import threading
 
 from fastapi import Depends, Request
@@ -48,5 +49,5 @@ def current_user(db: Session = Depends(get_db)) -> User:
 def internal_auth(request: Request) -> None:
     """Workers (exporter) authenticate with the shared INTERNAL_TOKEN."""
     auth = request.headers.get("authorization", "")
-    if auth != f"Bearer {settings().internal_token}":
+    if not hmac.compare_digest(auth.encode(), f"Bearer {settings().internal_token}".encode()):
         raise ApiError(401, "unauthenticated", "Internal access requires a token.")

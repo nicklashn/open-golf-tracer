@@ -58,6 +58,7 @@ class MainThreadOutput implements OverlayOutput {
 
 class WorkerOutput implements OverlayOutput {
   private lastDoc: Project | null = null;
+  private lastLive: OverlayFrame['live'] | null = null;
   private seq = 0;
   private releaseTimer: ReturnType<typeof setTimeout> | null = null;
   onDrawn: ((ms: number) => void) | null = null;
@@ -71,11 +72,14 @@ class WorkerOutput implements OverlayOutput {
     };
   }
 
-  acquire() {
+  acquire(locale: 'da' | 'en') {
     if (this.releaseTimer) clearTimeout(this.releaseTimer);
     this.releaseTimer = null;
-    // A new player starts from scratch: send the document again.
+    // A new player starts from scratch: send the document again, and the language (a new
+    // player for the same canvas follows a language switch).
     this.lastDoc = null;
+    this.lastLive = null;
+    this.worker.postMessage({ type: 'locale', locale });
   }
 
   resize(w: number, h: number) {
@@ -83,9 +87,15 @@ class WorkerOutput implements OverlayOutput {
   }
 
   draw(f: OverlayFrame) {
+    // The document is copied to the worker only when it changed; a handle drag changes just the
+    // live params of one shot, which go on their own (a few numbers per frame).
     if (f.doc !== this.lastDoc) {
       this.worker.postMessage({ type: 'doc', doc: f.doc });
       this.lastDoc = f.doc;
+    }
+    if ((f.live ?? null) !== this.lastLive) {
+      this.worker.postMessage({ type: 'live', live: f.live ?? {} });
+      this.lastLive = f.live ?? null;
     }
     this.worker.postMessage({ type: 'frame', t: f.t, hidden: f.hidden, seq: ++this.seq });
   }
@@ -112,7 +122,7 @@ const outputs = new WeakMap<HTMLCanvasElement, OverlayOutput>();
 export function overlayOutput(canvas: HTMLCanvasElement, locale: 'da' | 'en'): OverlayOutput {
   const existing = outputs.get(canvas);
   if (existing instanceof WorkerOutput) {
-    existing.acquire();
+    existing.acquire(locale);
     return existing;
   }
   let out: OverlayOutput | null = null;

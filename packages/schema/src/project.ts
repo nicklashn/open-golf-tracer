@@ -279,12 +279,19 @@ export type Anim = z.infer<typeof Anim>;
 export const FontId = z.enum(['inter', 'oswald', 'bebas', 'barlow', 'playfair']);
 export type FontId = z.infer<typeof FontId>;
 
+/**
+ * Size caps of a project; the API checks the same (the JSON Schema generated from this file,
+ * MAX_DOC_BYTES in apps/api/golf_api/documents.py). A full round filmed with two cameras,
+ * practice swings included, stays well inside them.
+ */
+export const LIMITS = { shots: 600, layers: 300, keyframes: 200, clips: 500, docBytes: 10 * 1024 * 1024 } as const;
+
 const layerBase = {
   id,
   name: z.string().max(80).default(''),
   start: seconds,
   end: seconds,
-  keyframes: z.array(Keyframe).min(1).max(200),
+  keyframes: z.array(Keyframe).min(1).max(LIMITS.keyframes),
   animIn: Anim.default({ preset: 'fade', duration: 0.4 }),
   animOut: Anim.default({ preset: 'fade', duration: 0.3 }),
   hidden: z.boolean().default(false),
@@ -444,6 +451,20 @@ export const HoleEdit = z.object({
 });
 export type HoleEdit = z.infer<typeof HoleEdit>;
 
+/**
+ * What "Make a video for me" wrote for posting the video: the description, and a chapter title
+ * per hole ("Hul 4 – par 4 – birdie"). The chapters' times are not stored – they come from the
+ * timeline as it is, so trimming the video keeps them right (see @golf/compose publish.ts).
+ */
+export const Publish = z.object({
+  title: z.string().max(120).default(''),
+  description: z.string().max(5000).default(''),
+  /** The first chapter's title when the first hole starts later ("Intro"). */
+  intro: z.string().max(100).default('Intro'),
+  holes: z.record(z.string().min(1).max(8), z.string().max(100)).default({}),
+});
+export type Publish = z.infer<typeof Publish>;
+
 // ---------------------------------------------------------------------------------------------
 // Project
 
@@ -466,17 +487,19 @@ export const Project = z.object({
     })
     .default({ aspect: 'original', reframe: { mode: 'center', keyframes: [] }, fill: 'crop' }),
   media: z.record(z.string(), MediaRef).default({}),
-  clips: z.array(Clip).max(500).default([]),
-  shots: z.array(Shot).max(200).default([]),
+  clips: z.array(Clip).max(LIMITS.clips).default([]),
+  shots: z.array(Shot).max(LIMITS.shots).default([]),
   /** Auto-detected shots the user deleted; analysis results never bring them back. */
   dismissedShots: z.array(z.string().max(64)).max(1000).default([]),
   /** Last applied template (its layers are tagged ⧉ and re-laid out when the format changes). */
   template: z.string().max(40).nullable().default(null),
-  layers: z.array(Layer).max(300).default([]),
+  layers: z.array(Layer).max(LIMITS.layers).default([]),
   audioTracks: z.array(AudioClip).max(20).default([]),
   audio: z.object({ originalVolume: z.number().min(0).max(2).default(1), muted: z.boolean().default(false) }).default({ originalVolume: 1, muted: false }),
   /** The user's corrections to the score, by hole ('7'), see `HoleEdit`. Optional: older projects have none. */
   scoreEdits: z.record(z.string().min(1).max(8), HoleEdit).optional(),
+  /** Text for posting a made video (YouTube): set by "Make a video for me", optional. */
+  publish: Publish.optional(),
 });
 export type Project = z.infer<typeof Project>;
 export type ProjectInput = z.input<typeof Project>;

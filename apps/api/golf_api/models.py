@@ -8,6 +8,7 @@ from sqlalchemy import JSON, BigInteger, Boolean, Float, ForeignKey, Index, Inte
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base, UTCDateTime, utcnow
+from .secretbox import SecretText
 
 
 def new_id(prefix: str) -> str:
@@ -22,6 +23,9 @@ class User(Base):
     locale: Mapped[str] = mapped_column(String(8), default="en")
     units: Mapped[str] = mapped_column(String(4), default="m")
     onboarding_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Look the course and hole up on OpenStreetMap from each video's GPS (sends the position to
+    # the public Overpass servers). GEO_LOOKUP=0 in .env turns it off regardless.
+    geo_lookup: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
@@ -102,6 +106,10 @@ class Job(Base):
     project_id: Mapped[str | None] = mapped_column(String(40), index=True)
     media_id: Mapped[str | None] = mapped_column(String(40), index=True)
     locked_by: Mapped[str | None] = mapped_column(String(80))
+    # Set by each claim; only its holder may report on the job (see jobs.owns).
+    lease: Mapped[str | None] = mapped_column(String(32))
+    # Times its worker went quiet (app closed, PC asleep); unlike failures these keep the attempts.
+    interruptions: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     heartbeat_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime())
     run_after: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)
     started_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime())
@@ -146,8 +154,9 @@ class AiSettings(Base):
     provider: Mapped[str] = mapped_column(String(32), default="server")
     model: Mapped[str] = mapped_column(String(120), default="")
     base_url: Mapped[str] = mapped_column(String(300), default="")
-    api_key: Mapped[str] = mapped_column(Text, default="")
-    max_tokens: Mapped[int] = mapped_column(Integer, default=16000)
+    # Encrypted with DPAPI on Windows (see secretbox.py).
+    api_key: Mapped[str] = mapped_column(SecretText(), default="")
+    max_tokens: Mapped[int] = mapped_column(Integer, default=20000)
     # Still frames from the green may be sent when the putt count is unsure (off by default).
     vision: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime(), default=utcnow)
@@ -163,8 +172,8 @@ class ChatGptAccount(Base):
     subject: Mapped[str] = mapped_column(String(200), default="")
     email: Mapped[str] = mapped_column(String(320), default="")
     name: Mapped[str] = mapped_column(String(200), default="")
-    access_token: Mapped[str] = mapped_column(Text, default="")
-    refresh_token: Mapped[str] = mapped_column(Text, default="")
+    access_token: Mapped[str] = mapped_column(SecretText(), default="")
+    refresh_token: Mapped[str] = mapped_column(SecretText(), default="")
     expires_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # Space separated, as granted by the token endpoint.
     scopes: Mapped[str] = mapped_column(Text, default="")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import secrets
 from pathlib import Path
 
@@ -10,6 +11,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[3]
 API_DIR = Path(__file__).resolve().parents[1]
+
+
+@functools.cache
+def app_version() -> str:
+    """The product version: the root package.json is the single source (the release workflow
+    checks that the tag matches it)."""
+    try:
+        return str(json.loads((ROOT / "package.json").read_text("utf-8"))["version"])
+    except (OSError, ValueError, KeyError):
+        return "0.0.0"
 
 
 class Settings(BaseSettings):
@@ -37,6 +48,9 @@ class Settings(BaseSettings):
     # e.g. "mypc.local" with LISTEN_HOST=0.0.0.0. Other names are refused (DNS rebinding).
     allowed_hosts: str = Field("", alias="ALLOWED_HOSTS")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    # GEO_LOOKUP=0: never send a video's GPS position to OpenStreetMap on its own (the setting
+    # under Settings can then not turn it on); opening "Measure on the map" still works.
+    geo_lookup: bool = Field(True, alias="GEO_LOOKUP")
 
     # Optional AI model for "Make a video for me" (none | ollama | openai-compatible | anthropic).
     # They can be overridden under Settings → AI; the key never leaves the server.
@@ -44,7 +58,7 @@ class Settings(BaseSettings):
     ai_model: str = Field("", alias="AI_MODEL")
     ai_base_url: str = Field("", alias="AI_BASE_URL")
     ai_api_key: str = Field("", alias="AI_API_KEY")
-    ai_max_tokens: int = Field(16000, alias="AI_MAX_TOKENS")
+    ai_max_tokens: int = Field(20000, alias="AI_MAX_TOKENS")
     # Let the model look at a few still frames from the green when the putt count is unsure.
     ai_vision: bool = Field(False, alias="AI_VISION")
 

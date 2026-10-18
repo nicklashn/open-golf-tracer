@@ -1,0 +1,88 @@
+name: Prepare release
+
+# Run it from the Actions tab ("Run workflow" on main) with the new version, e.g. 0.5.0:
+#  1. package.json does not say 0.5.0 yet: the version is bumped (root package.json - the single
+#     source - plus the workspaces and package-lock.json) on a branch release/v0.5.0 and a pull
+#     request is opened. Merge it.
+#  2. Run it again with the same version: main now says 0.5.0, so the tag v0.5.0 is created on
+#     main and the release build runs (all of CI, the installer, its smoke test) and ends in a
+#     DRAFT release with generated notes and the installer attached. Check it, then Publish.
+# Pushing a v* tag yourself (git tag v0.5.0 && git push origin v0.5.0) runs the same release build.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without "v" (e.g. 0.5.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the release branch, or the tag
+      pull-requests: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the input
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then echo "::error::Run this workflow on main (it ran on $GITHUB_REF)."; exit 1; fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then echo "::error::'$VERSION' is not a version like 0.5.0"; exit 1; fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+      - name: Bump the version (pull request)
+        id: bump
+        run: |
+          current=$(jq -r .version package.json)
+          if [ "$current" = "$VERSION" ]; then echo "main is at $VERSION already"; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          branch="release/v$VERSION"
+          git switch -c "$branch"
+          node scripts/bump-version.mjs "$VERSION"
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          git commit -am "Release $VERSION"
+          git push origin "$branch"
+          url="https://github.com/$GITHUB_REPOSITORY/compare/main...$branch?expand=1"
+          gh pr create --base main --head "$branch" --title "Release $VERSION" \
+            --body "Sets the version to $VERSION ($current before). Merge it, then run **Prepare release** again with $VERSION to tag and build the release." \
+            || echo "::warning::Could not open the pull request (Settings -> Actions -> General -> 'Allow GitHub Actions to create and approve pull requests'). Open it yourself: $url"
+          {
+            echo "### Version $VERSION is on branch \`$branch\`"
+            echo "Merge the pull request ($url), then run **Prepare release** again with \`$VERSION\`."
+            echo "(GitHub does not run CI for a push made by a workflow, so the pull request shows no checks; the release run runs all of CI on the tag.)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "bumped=1" >> "$GITHUB_OUTPUT"
+      - name: Tag main
+        id: tag
+        if: steps.bump.outputs.bumped != '1'
+        run: |
+          tag="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag exists already. Pick a new version (or delete the tag and its release first)."
+            exit 1
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "### Tagged $tag on $GITHUB_SHA - the release build follows below" >> "$GITHUB_STEP_SUMMARY"
+
+  # A tag pushed with the workflow's own token starts no other workflows, so the release build is
+  # called from here.
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/installer.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}

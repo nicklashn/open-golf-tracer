@@ -74,15 +74,36 @@ export function shotsOnScreen(oc: Pick<OverlayContext, 'project' | 'width'>, t: 
 }
 
 const geomCache = new Map<string, Geometry | null>();
+const shiftCache = new WeakMap<object, { dx: number; dy: number; g: unknown }>();
+
+/**
+ * Geometry is built and cached at the crop's scale with the crop at the origin, then moved to
+ * the crop: a reframe pan changes the offset every frame, and moving is cheap where rebuilding
+ * (perspective widths, decimation) is not. Preview and export both go through here.
+ */
+function shifted<G extends { x: number[]; y: number[] }>(g: G, tf: Affine, extra?: (g: G, dx: number, dy: number) => Partial<G>): G {
+  const dx = tf.ox * tf.scale;
+  const dy = tf.oy * tf.scale;
+  if (dx === 0 && dy === 0) return g;
+  const hit = shiftCache.get(g);
+  if (hit && hit.dx === dx && hit.dy === dy) return hit.g as G;
+  const out: G = { ...g, x: g.x.map((v) => v - dx), y: g.y.map((v) => v - dy), ...extra?.(g, dx, dy) };
+  shiftCache.set(g, { dx, dy, g: out });
+  return out;
+}
+
+const atOrigin = (tf: Affine): Affine => ({ ox: 0, oy: 0, scale: tf.scale });
 
 export function shotGeometry(shot: Shot, tf: Affine): Geometry | null {
-  const key = `${shotKey(shot)}|${JSON.stringify(shot.style)}|${tf.ox.toFixed(3)},${tf.oy.toFixed(3)},${tf.scale.toFixed(6)}`;
-  if (geomCache.has(key)) return geomCache.get(key)!;
-  const sp = sourcePath(shot);
-  const g = sp ? geometry(sp, shot.style, tf, shot.constraints.start ?? shot.anchor) : null;
-  if (geomCache.size > 64) geomCache.delete(geomCache.keys().next().value!);
-  geomCache.set(key, g);
-  return g;
+  const key = `${shotKey(shot)}|${JSON.stringify(shot.style)}|${tf.scale.toFixed(6)}`;
+  let g = geomCache.get(key);
+  if (g === undefined) {
+    const sp = sourcePath(shot);
+    g = sp ? geometry(sp, shot.style, atOrigin(tf), shot.constraints.start ?? shot.anchor) : null;
+    if (geomCache.size > 64) geomCache.delete(geomCache.keys().next().value!);
+    geomCache.set(key, g);
+  }
+  return g && shifted(g, tf, (b, dx, dy) => ({ anchor: { x: b.anchor.x - dx, y: b.anchor.y - dy } }));
 }
 
 const rollCache = new Map<string, RollGeometry | null>();
@@ -92,12 +113,14 @@ export function shotRollGeometry(project: Pick<Project, 'media'>, shot: Shot, tf
   const media = project.media[shot.mediaId];
   if (!media || !hasRollLine(shot)) return null;
   const p = shot.putt!.path!;
-  const key = `${shot.id}|${p.length}|${p[0].t},${p[p.length - 1].t},${p[p.length - 1].x},${p[p.length - 1].y}|${shot.putt!.holed}|${shot.style.width}|${media.width}x${media.height}|${tf.ox.toFixed(3)},${tf.oy.toFixed(3)},${tf.scale.toFixed(6)}`;
-  if (rollCache.has(key)) return rollCache.get(key)!;
-  const g = rollGeometry(shot, media, tf);
-  if (rollCache.size > 64) rollCache.delete(rollCache.keys().next().value!);
-  rollCache.set(key, g);
-  return g;
+  const key = `${shot.id}|${p.length}|${p[0].t},${p[p.length - 1].t},${p[p.length - 1].x},${p[p.length - 1].y}|${shot.putt!.holed}|${shot.style.width}|${media.width}x${media.height}|${tf.scale.toFixed(6)}`;
+  let g = rollCache.get(key);
+  if (g === undefined) {
+    g = rollGeometry(shot, media, atOrigin(tf));
+    if (rollCache.size > 64) rollCache.delete(rollCache.keys().next().value!);
+    rollCache.set(key, g);
+  }
+  return g && shifted(g, tf);
 }
 
 /** The shot a stat card without an explicit shot refers to: the latest one launched before t. */

@@ -22,7 +22,7 @@ def test_defaults_come_from_env(client, monkeypatch):
     s = client.get("/api/ai/settings").json()
     assert s["provider"] == "server"
     assert s["effective"] == {"provider": "ollama", "model": "qwen2.5", "baseUrl": "http://localhost:11434/v1", "source": "server",
-                              "keyMasked": "", "maxTokens": 16000, "cloud": False, "vision": False}
+                              "keyMasked": "", "maxTokens": 20000, "cloud": False, "vision": False}
     assert s["vision"] is False
 
 
@@ -54,6 +54,34 @@ def test_own_settings_key_masked_and_never_leaked(client, caplog):
     assert client.get("/api/ai/settings").json()["keyMasked"] == "sk-…6789"
     client.put("/api/ai/settings", json={"provider": "anthropic", "apiKey": "", "maxTokens": 6000})
     assert client.get("/api/ai/settings").json()["keyMasked"] == ""
+
+
+def test_key_is_dropped_when_provider_or_address_changes(client):
+    """A stored key is never sent to another host: changing provider or the base URL's origin
+    without typing a key again removes it."""
+    def put(**kw):
+        r = client.put("/api/ai/settings", json={"maxTokens": 6000, **kw})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def key():
+        job = client.post("/api/ai/test").json()
+        return client.get(f"/api/internal/jobs/{job['id']}/ai", headers=_internal()).json()["apiKey"]
+
+    put(provider="openai-compatible", baseUrl="https://api.openai.com/v1", apiKey=KEY)
+    # Same origin (the default is api.openai.com too, or another path on it): the key stays.
+    assert put(provider="openai-compatible", baseUrl="")["keyCleared"] is False
+    assert put(provider="openai-compatible", baseUrl="https://API.openai.com:443/v2")["keyMasked"] == "sk-…6789"
+    assert key() == KEY
+    # Another host: dropped, and the answer says so.
+    s = put(provider="openai-compatible", baseUrl="https://evil.example/v1")
+    assert s["keyCleared"] is True and s["keyMasked"] == "" and key() == ""
+    # With a new key in the same request it is kept for the new host.
+    s = put(provider="openai-compatible", baseUrl="https://openrouter.ai/api/v1", apiKey="sk-or-v1-NEW-KEY-0000")
+    assert s["keyCleared"] is False and key() == "sk-or-v1-NEW-KEY-0000"
+    # Another provider: dropped as well.
+    s = put(provider="anthropic", baseUrl="")
+    assert s["keyCleared"] is True and key() == ""
 
 
 def test_validation_and_no_test_without_a_provider(client):
@@ -97,7 +125,7 @@ def test_vision_is_off_by_default_and_round_trips(client, monkeypatch):
     assert r.json()["vision"] is False and r.json()["effective"]["vision"] is False
     r = client.put("/api/ai/settings", json={"provider": "server", "maxTokens": 9000, "vision": True})
     assert r.json()["effective"] | {"keyMasked": ""} == {"provider": "ollama", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1",
-                                                         "source": "server", "keyMasked": "", "maxTokens": 16000, "cloud": False,
+                                                         "source": "server", "keyMasked": "", "maxTokens": 20000, "cloud": False,
                                                          "vision": True}
 
     job = client.post("/api/ai/test").json()
@@ -149,3 +177,72 @@ def test_migration_0003_adds_vision_to_existing_settings(env):
         assert c.execute(text("SELECT vision FROM ai_settings WHERE user_id = 'u1'")).scalar() in (0, False)
     command.downgrade(cfg, "0002")
     assert "vision" not in {col["name"] for col in inspect(engine()).get_columns("ai_settings")}
+
+
+def _fake_dpapi(monkeypatch):
+    """DPAPI only exists on Windows: a reversible stand-in exercises the storage path."""
+    from golf_api import secretbox
+
+    monkeypatch.setattr(secretbox, "available", lambda: True)
+    monkeypatch.setattr(secretbox, "_protect", lambda b: b"X" + bytes(x ^ 0x5A for x in b))
+
+    def unprotect(b: bytes) -> bytes:
+        if not b.startswith(b"X"):
+            raise OSError("wrong user")
+        return bytes(x ^ 0x5A for x in b[1:])
+
+    monkeypatch.setattr(secretbox, "_unprotect", unprotect)
+
+
+def _raw(sql: str) -> list:
+    from sqlalchemy import text
+
+    from golf_api.db import session_scope
+
+    with session_scope() as db:
+        return [tuple(r) for r in db.execute(text(sql)).all()]
+
+
+def test_secrets_are_encrypted_at_rest_on_windows(client, monkeypatch):
+    _fake_dpapi(monkeypatch)
+    client.put("/api/ai/settings", json={"provider": "anthropic", "apiKey": KEY, "maxTokens": 6000})
+    [(stored,)] = _raw("SELECT api_key FROM ai_settings")
+    assert stored.startswith("dpapi:") and KEY not in stored
+    assert client.get("/api/ai/settings").json()["keyMasked"] == "sk-…6789"
+    job = client.post("/api/ai/test").json()
+    assert client.get(f"/api/internal/jobs/{job['id']}/ai", headers=_internal()).json()["apiKey"] == KEY
+
+
+def test_plaintext_secrets_from_older_versions_are_encrypted_on_start(client, monkeypatch):
+    from sqlalchemy import text
+    from testkit import local_user
+
+    from golf_api import secretbox
+    from golf_api.db import session_scope
+
+    uid = local_user(client)["id"]
+    with session_scope() as db:
+        db.execute(text("INSERT INTO ai_settings (user_id, provider, model, base_url, api_key, max_tokens, vision, updated_at) "
+                        "VALUES (:u, 'anthropic', '', '', :k, 6000, 0, '2026-01-01 00:00:00')"), {"u": uid, "k": KEY})
+        db.execute(text("INSERT INTO chatgpt_accounts (user_id, client_id, subject, email, name, access_token, refresh_token, scopes, problem, "
+                        "updated_at) VALUES (:u, 'c', '', '', '', 'acc-PLAIN', 'ref-PLAIN', '', '', '2026-01-01 00:00:00')"), {"u": uid})
+    # Not Windows (or no DPAPI): nothing changes and the plaintext still reads.
+    monkeypatch.setattr(secretbox, "available", lambda: False)
+    assert secretbox.migrate() == 0
+    assert client.get("/api/ai/settings").json()["keyMasked"] == "sk-…6789"
+    _fake_dpapi(monkeypatch)
+    assert secretbox.migrate() == 3
+    assert secretbox.migrate() == 0
+    [(k,)] = _raw("SELECT api_key FROM ai_settings")
+    [(a, r)] = _raw("SELECT access_token, refresh_token FROM chatgpt_accounts")
+    assert all(v.startswith("dpapi:") for v in (k, a, r)) and "PLAIN" not in a + r and KEY not in k
+    from golf_api.models import ChatGptAccount
+
+    with session_scope() as db:
+        row = db.get(ChatGptAccount, uid)
+        assert row is not None and (row.access_token, row.refresh_token) == ("acc-PLAIN", "ref-PLAIN")
+    assert client.get("/api/ai/settings").json()["keyMasked"] == "sk-…6789"
+    # A value sealed for another Windows user reads as "not set" instead of failing.
+    with session_scope() as db:
+        db.execute(text("UPDATE ai_settings SET api_key = 'dpapi:AAAA'"))
+    assert client.get("/api/ai/settings").json()["keyMasked"] == ""

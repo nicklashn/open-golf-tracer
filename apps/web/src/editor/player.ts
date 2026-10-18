@@ -8,6 +8,7 @@
  */
 import type { ImageData8 } from '@golf/render';
 import { clipAt, clipStarts, clipDuration, cropAt, timelineDuration } from '@golf/schema';
+import { refreshMedia } from './mediaUrls';
 import { loadRendererFonts, overlayOutput, type OverlayOutput } from './overlay';
 import { useEditor, type MediaInfo } from './store';
 
@@ -23,6 +24,17 @@ export interface PlayerView {
 
 const MAX_OVERLAY_LONG_SIDE = 1920;
 
+/** The media files whose <video> is kept: the clip under the playhead and its neighbours (a
+ *  round has dozens of videos; each element holds decoder memory and buffered data). */
+export function mediaToKeep(clips: { mediaId: string }[], index: number): string[] {
+  const out: string[] = [];
+  for (const i of [index, index + 1, index - 1]) {
+    const id = clips[i]?.mediaId;
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
 export class PlayerEngine {
   private videos = new Map<string, HTMLVideoElement>();
   private music = new Map<string, HTMLAudioElement>();
@@ -31,6 +43,7 @@ export class PlayerEngine {
   private playing = false;
   private freezeStart: { wall: number; t: number } | null = null;
   private activeMedia: string | null = null;
+  private activeIndex = -1;
   private lastRenderKey = '';
   private lastDoc: unknown = null;
   private lastLive: unknown = null;
@@ -126,10 +139,43 @@ export class PlayerEngine {
         this.invalidate();
       });
       v.addEventListener('seeked', () => this.invalidate());
+      // Its signed URL expired (an editor open for hours): fetch fresh ones and carry on.
+      v.addEventListener('error', () => void this.recover(m.id));
       v.dataset.variant = m.urls.proxy ? 'proxy' : 'original';
       v.dataset.media = m.id;
     }
     return v;
+  }
+
+  private async recover(id: string): Promise<void> {
+    const fresh = await refreshMedia(id);
+    const v = this.videos.get(id);
+    const src = fresh?.urls.proxy ?? fresh?.urls.original;
+    if (!v || !src) return;
+    const t = v.currentTime;
+    const resume = this.playing && this.activeMedia === id;
+    v.dataset.variant = fresh?.urls.proxy ? 'proxy' : 'original';
+    v.src = src;
+    v.currentTime = t;
+    if (resume) void v.play().catch(() => undefined);
+  }
+
+  /** Drops the <video> of files away from the playhead; loads the next clip's ahead of time. */
+  private prune(index: number): void {
+    const { doc, media } = useEditor.getState();
+    const keep = mediaToKeep(doc.clips, index);
+    for (const [id, v] of this.videos) {
+      if (keep.includes(id)) continue;
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+      v.remove();
+      this.videos.delete(id);
+    }
+    const next = doc.clips[index + 1];
+    if (next && next.mediaId !== doc.clips[index]?.mediaId && media[next.mediaId] && !this.videos.has(next.mediaId)) {
+      this.video(media[next.mediaId]).currentTime = next.kind === 'video' ? next.in : next.at;
+    }
   }
 
   /** Swap a video to its proxy once the proxy exists (it may be created after opening). */
@@ -157,6 +203,11 @@ export class PlayerEngine {
     const m = media[mediaId] ?? doc.media[mediaId];
     if (!m) return;
     const v = this.video(m as MediaInfo);
+    if (this.activeMedia !== mediaId || this.activeIndex !== hit.index) {
+      this.activeIndex = hit.index;
+      this.activeMedia = mediaId;
+      this.prune(hit.index);
+    }
     const crop = cropAt(doc, m, t);
     const scale = this.view.width / crop.w;
     v.style.width = `${m.width}px`;
@@ -301,8 +352,19 @@ export class PlayerEngine {
       if (!m?.urls.original) continue;
       let el = this.music.get(a.id);
       if (!el) {
-        el = new Audio(m.urls.original);
-        el.preload = 'auto';
+        const audio = new Audio(m.urls.original);
+        audio.preload = 'auto';
+        audio.addEventListener(
+          'error',
+          () =>
+            void refreshMedia(a.mediaId).then((fresh) => {
+              if (!fresh?.urls.original) return;
+              const at = audio.currentTime;
+              audio.src = fresh.urls.original;
+              audio.currentTime = at;
+            }),
+        );
+        el = audio;
         this.music.set(a.id, el);
       }
       const len = a.out - a.in;
@@ -334,7 +396,6 @@ export class PlayerEngine {
     if (this.playing) this.tick();
     const s = useEditor.getState();
     if (!s.doc) return;
-    const doc = Object.keys(s.live).length ? { ...s.doc, shots: s.doc.shots.map((x) => (s.live[x.id] ? { ...x, params: s.live[x.id] } : x)) } : s.doc;
     // Re-render only when something visible changed.
     const key = `${s.time.toFixed(4)}|${this.view.width}x${this.view.height}|${[...this.hiddenLayerIds].join(',')}`;
     if (key === this.lastRenderKey && s.doc === this.lastDoc && s.live === this.lastLive) return;
@@ -346,6 +407,6 @@ export class PlayerEngine {
       const v = this.videos.get(this.activeMedia);
       if (v) this.drawBackdrop(v);
     }
-    this.out.draw({ doc, t: s.time, hidden: [...this.hiddenLayerIds] });
+    this.out.draw({ doc: s.doc, live: s.live, t: s.time, hidden: [...this.hiddenLayerIds] });
   }
 }

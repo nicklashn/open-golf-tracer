@@ -9,6 +9,7 @@ import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } fr
 import { api } from '@/lib/api';
 import { useI18n } from '@/lib/i18n/client';
 import { cn } from '@/lib/cn';
+import { UpdateBanner } from './AboutSettings';
 import { useTheme } from './AppRoot';
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -96,6 +97,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
+      <UpdateBanner />
       <main id="main" className="mx-auto w-full max-w-[1200px] flex-1 px-4 py-8 sm:px-6">
         {children}
       </main>

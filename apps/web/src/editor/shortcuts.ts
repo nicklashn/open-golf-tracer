@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { timelineDuration } from '@golf/schema';
-import { saveNow } from './autosave';
+import { flush } from './autosave';
 import * as ops from './ops';
 import { editPoints, stepTo } from './ripple';
 import { selectedClipIds, useEditor } from './store';
@@ -91,7 +91,7 @@ export function useShortcuts({ enabled, onHelp, onExport }: { enabled: boolean; 
       }
       if (mod && k.toLowerCase() === 's') {
         e.preventDefault();
-        void saveNow(true);
+        void flush();
         return;
       }
       if (mod && k.toLowerCase() === 'e') {

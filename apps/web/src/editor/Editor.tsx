@@ -1,7 +1,7 @@
 'use client';
 
 import { ArrowLeft, Check, CircleAlert, CloudUpload, History, Keyboard, Loader2, Redo2, Sparkles, Undo2 } from 'lucide-react';
-import { byTimeline, migrateProject, timelineDuration, type Shot } from '@golf/schema';
+import { LIMITS, migrateProject, timelineDuration, type Shot } from '@golf/schema';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -18,16 +18,16 @@ import { useJobEvents, type JobEvent } from '@/lib/events';
 import { useI18n } from '@/lib/i18n/client';
 import { useMe } from '@/lib/me';
 import { cn } from '@/lib/cn';
-import { saveNow, startAutosave } from './autosave';
+import { failuresFromJobs, noteAnalysisJob, setFailures } from './analysisFailures';
+import { flush, saveNow, startAutosave } from './autosave';
 import { ExportDialog, ExportStatus, Onboarding, ShortcutsDialog, VersionsDialog, type ExportRow } from './Dialogs';
-import { filmedDay } from './course';
 import { AutoVideoDialog } from './AutoVideo';
 import { Inspector } from './Inspector';
 import { LayersPanel, MediaPanel, ShotsPanel, TemplatesPanel } from './LeftPanels';
 import * as ops from './ops';
 import { Preview, player } from './Preview';
 import { ScorePanel } from './ScorePanel';
-import { useEditor, type MediaInfo } from './store';
+import { onLimitHit, useEditor, type MediaInfo } from './store';
 import { Timeline } from './Timeline';
 import { Transport, frameStep } from './Transport';
 import { useShortcuts } from './shortcuts';
@@ -60,6 +60,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const [leftTab, setLeftTab] = useState('shots');
   const [onboarding, setOnboarding] = useState(false);
   const saveState = useEditor((s) => s.saveState);
+  const saveError = useEditor((s) => s.saveError);
   const canUndo = useEditor((s) => s.past.length > 0);
   const canRedo = useEditor((s) => s.future.length > 0);
   const name = useEditor((s) => s.doc?.name ?? '');
@@ -70,6 +71,8 @@ export function Editor({ projectId }: { projectId: string }) {
   const raw = useEditor((s) => s.doc?.format.aspect === 'original' && s.doc.layers.length === 0);
   /** Analyses still queued or running in this project (a round has one per clip). */
   const analysing = useRef(new Set<string>());
+  /** Videos waiting for answers the user was told about (once each). */
+  const asked = useRef(new Set<string>());
 
   const load = useCallback(async () => {
     try {
@@ -84,7 +87,20 @@ export function Editor({ projectId }: { projectId: string }) {
         ingesting: Object.fromEntries(p.processing.filter((j) => j.kind === 'ingest' && j.mediaId).map((j) => [j.mediaId!, j.progress])),
       });
       if (doc.shots[0]) useEditor.getState().select({ kind: 'shot', id: doc.shots[0].id });
+      setFailures({});
+      setExports([]);
       setState('ready');
+      // Clips whose last analysis failed keep a "Try again" in the Shots panel, and exports still
+      // running (started before the editor was left) show their progress again.
+      void api<{ jobs: JobEvent['job'][] }>(`/jobs?project_id=${encodeURIComponent(projectId)}`)
+        .then((r) => setFailures(failuresFromJobs(r.jobs)))
+        .catch(() => undefined);
+      void api<{ exports: ExportRow[] }>(`/exports?project_id=${encodeURIComponent(projectId)}`)
+        .then((r) => {
+          const running = r.exports.filter((e) => e.status === 'queued' || e.status === 'running');
+          setExports((xs) => [...xs, ...running.filter((e) => !xs.some((x) => x.id === e.id))]);
+        })
+        .catch(() => undefined);
     } catch (e) {
       setError(errorMessage(e, t));
       setState('error');
@@ -97,12 +113,29 @@ export function Editor({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     if (state !== 'ready') return;
-    const stop = startAutosave();
+    const stop = startAutosave({ onReloaded: () => toast.info(t.editor.staleReloaded) });
     return () => {
       stop();
-      void saveNow();
+      void flush();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
+
+  // An edit that would break a project cap is not made: say why.
+  useEffect(() => {
+    onLimitHit((hit) => toast.error(f(t.editor.limit[hit.what], { max: hit.max }), t.editor.limitHint));
+    return () => onLimitHit(null);
+  }, [t, f]);
+
+  /** Shots from the analysis; the ones beyond the project's cap are reported, never lost silently. */
+  const mergeShots = useCallback(
+    (shots: unknown[]) => {
+      const r = ops.mergeServerShots(shots);
+      if (r.dropped) toast.error(f(t.editor.shotsDropped, { n: r.dropped }), f(t.editor.shotsDroppedHint, { max: LIMITS.shots }), { duration: 20_000 });
+      return r.added;
+    },
+    [t, f],
+  );
 
   useEffect(() => {
     if (state === 'ready' && me && !me.onboardingDone) setOnboarding(true);
@@ -114,23 +147,27 @@ export function Editor({ projectId }: { projectId: string }) {
       const res = await api<{ document: unknown }>(`/projects/${projectId}`).catch(() => null);
       if (!res) return;
       const server = migrateProject(res.document);
-      const doc = useEditor.getState().doc;
-      const fresh = server.shots.filter((x) => x.mediaId === mediaId && !doc.shots.some((y) => y.id === x.id) && !doc.dismissedShots.includes(x.id));
+      mergeShots(server.shots.filter((x) => x.mediaId === mediaId));
       const place = server.media[mediaId]?.place;
-      if (!fresh.length && !place) return;
+      if (!place) return;
       useEditor.getState().silently((d) => {
-        d.shots = [...d.shots, ...fresh].sort(byTimeline(d.clips)) as typeof d.shots;
-        if (place && d.media[mediaId] && !d.media[mediaId].place) d.media[mediaId].place = place;
+        if (d.media[mediaId] && !d.media[mediaId].place) d.media[mediaId].place = place;
       });
     },
-    [projectId],
+    [projectId, mergeShots],
   );
 
   // Live updates: proxy ready, shots found while analysing, retrack results, exports.
-  const onEvent = useCallback(
+  const diskFullShown = useRef(new Set<string>());
+  const handleEvent = useCallback(
     (ev: JobEvent) => {
       const s = useEditor.getState();
       const job = ev.job;
+      // A full disk stops previews, analyses and exports alike: say what to do, once per job.
+      if (job.status === 'failed' && job.errorCode === 'disk_full' && !diskFullShown.current.has(job.id)) {
+        diskFullShown.current.add(job.id);
+        toast.error(t.errors.disk_full, undefined, { duration: 20_000 });
+      }
       if (job.kind === 'ingest' && job.mediaId) {
         const ing = { ...s.ingesting };
         if (job.status === 'queued' || job.status === 'running') ing[job.mediaId] = job.progress;
@@ -151,6 +188,7 @@ export function Editor({ projectId }: { projectId: string }) {
         const running = job.status === 'queued' || job.status === 'running';
         if (running) analysing.current.add(job.id);
         else analysing.current.delete(job.id);
+        noteAnalysisJob(job);
         // Between the clips of a round the card stays up: the next clip's analysis is queued.
         useEditor.setState({
           analysis: running
@@ -163,19 +201,13 @@ export function Editor({ projectId }: { projectId: string }) {
           void pullShots((ev.media as MediaInfo).id);
         }
         if (ev.shots) {
-          const doc = useEditor.getState().doc;
           // Shots of a clip that is not on the timeline yet arrive again once it is.
-          const fresh = (ev.shots as Shot[]).filter((x) => doc.media[x.mediaId] && !doc.shots.some((y) => y.id === x.id) && !doc.dismissedShots.includes(x.id));
-          if (fresh.length) {
-            const parsed = migrateProject({ ...doc, shots: [...doc.shots, ...fresh] }).shots;
-            useEditor.getState().silently((d) => {
-              d.shots = parsed.sort(byTimeline(d.clips)) as typeof d.shots;
-            });
-            // First shot found while nothing is picked: show it, cued up just before the swing.
-            if (!useEditor.getState().selection) {
-              const first = parsed.find((x) => x.visible) ?? parsed[0];
-              if (first) ops.jumpToShot(first);
-            }
+          const added = mergeShots(ev.shots);
+          // First shot found while nothing is picked: show it, cued up just before the swing.
+          if (added.length && !useEditor.getState().selection) {
+            const shots = useEditor.getState().doc.shots;
+            const first = shots.find((x) => x.visible) ?? shots[0];
+            if (first) ops.jumpToShot(first);
           }
         }
         if (ev.place && useEditor.getState().doc.media[ev.place.mediaId]) {
@@ -190,18 +222,7 @@ export function Editor({ projectId }: { projectId: string }) {
               if ('course' in rest && (!d.media[mediaId].place || !d.media[mediaId].place!.hole)) d.media[mediaId].place = parsed.place;
             });
           }
-          // "Round 2 May" becomes "Old Course – 2 May" once the course is known
-          // (the name is also the exported file's and the video's title).
-          const course = parsed.place?.course;
-          const name = useEditor.getState().doc.name;
-          const m = /^(?:Runde|Round) (.+)$/.exec(name);
-          if (course && m) {
-            // The day it was filmed (from the clips), not when the files were copied.
-            const day = filmedDay(useEditor.getState().doc.media, locale) || m[1];
-            useEditor.getState().edit('Name', (d) => {
-              d.name = `${course} – ${day}`.slice(0, 120);
-            });
-          }
+          if (parsed.place?.course) ops.nameAfterCourse(parsed.place.course, locale);
         }
         // A failed analysis is never silent: say which clip, and offer the way on.
         if (job.status === 'failed' && job.mediaId) {
@@ -225,6 +246,11 @@ export function Editor({ projectId }: { projectId: string }) {
             });
           else toast.info(t.editor.analysisNone, t.editor.analysisNoneHint, { duration: 10_000 });
         }
+      }
+      // A video waiting for answers (also one started before a reload): say so once, with the way back.
+      if (job.kind === 'compose' && job.status === 'awaiting_answers' && !s.makeOpen && !asked.current.has(job.id)) {
+        asked.current.add(job.id);
+        toast.info(t.auto.waiting, t.auto.waitingHint, { action: { label: t.auto.answerNow, onClick: () => setAutoOpen(true) }, duration: 20_000 });
       }
       if (job.kind === 'retrack') {
         const shotId = (job.result?.shot as Shot | undefined)?.id;
@@ -251,6 +277,7 @@ export function Editor({ projectId }: { projectId: string }) {
                   url: ev.export?.url ?? e.url,
                   previewUrl: ev.export?.previewUrl ?? e.previewUrl,
                   projectName: ev.export?.projectName ?? e.projectName,
+                  message: job.message,
                   error: job.error,
                 }
               : e,
@@ -258,13 +285,25 @@ export function Editor({ projectId }: { projectId: string }) {
         );
       }
     },
-    [t, f, locale, pullShots, setAutoOpen, projectId],
+    [t, f, locale, pullShots, mergeShots, setAutoOpen, projectId],
+  );
+  const onEvent = useCallback(
+    (ev: JobEvent) => {
+      try {
+        handleEvent(ev);
+      } catch (e) {
+        // Never silent: something the server sent could not be taken in.
+        toast.error(t.editor.liveUpdateFailed, e instanceof Error ? e.message : String(e));
+        throw e;
+      }
+    },
+    [handleEvent, t],
   );
   useJobEvents(onEvent, state === 'ready' ? projectId : null);
 
   // Videos with GPS but no hole yet (the map server was busy during analysis): ask again.
   useEffect(() => {
-    if (state !== 'ready') return;
+    if (state !== 'ready' || useMe.getState().me?.geoLookup === false) return;
     const missing = Object.values(useEditor.getState().doc.media).filter((m) => m.kind === 'video' && m.geo && !m.place);
     for (const m of missing) {
       void api<Record<string, unknown> | null>(`/geo/place?lat=${m.geo!.lat}&lon=${m.geo!.lon}`)
@@ -369,7 +408,19 @@ export function Editor({ projectId }: { projectId: string }) {
           data-testid="save-state"
         >
           <SaveIcon className={cn('size-3.5', saveState === 'saving' && 'animate-spin')} aria-hidden />
-          {t.editor.saveState[saveState]}
+          {saveState === 'error' && saveError ? (
+            // Why it failed and what to do: the badge never just says "not saved".
+            <span className="max-w-[min(420px,36vw)] truncate" title={f(t.editor.saveError[saveError.reason], { path: saveError.path ?? '?' })}>
+              {f(t.editor.saveError[saveError.reason], { path: saveError.path ?? '?' })}
+            </span>
+          ) : (
+            t.editor.saveState[saveState]
+          )}
+          {saveState === 'error' ? (
+            <button type="button" className="ml-1 underline underline-offset-2 hover:text-fg" onClick={() => void flush()} data-testid="save-retry">
+              {t.editor.saveRetry}
+            </button>
+          ) : null}
         </span>
         <div className="ml-auto flex items-center gap-0.5">
           <Tooltip label={t.editor.undo} shortcut="⌘Z">
@@ -526,11 +577,30 @@ export function Editor({ projectId }: { projectId: string }) {
   );
 }
 
-function ConflictDialog() {
-  const { t } = useI18n();
+export function ConflictDialog() {
+  const { t, f } = useI18n();
+  const router = useRouter();
   const state = useEditor((s) => s.saveState);
   const projectId = useEditor((s) => s.projectId);
   const [busy, setBusy] = useState(false);
+  /** Mine as a new project next to theirs; this window then opens it. */
+  async function saveCopy() {
+    setBusy(true);
+    try {
+      const { doc } = useEditor.getState();
+      const copy = await api<{ id: string }>(`/projects/${projectId}/duplicate`, {
+        body: { document: doc, name: f(t.editor.copyName, { name: doc.name }).slice(0, 120) },
+      });
+      // Nothing left to save here: the copy has it.
+      useEditor.setState({ saveState: 'saved' });
+      toast.success(t.editor.copySaved);
+      router.push(`/app/projects/${copy.id}`);
+    } catch (e) {
+      toast.error(errorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <Dialog open={state === 'conflict'}>
       <DialogContent title={t.editor.conflictTitle} description={t.editor.conflictLead} hideClose>
@@ -551,6 +621,9 @@ function ConflictDialog() {
             }}
           >
             {t.editor.loadTheirs}
+          </Button>
+          <Button variant="secondary" loading={busy} onClick={() => void saveCopy()} data-testid="conflict-copy">
+            {t.editor.saveCopy}
           </Button>
           <Button variant="primary" loading={busy} onClick={() => void saveNow(true)}>
             {t.editor.keepMine}

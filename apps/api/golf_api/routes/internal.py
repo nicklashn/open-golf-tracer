@@ -25,28 +25,38 @@ class ClaimIn(BaseModel):
 
 
 class ProgressIn(BaseModel):
+    # The lease from the claim (exporters from before leases send none).
+    lease: str | None = Field(None, max_length=32)
     progress: float | None = None
     message: str | None = Field(None, max_length=200)
     log: str | None = None
 
 
 class CompleteIn(BaseModel):
+    lease: str | None = Field(None, max_length=32)
     result: dict = {}
 
 
 class FailIn(BaseModel):
+    lease: str | None = Field(None, max_length=32)
     error: str
     retry: bool = True
 
 
 class DeferIn(BaseModel):
+    lease: str | None = Field(None, max_length=32)
     seconds: float = 5
     message: str = Field("Waiting", max_length=200)
 
 
 class AwaitIn(BaseModel):
+    lease: str | None = Field(None, max_length=32)
     result: dict = {}
     message: str = Field("Waiting for answers", max_length=200)
+
+
+class CheckpointIn(BaseModel):
+    data: dict = {}
 
 
 class DeriveIn(BaseModel):
@@ -65,15 +75,17 @@ def claim(body: ClaimIn, db: Session = Depends(get_db)):
     j = q.claim(db, body.kinds, body.worker)
     if j is None:
         return {"job": None}
-    return {"job": {**q.public(j), "payload": j.payload, "userId": j.user_id}}
+    return {"job": {**q.public(j), "payload": j.payload, "userId": j.user_id, "lease": j.lease}}
 
 
 @router.post("/jobs/{job_id}/progress")
 def progress(job_id: str, body: ProgressIn):
-    if body.log:
+    """continue=False: stop. lost=True as well: the job is not this worker's any more – stop
+    without reporting a failure (it was queued again while the worker was away)."""
+    state = q.beat(job_id, body.lease, body.progress, body.message)
+    if body.log and state != q.LOST:
         q.append_log(job_id, body.log)
-    alive = q.heartbeat(job_id, body.progress, body.message)
-    return {"continue": alive}
+    return {"continue": state == q.OK, "lost": state == q.LOST}
 
 
 @router.post("/jobs/{job_id}/complete")
@@ -81,7 +93,8 @@ def complete(job_id: str, body: CompleteIn, db: Session = Depends(get_db)):
     j = db.get(Job, job_id)
     if j is None:
         raise not_found("Jobbet")
-    q.complete(db, j, body.result)
+    if not q.complete(db, j, body.result, body.lease):
+        return {"ok": False, "lost": True}
     db.commit()
     return {"ok": True}
 
@@ -91,12 +104,12 @@ def fail(job_id: str, body: FailIn, db: Session = Depends(get_db)):
     j = db.get(Job, job_id)
     if j is None:
         raise not_found("Jobbet")
-    q.fail(db, j, body.error, body.retry)
-    if j.kind == "export" and j.status in ("failed", "canceled"):
-        e = db.scalars(select(Export).where(Export.job_id == j.id)).first()
-        if e:
-            e.status = j.status
-            e.finished_at = utcnow()
+    error, retry = body.error, body.retry
+    if any(x in error for x in ("No space left on device", "ENOSPC", "[disk_full]")):
+        # A full disk stays full until the user makes room: no retry, and a message they can act on.
+        error, retry = (error if "[disk_full]" in error else f"[disk_full] The disk is full. {error}"), False
+    if not q.fail(db, j, error, retry, body.lease):
+        return {"status": "lost"}
     db.commit()
     return {"status": j.status}
 
@@ -111,6 +124,8 @@ def _job(db: Session, job_id: str) -> Job:
 @router.post("/jobs/{job_id}/defer")
 def defer(job_id: str, body: DeferIn, db: Session = Depends(get_db)):
     j = _job(db, job_id)
+    if not q.owns(j, body.lease):
+        return {"status": "lost"}
     q.defer(db, j, body.seconds, body.message)
     db.commit()
     return {"status": j.status}
@@ -119,9 +134,24 @@ def defer(job_id: str, body: DeferIn, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/await")
 def await_answers(job_id: str, body: AwaitIn, db: Session = Depends(get_db)):
     j = _job(db, job_id)
+    if not q.owns(j, body.lease):
+        return {"status": "lost"}
     q.await_answers(db, j, body.result, body.message)
     db.commit()
     return {"status": j.status}
+
+
+@router.post("/jobs/{job_id}/checkpoint")
+def checkpoint(job_id: str, body: CheckpointIn, db: Session = Depends(get_db)):
+    """Keeps what a running job has done so far (the compose job's AI plan and tokens, the videos
+    it saved) in its payload: a retry after a later failure starts from there instead of redoing
+    – and paying for – the AI calls."""
+    j = _job(db, job_id)
+    if j.status != "running":
+        raise ApiError(409, "not_running", "The job is not running.")
+    j.payload = {**(j.payload or {}), **body.data}
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/jobs/{job_id}/project")
@@ -176,7 +206,8 @@ def export_start(export_id: str, db: Session = Depends(get_db)):
     e = db.get(Export, export_id)
     if e is None:
         raise not_found("Eksporten")
-    e.status = "running"
+    if e.status != "canceled":
+        e.status = "running"
     e.storage_key = f"{user_prefix(e.user_id)}/exports/{e.id}.mp4"
     path = storage().local_path(e.storage_key)
     path.parent.mkdir(parents=True, exist_ok=True)

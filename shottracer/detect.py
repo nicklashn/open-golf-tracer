@@ -268,15 +268,38 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+ONNX_SIZE = 121_750_754
+_verified: dict[Path, tuple[int, int]] = {}   # model -> (size, mtime_ns) whose hash was checked
+
+
+def _model_ok(path: Path) -> bool:
+    """The model on disk is the published one: size first (cheap), then SHA-256 - once per process
+    and file version (size, mtime), so a restart costs one hash (~0.3 s) and no more."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    stamp = (st.st_size, st.st_mtime_ns)
+    if _verified.get(path) == stamp:
+        return True
+    if st.st_size != ONNX_SIZE or _sha256(path) != ONNX_SHA256:
+        return False
+    _verified[path] = stamp
+    return True
+
+
 def ensure_onnx_model() -> Path:
-    """The ONNX model, downloaded (and checked against ONNX_SHA256) the first time it is needed.
-    A GOLF_ONNX_MODEL of your own is used as it is."""
+    """The ONNX model, checked against ONNX_SHA256 and downloaded when it is missing or damaged
+    (a cut-off download, a disk error). A GOLF_ONNX_MODEL of your own is used as it is."""
+    import logging
     import os
     import urllib.request
 
     path = onnx_model_path()
-    if path.exists() or os.environ.get("GOLF_ONNX_MODEL"):
+    if os.environ.get("GOLF_ONNX_MODEL") or _model_ok(path):
         return path
+    if path.exists():
+        logging.getLogger(__name__).warning("%s does not match the published model; downloading it again", path)
     try:  # use the OS certificate store: some PCs intercept HTTPS (antivirus)
         import truststore
 
@@ -292,6 +315,7 @@ def ensure_onnx_model() -> Path:
         tmp.unlink()
         raise RuntimeError(f"Checksum mismatch for {ONNX_URL}")
     tmp.replace(path)
+    _verified.pop(path, None)
     return path
 
 
@@ -375,6 +399,8 @@ class OnnxRfDetrBallDetector(RfDetrBallDetector):
         # rfdetr: RGB in [0, 1], bilinear resize without antialiasing, ImageNet normalisation.
         # Resize and channel order commute with the per-pixel scaling, so they come first and the
         # arithmetic runs on 704x704 values, not a full-HD frame's (the same result, 39 -> 19 ms on 4 cores).
+        # The resize itself stays in float: an 8-bit resize rounds (up to 0.75 grey levels off
+        # rfdetr's input) and saves only ~2 ms of the ~3, beside the network.
         x = cv2.resize(img.astype(np.float32), (self.RESOLUTION, self.RESOLUTION), interpolation=cv2.INTER_LINEAR)
         x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
         return np.ascontiguousarray(((x - self._SUB) * self._MUL).transpose(2, 0, 1))
@@ -465,10 +491,11 @@ _loaded: dict[tuple, BallDetector] = {}
 
 def get_detector(weights: str | None = None) -> BallDetector:
     """The process's detector for the current Runtime (loaded once; a lock so a warm-up thread
-    and the first job do not both load the model). Another Runtime replaces it; the old one's
-    memory goes once no job holds it any more."""
+    and the first job do not both load the model). A Runtime with other detector settings
+    replaces it (the decoder settings do not: reloading the model on the GPU takes seconds); the
+    old one's memory goes once no job holds it any more."""
     rt = runtime.current()
-    key = (weights, rt)
+    key = (weights, rt.sessions, rt.batch, rt.threads, rt.gpu)
     with _detector_lock:
         if key not in _loaded:
             _loaded.clear()

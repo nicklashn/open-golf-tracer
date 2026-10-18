@@ -9,13 +9,31 @@ import { useI18n } from '@/lib/i18n/client';
 import { fpsOf } from './ops';
 import { useEditor } from './store';
 
+/** NTSC rates are stored rounded (59.94); their frames lie on 60000/1001 s, not 1/59.94 s. */
+export function exactFps(fps: number): number {
+  for (const ntsc of [24000 / 1001, 30000 / 1001, 60000 / 1001, 120000 / 1001, 240000 / 1001]) if (Math.abs(fps - ntsc) < 0.01) return ntsc;
+  return fps;
+}
+
+/**
+ * Steps the playhead by whole source frames, landing on the frame grid of the clip's video
+ * (adding 1/fps to a time between two frames would keep it between frames). A step out of the
+ * clip, or within a freeze, moves by the frame length.
+ */
 export function frameStep(dir: 1 | -1, frames = 1) {
   const s = useEditor.getState();
   s.setPlaying(false);
   const hit = clipAt(s.doc.clips, s.time);
-  const fps = hit ? fpsOf(hit.clip.mediaId) : 30;
-  const speed = hit && hit.clip.kind === 'video' ? hit.clip.speed : 1;
-  s.setTime(s.time + (dir * frames) / fps / speed);
+  const fps = exactFps(hit ? fpsOf(hit.clip.mediaId) : 30);
+  if (!hit || hit.clip.kind !== 'video') return s.setTime(s.time + (dir * frames) / fps);
+  const c = hit.clip;
+  const cur = hit.sourceTime * fps;
+  const near = Math.round(cur);
+  const base = Math.abs(cur - near) < 1e-3 ? near : dir > 0 ? Math.floor(cur) : Math.ceil(cur);
+  // A hair past the frame's start, so the video shows that frame and not the one before it.
+  const src = (base + dir * frames) / fps + 1e-6;
+  if (src < c.in - 1e-9 || src > c.out + 1e-9) return s.setTime(s.time + (dir * frames) / fps / c.speed);
+  s.setTime(hit.start + (src - c.in) / c.speed);
 }
 
 /** The running timecode: the only part of the transport that changes on every playhead tick. */
