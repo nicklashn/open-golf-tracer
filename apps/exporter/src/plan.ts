@@ -124,23 +124,84 @@ export function atempoChain(speed: number): string[] {
   return out;
 }
 
-/** ffmpeg expression for one crop coordinate over a clip (t = seconds since clip start). */
-export function cropExpr(keys: readonly ReframeKey[], axis: 'cx' | 'cy', clipStart: number, srcLen: number, cropLen: number): string {
-  const px = (k: ReframeKey) => Math.min(Math.max(k[axis] * srcLen - cropLen / 2, 0), srcLen - cropLen);
-  if (keys.length === 0) return f6((srcLen - cropLen) / 2);
-  if (keys.length === 1) return f6(px(keys[0]));
-  const T = `(t+${f6(clipStart)})`;
-  // Nested if: before the first key, between keys (smoothstep), after the last.
-  let expr = f6(px(keys[keys.length - 1]));
+/**
+ * ffmpeg expression of one reframe key value at timeline time `T` (an ffmpeg expression), as
+ * reframeAt() has it: the first key's value before it, smoothstep between keys, the last after.
+ */
+export function keyExpr(keys: readonly ReframeKey[], get: (k: ReframeKey) => number, T: string): string {
+  if (keys.length === 1) return f6(get(keys[0]));
+  let expr = f6(get(keys[keys.length - 1]));
   for (let i = keys.length - 1; i >= 1; i--) {
     const a = keys[i - 1];
     const b = keys[i];
     const span = Math.max(1e-6, b.t - a.t);
     const u = `clip((${T}-${f6(a.t)})/${f6(span)},0,1)`;
-    const seg = `(${f6(px(a))}+(${f6(px(b) - px(a))})*${u}*${u}*(3-2*${u}))`;
+    const seg = `(${f6(get(a))}+(${f6(get(b) - get(a))})*${u}*${u}*(3-2*${u}))`;
     expr = `if(lt(${T},${f6(b.t)}),${seg},${expr})`;
   }
-  return `if(lt(${T},${f6(keys[0].t)}),${f6(px(keys[0]))},${expr})`;
+  return `if(lt(${T},${f6(keys[0].t)}),${f6(get(keys[0]))},${expr})`;
+}
+
+/**
+ * ffmpeg expression for one crop coordinate over a clip (t = seconds since clip start): the
+ * centre is interpolated between the keys and the crop then kept in the frame, as cropAt() does.
+ */
+export function cropExpr(keys: readonly ReframeKey[], axis: 'cx' | 'cy', clipStart: number, srcLen: number, cropLen: number): string {
+  if (keys.length === 0) return f6((srcLen - cropLen) / 2);
+  const c = keyExpr(keys, (k) => k[axis], `(t+${f6(clipStart)})`);
+  return `clip(${c}*${srcLen}-${f6(cropLen / 2)},0,${f6(srcLen - cropLen)})`;
+}
+
+/** The nearest even size (yuv420p), at most `max`. */
+const even = (v: number, max: number) => Math.min(max, Math.max(2, Math.round(v / 2) * 2));
+
+/**
+ * The filters that cut the reframed picture out of a clip's frames (before scaling to W×H), with
+ * the keys' zoom as cropAt() applies it: the crop of the target aspect (cw×ch at zoom 1) divided by
+ * the zoom. One zoom for all keys is a plain crop of that size. A zoom that changes needs a crop
+ * whose size changes, which ffmpeg's crop can't do: the zoom-1 crop is placed so that it holds the
+ * zoomed crop (it always can – see below), and zoompan cuts the zoomed crop out of it and scales
+ * it to W×H.
+ */
+export function reframeFilters(
+  keys: readonly ReframeKey[],
+  clipStart: number,
+  src: { width: number; height: number },
+  cw: number,
+  ch: number,
+  out: { W: number; H: number; rate: string },
+): string[] {
+  const { width: mw, height: mh } = src;
+  const zooms = new Set(keys.map((k) => k.zoom ?? 1));
+  if (zooms.size <= 1) {
+    const z = keys.length ? (keys[0].zoom ?? 1) : 1;
+    const w = z === 1 ? cw : even(cw / z, cw);
+    const h = z === 1 ? ch : even(ch / z, ch);
+    if (w >= mw && h >= mh) return [];
+    return [`crop=w=${w}:h=${h}:x='${cropExpr(keys, 'cx', clipStart, mw, w)}':y='${cropExpr(keys, 'cy', clipStart, mh, h)}':exact=1`];
+  }
+  // Per axis at timeline time T: the zoomed crop's length L = len/Z and its start s (centre kept in
+  // the frame); the zoom-1 crop starts at b = clip(s + L/2 - len/2, 0, src - len). Unclamped, b
+  // centres the zoom-1 crop on the zoomed one; clamped at 0, s + L/2 < len/2, so s + L < len;
+  // clamped at the far edge the same mirrored: the zoomed crop is always inside.
+  const axis = (T: string, k: 'cx' | 'cy', srcLen: number, len: number) => {
+    const Z = keyExpr(keys, (x) => x.zoom ?? 1, T);
+    const L = `(${len}/${Z})`;
+    const start = `clip(${keyExpr(keys, (x) => x[k], T)}*${srcLen}-${L}/2,0,${srcLen}-${L})`;
+    const base = `clip(${start}+${L}/2-${len / 2},0,${srcLen - len})`;
+    return { Z, start, base };
+  };
+  const T = `(t+${f6(clipStart)})`;
+  const Ti = `(it+${f6(clipStart)})`;
+  const x = axis(T, 'cx', mw, cw);
+  const y = axis(T, 'cy', mh, ch);
+  const xi = axis(Ti, 'cx', mw, cw);
+  const yi = axis(Ti, 'cy', mh, ch);
+  return [
+    `crop=w=${cw}:h=${ch}:x='${x.base}':y='${y.base}':exact=1`,
+    // zoompan's x/y are in the zoom-1 crop; `it` is the frame's time, like crop's `t`.
+    `zoompan=z='${xi.Z}':x='${xi.start}-${xi.base}':y='${yi.start}-${yi.base}':d=1:s=${out.W}x${out.H}:fps=${out.rate}`,
+  ];
 }
 
 /** 29.97/59.94/23.976 as their exact NTSC fractions, whole rates as themselves. */
@@ -333,9 +394,7 @@ export function segmentArgs(plan: Plan, seg: Segment, overlay: SegmentOverlay | 
     graph.push(`[fg]scale=${fw}:${fh}:flags=lanczos[ff]`);
     graph.push(`[bb][ff]overlay=x=${Math.round((W - fw) / 2)}:y=${Math.round((H - fh) / 2)},setsar=1,format=${pixfmt},${cut}[base]`);
   } else {
-    if (cw < m.width || ch < m.height) {
-      v.push(`crop=w=${cw}:h=${ch}:x='${cropExpr(keys, 'cx', clipStart, m.width, cw)}':y='${cropExpr(keys, 'cy', clipStart, m.height, ch)}':exact=1`);
-    }
+    v.push(...reframeFilters(keys, clipStart, m, cw, ch, { W, H, rate: rateArg(rate) }));
     v.push(`scale=${W}:${H}:flags=lanczos`, 'setsar=1', `format=${pixfmt}`, cut);
     graph.push(`[0:v]${v.join(',')}[base]`);
   }
