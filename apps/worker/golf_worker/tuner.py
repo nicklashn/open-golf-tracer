@@ -289,12 +289,14 @@ def _sample() -> Path:
     from golf_api.storage import tmp_dir
     from shottracer.video import ffmpeg_bin
 
-    out = tmp_dir() / "decode-sample-hevc10-1080p60.mp4"
+    out = tmp_dir() / "decode-sample-hevc10-hlg-1080p60.mp4"
     if out.exists() and out.stat().st_size > 0:
         return out
     part = out.with_name(f"{out.stem}.{os.getpid()}.part.mp4")
     cmd = [ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=1920x1080:r=60:d={SAMPLE_S}",
-           "-vf", "noise=alls=12:allf=t", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "keyint=60:log-level=error",
+           "-vf", "noise=alls=12:allf=t", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params",
+           # x265 tags the colours itself (some builds ignore -color_trc for it): without them it isn't HDR
+           "keyint=60:log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
            "-pix_fmt", "yuv420p10le", "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
            "-tag:v", "hvc1", str(part)]
     try:

@@ -35,8 +35,10 @@ def _owner() -> None:
     held = False
     while True:
         with _changed:
-            while (_running > 0) == held:
+            while (_running > 0) == held and _thread is threading.current_thread():
                 _changed.wait()
+            if _thread is not threading.current_thread():
+                return      # replaced by a newer owner (tests reset the module state)
             held = _running > 0
         try:
             _set(held)

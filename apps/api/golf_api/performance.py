@@ -200,7 +200,8 @@ def _path() -> Path:
 def load() -> dict[str, Any]:
     p = _path()
     try:
-        mtime = p.stat().st_mtime_ns
+        st = p.stat()
+        mtime = (st.st_mtime_ns, st.st_size)   # with the size: Windows can keep the time of a quick rewrite
     except FileNotFoundError:
         return {"profile": "balanced", "rev": 0}
     except OSError:   # e.g. Windows: the file is being replaced right now; the last good read stands

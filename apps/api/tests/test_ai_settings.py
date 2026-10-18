@@ -226,7 +226,8 @@ def test_plaintext_secrets_from_older_versions_are_encrypted_on_start(client, mo
                         "VALUES (:u, 'anthropic', '', '', :k, 6000, 0, '2026-01-01 00:00:00')"), {"u": uid, "k": KEY})
         db.execute(text("INSERT INTO chatgpt_accounts (user_id, client_id, subject, email, name, access_token, refresh_token, scopes, problem, "
                         "updated_at) VALUES (:u, 'c', '', '', '', 'acc-PLAIN', 'ref-PLAIN', '', '', '2026-01-01 00:00:00')"), {"u": uid})
-    # Not Windows: nothing changes and the plaintext still reads.
+    # Not Windows (or no DPAPI): nothing changes and the plaintext still reads.
+    monkeypatch.setattr(secretbox, "available", lambda: False)
     assert secretbox.migrate() == 0
     assert client.get("/api/ai/settings").json()["keyMasked"] == "sk-…6789"
     _fake_dpapi(monkeypatch)
