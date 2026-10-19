@@ -1,3 +1,3 @@
 # Optional: the Ultralytics YOLO detector (GOLF_DETECTOR=yolo), for comparison and for the
 # synthetic-video tests. Not part of the default or production install, see docs/licensing.md.
-ultralytics>=8.4.177
+ultralytics>=8.4.178
