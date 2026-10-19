@@ -27,7 +27,9 @@ env:
 jobs:
   web:
     name: TypeScript – lint, typecheck, unit tests, build
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19, which Playwright 1.56
+    # (install --with-deps) does not know yet. Move all workflows together when it does.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,7 +48,7 @@ jobs:
 
   python:
     name: Python – ruff, pyright, pytest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,7 +160,7 @@ jobs:
 
   e2e:
     name: Playwright – renderer parity and end-to-end
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [web, python]
     timeout-minutes: 40
     env:

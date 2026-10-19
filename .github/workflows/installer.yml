@@ -47,7 +47,7 @@ jobs:
   version:
     name: Tag matches package.json
     if: inputs.tag != '' || github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,7 +168,7 @@ jobs:
     name: Draft release
     needs: installer
     if: inputs.tag != '' || github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The only job that may write to the repository, and only for a tag that passed everything above.
     permissions:
       contents: write
