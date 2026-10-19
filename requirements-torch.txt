@@ -4,4 +4,4 @@
 torch
 torchvision
 rfdetr>=1.11       # Apache-2.0
-onnx>=1.16
+onnx>=1.23.2
