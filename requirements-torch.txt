@@ -3,5 +3,5 @@
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 torch
 torchvision
-rfdetr>=1.11       # Apache-2.0
+rfdetr>=1.11.2       # Apache-2.0
 onnx>=1.23.2
