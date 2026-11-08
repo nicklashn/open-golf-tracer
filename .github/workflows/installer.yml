@@ -186,7 +186,7 @@ jobs:
           # otherwise a draft is made.
           state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
           echo "state=$state" >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ env.TAG }}
           draft: ${{ steps.existing.outputs.state != 'published' }}
